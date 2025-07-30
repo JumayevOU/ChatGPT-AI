@@ -1,0 +1,63 @@
+2025-07-29 18:09:35,087 - __main__ - INFO - Bot is running in polling mode
+2025-07-29 18:09:35,088 - __main__ - INFO - Starting bot...
+2025-07-29 18:09:35,089 - aiogram.dispatcher - INFO - Start polling
+2025-07-29 18:09:35,189 - aiogram.dispatcher - INFO - Run polling for bot @tramplin5_bot id=7574290945 - 'Test Bot'
+2025-07-29 18:09:45,093 - aiogram.event - INFO - Update id=460988960 is handled. Duration 390 ms by bot id=7574290945
+2025-07-29 18:09:49,702 - httpx - INFO - HTTP Request: POST https://api.mistral.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2025-07-29 18:09:50,065 - aiogram.event - INFO - Update id=460988961 is handled. Duration 1625 ms by bot id=7574290945
+2025-07-29 18:10:11,556 - httpx - INFO - HTTP Request: POST https://api.mistral.ai/v1/chat/completions "HTTP/1.1 200 OK"
+2025-07-29 18:10:11,838 - aiogram.event - INFO - Update id=460988962 is handled. Duration 11718 ms by bot id=7574290945
+2025-07-29 18:10:55,362 - __main__ - ERROR - Photo processing error: Telegram server says - Bad Request: wrong file_id or the file is temporarily unavailable
+Traceback (most recent call last):
+  File "C:\Users\Acer\Desktop\gpt\main.py", line 259, in handle_photo
+    image_data = await bot.download(file.file_path)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 462, in download
+    file_ = await self.get_file(file_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 1717, in get_file
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 482, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\base.py", line 254, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\aiohttp.py", line 185, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: wrong file_id or the file is temporarily unavailable
+2025-07-29 18:10:55,762 - aiogram.event - INFO - Update id=460988963 is handled. Duration 782 ms by bot id=7574290945
+2025-07-29 18:12:06,693 - __main__ - ERROR - Photo processing error: Telegram server says - Bad Request: wrong file_id or the file is temporarily unavailable
+Traceback (most recent call last):
+  File "C:\Users\Acer\Desktop\gpt\main.py", line 259, in handle_photo
+    image_data = await bot.download(file.file_path)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 462, in download
+    file_ = await self.get_file(file_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 1717, in get_file
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\bot.py", line 482, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\base.py", line 254, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\aiohttp.py", line 185, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Acer\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiogram\client\session\base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: wrong file_id or the file is temporarily unavailable
+2025-07-29 18:12:07,056 - aiogram.event - INFO - Update id=460988964 is handled. Duration 765 ms by bot id=7574290945
+2025-07-29 18:12:22,435 - aiogram.dispatcher - INFO - Polling stopped
+2025-07-29 18:12:22,436 - __main__ - INFO - Shutting down bot...
+2025-07-29 18:12:22,439 - aiogram.dispatcher - ERROR - Failed to fetch updates - TelegramNetworkError: HTTP Client says - ServerDisconnectedError: Server disconnected
+2025-07-29 18:12:22,439 - aiogram.dispatcher - WARNING - Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 7574290945)
+2025-07-29 18:12:22,642 - aiogram.dispatcher - INFO - Polling stopped for bot @tramplin5_bot id=7574290945 - 'Test Bot'
+2025-07-29 18:12:22,648 - __main__ - INFO - Bot stopped by user

@@ -1,4 +1,8 @@
-aiogram==3.1.1
+aiogram
 mistralai
 pydantic
 python-dotenv
+aiohttp
+flask
+
+
