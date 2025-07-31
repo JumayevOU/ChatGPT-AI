@@ -118,9 +118,18 @@ async def handle_users_command(message: Message):
     try:
         user_ids = load_user_ids()
         total_users = len(user_ids)
-        await message.answer(f"📊 Hozirgi bot foydalanuvchilari soni: <b>{total_users}</b>", parse_mode=ParseMode.HTML)
+
+        text = (
+            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
+            f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n"
+            "🕵️‍♂️ Har bir foydalanuvchi men bilan tanishib chiqqan! 😊\n\n"
+            "📅 Statistikani yangilash: <i>real vaqtda</i>"
+        )
+
+        await message.answer(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
