@@ -12,7 +12,8 @@ from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
-import aiohttp 
+import aiohttp
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
@@ -55,6 +56,10 @@ def save_user_id(user_id: int):
         with open(USERS_FILE, "w") as f:
             json.dump(user_ids, f, indent=4)
 
+def save_user_ids_list(user_ids: list):
+    with open(USERS_FILE, "w") as f:
+        json.dump(user_ids, f, indent=4)
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     save_user_id(message.from_user.id)
@@ -84,18 +89,38 @@ async def handle_sendall(message: Message):
         return
 
     user_ids = load_user_ids()
+    updated_user_ids = []
     success, fail = 0, 0
 
     for user_id in user_ids:
         try:
             await bot.send_message(user_id, text_to_send)
+            updated_user_ids.append(user_id)
             success += 1
             await asyncio.sleep(0.05)
+        except (TelegramForbiddenError, TelegramNotFound):
+            logger.warning(f"❌ Bot bloklangan yoki foydalanuvchi topilmadi: {user_id}")
+            fail += 1
         except Exception as e:
             logger.warning(f"Xatolik: {user_id} - {e}")
+            updated_user_ids.append(user_id)
             fail += 1
 
-    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta foydalanuvchiga yuborilmadi.")
+    save_user_ids_list(updated_user_ids)
+
+    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas).")
+
+@dp.message(Command("users"))
+async def handle_users_command(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+    
+    try:
+        user_ids = load_user_ids()
+        total_users = len(user_ids)
+        await message.answer(f"📊 Hozirgi bot foydalanuvchilari soni: <b>{total_users}</b>", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
@@ -126,7 +151,6 @@ async def handle_text(message: Message):
         await message.answer(
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
-
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
