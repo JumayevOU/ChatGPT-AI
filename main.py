@@ -127,7 +127,7 @@ async def handle_text(message: Message):
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
 
-# ✅ OCR FUNKSIYASI
+
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
     headers = {"apikey": OCR_API_KEY}
