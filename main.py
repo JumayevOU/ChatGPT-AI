@@ -6,11 +6,12 @@ import json
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import Message, BotCommand
 from aiogram.filters import Command, CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommandScopeChat
 from dotenv import load_dotenv
 import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
@@ -131,20 +132,15 @@ async def handle_users_command(message: Message):
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 
-@dp.message(F.text == "/")
-async def admin_root_menu(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return  
-
-    text = (
-        "🛠 <b>Admin menyusi</b>\n\n"
-        "📊 /users - Foydalanuvchilar soni\n"
-        "📤 /send - Barchaga xabar yuborish\n"
+@dp.startup()
+async def on_startup(bot: Bot):
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="send", description="Barchaga xabar yuborish"),
+            BotCommand(command="users", description="Foydalanuvchilar soni"),
+        ],
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-
-
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
