@@ -131,6 +131,21 @@ async def handle_users_command(message: Message):
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 
+@dp.message(F.text == "/")
+async def admin_root_menu(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return  
+
+    text = (
+        "🛠 <b>Admin menyusi</b>\n\n"
+        "📊 /users - Foydalanuvchilar soni\n"
+        "📤 /send - Barchaga xabar yuborish\n"
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     if len(message.text) > 5000:
