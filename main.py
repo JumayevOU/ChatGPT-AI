@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message, BotCommand
+from aiogram.types import Message, BotCommand, FSInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -131,6 +131,17 @@ async def handle_users_command(message: Message):
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
+@dp.message(Command("dump_users"))
+async def handle_dump_users(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+
+    file_path = USERS_FILE
+    if not os.path.exists(file_path):
+        return await message.answer("📂 Foydalanuvchilar fayli topilmadi.")
+
+    file_to_send = FSInputFile(file_path)
+    await message.answer_document(file_to_send, caption="📄 `user_ids.json` fayli tayyor!")
 
 @dp.startup()
 async def on_startup(bot: Bot):
@@ -138,6 +149,7 @@ async def on_startup(bot: Bot):
         commands=[
             BotCommand(command="send", description="Barchaga xabar yuborish"),
             BotCommand(command="users", description="Foydalanuvchilar soni"),
+            BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
         ],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
