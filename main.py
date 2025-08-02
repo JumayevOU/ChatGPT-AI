@@ -147,6 +147,7 @@ async def handle_dump_users(message: Message):
 async def on_startup(bot: Bot):
     await bot.set_my_commands(
         commands=[
+            BotCommand(command="start", description="Botni ishga tushirish"),
             BotCommand(command="send", description="Barchaga xabar yuborish"),
             BotCommand(command="users", description="Foydalanuvchilar soni"),
             BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
