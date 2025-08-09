@@ -155,6 +155,10 @@ async def on_startup(bot: Bot):
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
 
+def add_emoji_instruction_to_prompt(text: str) -> str:
+
+    return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     if len(message.text) > 5000:
@@ -169,7 +173,8 @@ async def handle_text(message: Message):
 
     try:
         update_chat_history(chat_id, message.text)
-        reply = await get_mistral_reply(chat_id, message.text)
+        prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
         await bot.delete_message(chat_id, loading.message_id)
@@ -224,7 +229,8 @@ async def handle_photo(message: Message):
             return
 
         update_chat_history(chat_id, text)
-        reply = await get_mistral_reply(chat_id, text)
+        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
         await bot.delete_message(chat_id, loading.message_id)
