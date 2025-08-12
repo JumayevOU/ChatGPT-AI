@@ -3,58 +3,52 @@ import asyncio
 import logging
 import json
 import asyncpg
-from aiogram import Router, F,types
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
-from aiogram.filters import Command, CommandStart
+from aiogram import Router, F, types
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, ReplyKeyboardRemove
+from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from dotenv import load_dotenv
 from typing import List, Dict, Any
 
-# Konfiguratsiya
 load_dotenv()
+
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Logging sozlamalari
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Database connection pool
 pool: asyncpg.Pool = None
 
-# Admin klaviaturasi
 admin_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
     keyboard=[
-        [KeyboardButton("📊 Statistikalar"), KeyboardButton("📤 Xabar yuborish")],
-        [KeyboardButton("👥 Foydalanuvchilar"), KeyboardButton("➕ Admin qo'shish")],
-        [KeyboardButton("🏆 Faol foydalanuvchilar")]
+        [KeyboardButton(text="📊 Statistikalar"), KeyboardButton(text="📤 Xabar yuborish")],
+        [KeyboardButton(text="👥 Foydalanuvchilar"), KeyboardButton(text="➕ Admin qo'shish")],
+        [KeyboardButton(text="🏆 Faol foydalanuvchilar")]
     ]
 )
 
 async def get_db_pool() -> asyncpg.Pool:
-    """Ma'lumotlar bazasi ulanishini olish"""
     global pool
     if pool is None:
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
 async def execute_query(query: str, *args) -> None:
-    """Bazaga so'rov yuborish"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(query, *args)
 
 async def fetch_query(query: str, *args) -> List[Dict[str, Any]]:
-    """Ma'lumotlarni olish"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        return await conn.fetch(query, *args)
+        records = await conn.fetch(query, *args)
+        return [dict(record) for record in records]
 
 async def fetch_value(query: str, *args) -> Any:
-    """Bitta qiymatni olish"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval(query, *args)
@@ -63,17 +57,14 @@ async def fetch_value(query: str, *args) -> Any:
 
 @router.message(CommandStart())
 async def admin_start(message: Message):
-    """Admin panelini boshlash"""
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.answer("👋 Admin paneliga xush kelibsiz!", reply_markup=admin_kb)
 
 @router.message(F.text == "📊 Statistikalar")
 async def show_stats(message: Message):
-    """Statistikalarni ko'rsatish"""
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     try:
         count = await fetch_value("SELECT COUNT(*) FROM users WHERE is_active = TRUE")
         await message.answer(f"👥 Faol foydalanuvchilar: <b>{count}</b> ta", parse_mode="HTML")
@@ -83,18 +74,14 @@ async def show_stats(message: Message):
 
 @router.message(F.text == "📤 Xabar yuborish")
 async def start_broadcast(message: Message):
-    """Xabar yuborishni boshlash"""
     if message.from_user.id not in ADMIN_IDS:
         return
-    
-    await message.answer("✍️ Xabar matnini kiriting:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("✍️ Xabar matnini kiriting:", reply_markup=ReplyKeyboardRemove())
 
-    @router.message(F.text)
+    # Ichki handlerni alohida funksiya sifatida yozamiz
     async def process_broadcast(msg: Message):
-        """Xabarni barchaga yuborish"""
         if msg.from_user.id not in ADMIN_IDS:
             return
-        
         text = msg.text.strip()
         if not text:
             await msg.answer("❗ Xabar bo'sh bo'lmasligi kerak!")
@@ -123,17 +110,17 @@ async def start_broadcast(message: Message):
         )
         router.message.unregister(process_broadcast)
 
+    router.message.register(process_broadcast, F.text)
+
 @router.message(F.text == "👥 Foydalanuvchilar")
 async def export_users(message: Message):
-    """Foydalanuvchilar ro'yxatini yuklab olish"""
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     try:
         users = await fetch_query("SELECT user_id, username FROM users WHERE is_active = TRUE")
         temp_file = "users.json"
         with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump([dict(u) for u in users], f, indent=4, ensure_ascii=False)
+            json.dump(users, f, indent=4, ensure_ascii=False)
         
         await message.answer_document(
             FSInputFile(temp_file),
@@ -147,18 +134,13 @@ async def export_users(message: Message):
 
 @router.message(F.text == "➕ Admin qo'shish")
 async def add_admin_prompt(message: Message):
-    """Yangi admin qo'shish"""
     if message.from_user.id not in ADMIN_IDS:
         return
-    
-    await message.answer("🆔 Yangi admin ID sini kiriting:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("🆔 Yangi admin ID sini kiriting:", reply_markup=ReplyKeyboardRemove())
 
-    @router.message(F.text)
     async def process_admin_add(msg: Message):
-        """Admin qo'shishni amalga oshirish"""
         if msg.from_user.id not in ADMIN_IDS:
             return
-        
         try:
             admin_id = int(msg.text.strip())
             await execute_query(
@@ -171,17 +153,15 @@ async def add_admin_prompt(message: Message):
         except Exception as e:
             logger.error(f"Admin qo'shish xatosi: {e}")
             await msg.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.", reply_markup=admin_kb)
-        
         router.message.unregister(process_admin_add)
+
+    router.message.register(process_admin_add, F.text)
 
 @router.message(F.text == "🏆 Faol foydalanuvchilar")
 async def show_top_users(message: Message):
-    """Eng faol foydalanuvchilarni ko'rsatish"""
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     try:
-        # 2 haftalik top 5
         two_weeks = await fetch_query('''
             SELECT user_id, username, COUNT(*) as activity_count
             FROM user_activity
@@ -191,8 +171,6 @@ async def show_top_users(message: Message):
             ORDER BY activity_count DESC
             LIMIT 5
         ''')
-        
-        # 1 oylik top 10
         one_month = await fetch_query('''
             SELECT user_id, username, COUNT(*) as activity_count
             FROM user_activity
@@ -202,20 +180,17 @@ async def show_top_users(message: Message):
             ORDER BY activity_count DESC
             LIMIT 10
         ''')
-        
+
         def format_stats(data, title):
             text = f"🏆 <b>{title}</b>\n\n"
             for i, user in enumerate(data, 1):
                 name = user['username'] or f"ID:{user['user_id']}"
                 text += f"{i}. {name} - {user['activity_count']} marta\n"
             return text
-        
+
         response = (
-            format_stats(two_weeks, "2 haftalik top 5") + 
-            "\n\n" + 
-            format_stats(one_month, "1 oylik top 10")
+            format_stats(two_weeks, "2 haftalik top 5") + "\n\n" + format_stats(one_month, "1 oylik top 10")
         )
-        
         await message.answer(response, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Top foydalanuvchilar xatosi: {e}")
