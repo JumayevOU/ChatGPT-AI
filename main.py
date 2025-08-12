@@ -64,9 +64,9 @@ async def create_users_table():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY
-            )
+            );
         ''')
-        # Faollik jadvali
+       
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -74,6 +74,7 @@ async def create_users_table():
                 username VARCHAR(100),
                 activity_time TIMESTAMP DEFAULT NOW(),
                 activity_type VARCHAR(50)
+            );
         ''')
         
         await conn.execute('''
