@@ -15,6 +15,7 @@ from aiogram.types import BotCommandScopeChat
 from dotenv import load_dotenv
 import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+import asyncpg  
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
@@ -23,7 +24,7 @@ from utils.history import update_chat_history, clear_user_history
 load_dotenv()
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 OCR_API_KEY = os.getenv("OCR_API_KEY")
-USERS_FILE = "user_ids.json"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,27 +44,83 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-def load_user_ids():
-    try:
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+async def create_db_pool():
+    return await asyncpg.create_pool(DATABASE_URL)
 
-def save_user_id(user_id: int):
-    user_ids = load_user_ids()
-    if user_id not in user_ids:
-        user_ids.append(user_id)
-        with open(USERS_FILE, "w") as f:
-            json.dump(user_ids, f, indent=4)
+async def create_users_table():
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100),
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
+            )
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY
+            )
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                username VARCHAR(100),
+                activity_time TIMESTAMP DEFAULT NOW(),
+                activity_type VARCHAR(50)
+        ''')
+        
+        await conn.execute('''
+            INSERT INTO admins (user_id) VALUES ($1)
+            ON CONFLICT DO NOTHING
+        ''', ADMIN_ID)
 
-def save_user_ids_list(user_ids: list):
-    with open(USERS_FILE, "w") as f:
-        json.dump(user_ids, f, indent=4)
+async def save_user(user_id: int, username: str = None):
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users (user_id, username, last_seen)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET 
+                username = EXCLUDED.username,
+                last_seen = NOW(),
+                is_active = TRUE
+        ''', user_id, username)
+
+async def log_user_activity(user_id: int, username: str, activity_type: str):
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO user_activity (user_id, username, activity_type)
+            VALUES ($1, $2, $3)
+        ''', user_id, username, activity_type)
+
+async def get_all_users():
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
+
+async def deactivate_user(user_id: int):
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+
+async def get_users_count():
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    save_user_id(message.from_user.id)
+    await save_user(message.from_user.id, message.from_user.username)
+    await log_user_activity(message.from_user.id, message.from_user.username, "start")
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
@@ -73,8 +130,8 @@ async def handle_start(message: Message):
         "➤ Ijtimoiy va madaniy masalalar\n"
         "➤ Hujjatlar va yozuvlar\n"
         "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
-        "➤ Rasm ko‘rinishida savol yuborsangiz — matnni o‘qib, yechimini to‘liq tushuntirib beraman\n"
-        "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o‘qib, tushunaman va yechim topib beraman.\n\n"
+        "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n"
+        "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o'qib, tushunaman va yechim topib beraman.\n\n"
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
@@ -89,27 +146,103 @@ async def handle_sendall(message: Message):
         await message.answer("✍️ Yuboriladigan xabarni ham yozing: /send Xabar matni")
         return
 
-    user_ids = load_user_ids()
-    updated_user_ids = []
+    user_ids = await get_all_users()
     success, fail = 0, 0
 
-    for user_id in user_ids:
+    for record in user_ids:
+        user_id = record['user_id']
         try:
             await bot.send_message(user_id, text_to_send)
-            updated_user_ids.append(user_id)
             success += 1
             await asyncio.sleep(0.05)
         except (TelegramForbiddenError, TelegramNotFound):
             logger.warning(f"❌ Bot bloklangan yoki foydalanuvchi topilmadi: {user_id}")
+            await deactivate_user(user_id)
             fail += 1
         except Exception as e:
             logger.warning(f"Xatolik: {user_id} - {e}")
-            updated_user_ids.append(user_id)
             fail += 1
 
-    save_user_ids_list(updated_user_ids)
-
     await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas).")
+
+@dp.message(Command("pm"))
+async def handle_pm(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Bu buyruq faqat admin uchun")
+    
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            return await message.answer("❗ Format: /pm <ID yoki @username> <xabar>")
+        
+        identifier, text = parts[1], parts[2]
+        
+        if identifier.startswith('@'):
+            pool = await create_db_pool()
+            async with pool.acquire() as conn:
+                user_id = await conn.fetchval(
+                    'SELECT user_id FROM users WHERE username = $1', 
+                    identifier[1:]
+                )
+            if not user_id:
+                return await message.answer("❌ Foydalanuvchi topilmadi")
+        else:
+            try:
+                user_id = int(identifier)
+            except ValueError:
+                return await message.answer("❗ Noto'g'ri ID format")
+        
+        await bot.send_message(
+            user_id,
+            f"📨 <b>Admin xabari:</b>\n\n{text}\n\n",
+            parse_mode=ParseMode.HTML
+        )
+        await message.answer(f"✅ Xabar {identifier} ga yuborildi")
+        
+    except Exception as e:
+        logger.error(f"PM xatosi: {e}")
+        await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring")
+
+@dp.message(Command("top"))
+async def handle_top(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Bu buyruq faqat admin uchun")
+    
+    pool = await create_db_pool()
+    async with pool.acquire() as conn:
+        two_weeks_top = await conn.fetch('''
+            SELECT user_id, username, COUNT(*) as activity_count
+            FROM user_activity
+            WHERE activity_time >= NOW() - INTERVAL '14 days'
+            AND user_id NOT IN (SELECT user_id FROM admins)
+            GROUP BY user_id, username
+            ORDER BY activity_count DESC
+            LIMIT 5
+        ''')
+        
+        one_month_top = await conn.fetch('''
+            SELECT user_id, username, COUNT(*) as activity_count
+            FROM user_activity
+            WHERE activity_time >= NOW() - INTERVAL '30 days'
+            AND user_id NOT IN (SELECT user_id FROM admins)
+            GROUP BY user_id, username
+            ORDER BY activity_count DESC
+            LIMIT 10
+        ''')
+    
+    def format_table(data, title):
+        result = f"🏆 <b>{title}</b>\n\n"
+        for i, row in enumerate(data, 1):
+            username = row['username'] or f"ID:{row['user_id']}"
+            result += f"{i}. {username} - {row['activity_count']} marta\n"
+        return result
+    
+    response = (
+        format_table(two_weeks_top, "So'nggi 2 hafta top 5") + "\n\n" +
+        format_table(one_month_top, "So'nggi 1 oy top 10")
+    )
+    
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("users"))
 async def handle_users_command(message: Message):
@@ -117,8 +250,7 @@ async def handle_users_command(message: Message):
         return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
     
     try:
-        user_ids = load_user_ids()
-        total_users = len(user_ids)
+        total_users = await get_users_count()
 
         text = (
             "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
@@ -136,27 +268,52 @@ async def handle_dump_users(message: Message):
     if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
 
-    file_path = USERS_FILE
-    if not os.path.exists(file_path):
-        return await message.answer("📂 Foydalanuvchilar fayli topilmadi.")
+    try:
+        users = await get_all_users()
+        temp_file = "temp_users.json"
+        with open(temp_file, "w") as f:
+            json.dump([dict(user) for user in users], f, indent=4)
+        
+        file_to_send = FSInputFile(temp_file)
+        await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati")
+        os.remove(temp_file)
+    except Exception as e:
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
 
-    file_to_send = FSInputFile(file_path)
-    await message.answer_document(file_to_send, caption="📄 user_ids.json fayli tayyor!")
+@dp.message(Command("add_admin"))
+async def handle_add_admin(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Bu buyruq faqat admin uchun")
+    
+    try:
+        new_admin_id = int(message.text.split()[1])
+        pool = await create_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO admins (user_id) VALUES ($1)
+                ON CONFLICT DO NOTHING
+            ''', new_admin_id)
+        await message.answer(f"✅ {new_admin_id} admin qilindi")
+    except:
+        await message.answer("❗ /add_admin 1234567")
 
 @dp.startup()
 async def on_startup(bot: Bot):
+    await create_users_table()
     await bot.set_my_commands(
         commands=[
             BotCommand(command="start", description="Botni ishga tushirish"),
             BotCommand(command="send", description="Barchaga xabar yuborish"),
+            BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
+            BotCommand(command="top", description="Eng faol foydalanuvchilar"),
             BotCommand(command="users", description="Foydalanuvchilar soni"),
             BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
+            BotCommand(command="add_admin", description="Yangi admin qo'shish"),
         ],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
-
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 @dp.message(F.text & ~F.text.startswith("/"))
@@ -167,7 +324,8 @@ async def handle_text(message: Message):
 
     user_id = message.from_user.id
     chat_id = message.chat.id
-    save_user_id(user_id)
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "text_message")
 
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
@@ -212,7 +370,8 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 async def handle_photo(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    save_user_id(user_id)
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "photo_message")
 
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
@@ -246,26 +405,28 @@ async def handle_photo(message: Message):
 
 async def notify_inactive_users():
     while True:
-        await asyncio.sleep(3600 * 24 * 7)  
-        user_ids = load_user_ids()
-        active_users = []
-        inactive_users = []
+        await asyncio.sleep(3600 * 24 * 7)
+        pool = await create_db_pool()
+        async with pool.acquire() as conn:
+            inactive_users = await conn.fetch('''
+                SELECT user_id FROM users 
+                WHERE last_seen < NOW() - INTERVAL '7 days' 
+                AND is_active = TRUE
+            ''')
 
-        for user_id in user_ids:
-            try:
-                await bot.send_message(
-                    user_id,
-                    "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
-                )
-                active_users.append(user_id)
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                inactive_users.append(user_id)
-                logger.warning(f"{user_id} ga xabar yuborishda xatolik: {e}")
-
-        logger.info(f"✅ Xabar yuborilgan foydalanuvchilar: {len(active_users)} ta")
-        logger.info(f"❌ Xabar yuborilmagan foydalanuvchilar: {len(inactive_users)} ta")
-
+            for record in inactive_users:
+                user_id = record['user_id']
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
+                    )
+                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
+                    await asyncio.sleep(0.1)
+                except (TelegramForbiddenError, TelegramNotFound):
+                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+                except Exception as e:
+                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
 async def main():
     await bot(DeleteWebhook(drop_pending_updates=True))

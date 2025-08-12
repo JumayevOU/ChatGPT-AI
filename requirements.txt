@@ -1,8 +1,10 @@
 aiogram
 mistralai
-pydantic
+pydantic>=2.0
 python-dotenv
 aiohttp
 flask
+asyncpg
+
 
 
