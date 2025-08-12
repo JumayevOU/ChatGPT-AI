@@ -68,13 +68,15 @@ async def create_users_table():
         ''')
         
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_activity (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                username VARCHAR(100),
-                activity_time TIMESTAMP DEFAULT NOW(),
-                activity_type VARCHAR(50)
-        ''')
+    CREATE TABLE IF NOT EXISTS user_activity (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT REFERENCES users(user_id),
+        username VARCHAR(100),
+        activity_time TIMESTAMP DEFAULT NOW(),
+        activity_type VARCHAR(50)
+    )
+''')
+
         
         await conn.execute('''
             INSERT INTO admins (user_id) VALUES ($1)
