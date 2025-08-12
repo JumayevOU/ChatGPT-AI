@@ -44,11 +44,19 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+# GLOBAL connection pool
+pool = None
+
 async def create_db_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
 
 async def create_users_table():
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
        
         await conn.execute('''
@@ -83,7 +91,7 @@ async def create_users_table():
         ''', ADMIN_ID)
 
 async def save_user(user_id: int, username: str = None):
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO users (user_id, username, last_seen)
@@ -96,7 +104,7 @@ async def save_user(user_id: int, username: str = None):
         ''', user_id, username)
 
 async def log_user_activity(user_id: int, username: str, activity_type: str):
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO user_activity (user_id, username, activity_type)
@@ -104,17 +112,17 @@ async def log_user_activity(user_id: int, username: str, activity_type: str):
         ''', user_id, username, activity_type)
 
 async def get_all_users():
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
 
 async def deactivate_user(user_id: int):
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
 async def get_users_count():
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
@@ -179,7 +187,7 @@ async def handle_pm(message: Message):
         identifier, text = parts[1], parts[2]
         
         if identifier.startswith('@'):
-            pool = await create_db_pool()
+            global pool
             async with pool.acquire() as conn:
                 user_id = await conn.fetchval(
                     'SELECT user_id FROM users WHERE username = $1', 
@@ -209,7 +217,7 @@ async def handle_top(message: Message):
     if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Bu buyruq faqat admin uchun")
     
-    pool = await create_db_pool()
+    global pool
     async with pool.acquire() as conn:
         two_weeks_top = await conn.fetch('''
             SELECT user_id, username, COUNT(*) as activity_count
@@ -288,7 +296,7 @@ async def handle_add_admin(message: Message):
     
     try:
         new_admin_id = int(message.text.split()[1])
-        pool = await create_db_pool()
+        global pool
         async with pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO admins (user_id) VALUES ($1)
@@ -300,6 +308,7 @@ async def handle_add_admin(message: Message):
 
 @dp.startup()
 async def on_startup(bot: Bot):
+    await create_db_pool()
     await create_users_table()
     await bot.set_my_commands(
         commands=[
@@ -407,7 +416,7 @@ async def handle_photo(message: Message):
 async def notify_inactive_users():
     while True:
         await asyncio.sleep(3600 * 24 * 7)
-        pool = await create_db_pool()
+        global pool
         async with pool.acquire() as conn:
             inactive_users = await conn.fetch('''
                 SELECT user_id FROM users 
