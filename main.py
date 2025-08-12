@@ -2,16 +2,15 @@ import asyncio
 import logging
 import random
 import os
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
-from aiogram.types import Message
-from aiogram.filters import CommandStart
+from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.filters import CommandStart, Command
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import aiohttp
-
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
@@ -20,12 +19,13 @@ from admin import router as admin_router
 
 load_dotenv()
 
-
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
-
 
 session = AiohttpSession()
 bot = Bot(
@@ -47,7 +47,11 @@ error_messages = [
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     if message.from_user.id in ADMIN_IDS:
-
+        
+        await message.answer(
+            "👋 Admin paneliga xush kelibsiz!",
+            reply_markup=ReplyKeyboardRemove()
+        )
         return
 
     await message.answer(
@@ -61,14 +65,31 @@ async def handle_start(message: Message):
         "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
         "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n"
         "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o'qib, tushunaman va yechim topib beraman.\n\n"
-        "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
+        "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?",
+        reply_markup=ReplyKeyboardRemove()
     )
+
+@dp.message(Command("admin"))
+async def admin_command(message: Message):
+    """Admin panelni ochish"""
+    if message.from_user.id in ADMIN_IDS:
+        from admin import admin_kb  
+        await message.answer(
+            "📋 Admin paneli menyusi:",
+            reply_markup=admin_kb
+        )
+    else:
+        await message.answer("⚠️ Sizga ruxsat yo'q!")
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
+    if message.from_user.id in ADMIN_IDS:
+        
+        return
+    
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
@@ -86,7 +107,7 @@ async def handle_text(message: Message):
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"[Xatolik] {e}")
+        logger.error(f"[Xatolik] {e}", exc_info=True)
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
@@ -116,6 +137,10 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
+    if message.from_user.id in ADMIN_IDS:
+        
+        return
+    
     chat_id = message.chat.id
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
@@ -140,7 +165,7 @@ async def handle_photo(message: Message):
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"[OCR xatolik] {e}")
+        logger.error(f"[OCR xatolik] {e}", exc_info=True)
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
