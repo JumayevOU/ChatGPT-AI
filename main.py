@@ -50,7 +50,7 @@ async def create_db_pool():
 async def create_users_table():
     pool = await create_db_pool()
     async with pool.acquire() as conn:
-        # Asosiy foydalanuvchilar jadvali
+       
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -58,9 +58,9 @@ async def create_users_table():
                 created_at TIMESTAMP DEFAULT NOW(),
                 last_seen TIMESTAMP,
                 is_active BOOLEAN DEFAULT TRUE
-            )
+            );
         ''')
-        # Adminlar jadvali
+      
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY
@@ -75,7 +75,7 @@ async def create_users_table():
                 activity_time TIMESTAMP DEFAULT NOW(),
                 activity_type VARCHAR(50)
         ''')
-        # Dastlabki adminni qo'shish
+        
         await conn.execute('''
             INSERT INTO admins (user_id) VALUES ($1)
             ON CONFLICT DO NOTHING
