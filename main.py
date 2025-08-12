@@ -66,7 +66,15 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS user_activity (
                 activity_id SERIAL PRIMARY KEY,
                 user_id BIGINT REFERENCES users(user_id),
-                activity_time TIMESTAMP DEFAULT NOW()
+                username VARCHAR(32),
+                activity_time TIMESTAMP DEFAULT NOW(),
+                activity_type VARCHAR(50)
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+                added_at TIMESTAMP DEFAULT NOW()
             )
         ''')
     logger.info("Database tables initialized")
@@ -79,21 +87,25 @@ async def save_user(user_id: int, username: str):
             INSERT INTO users (user_id, username, last_seen, is_active)
             VALUES ($1, $2, NOW(), TRUE)
             ON CONFLICT (user_id) DO UPDATE SET
-            username = EXCLUDED.username,
-            last_seen = NOW(),
-            is_active = TRUE
+                username = EXCLUDED.username,
+                last_seen = NOW(),
+                is_active = TRUE
         ''', user_id, username)
 
-async def log_activity(user_id: int):
+async def log_activity(user_id: int, username: str = None, activity_type: str = "message"):
     """Log user activity"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # First ensure user exists
-        await save_user(user_id, "")
-        # Then log activity
+        # Save or update user with current username if provided
+        if username is not None:
+            await save_user(user_id, username)
+        else:
+            # Save with empty username if none provided
+            await save_user(user_id, "")
+        # Log activity with username and type
         await conn.execute('''
-            INSERT INTO user_activity (user_id) VALUES ($1)
-        ''', user_id)
+            INSERT INTO user_activity (user_id, username, activity_type) VALUES ($1, $2, $3)
+        ''', user_id, username or "", activity_type)
 
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
@@ -140,8 +152,8 @@ def add_emoji_instruction_to_prompt(text: str) -> str:
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
-    # Save user activity
-    await log_activity(message.from_user.id)
+    # Save user activity with username
+    await log_activity(message.from_user.id, message.from_user.username)
     
     if message.from_user.id in ADMIN_IDS:
         return
@@ -193,8 +205,8 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    # Save user activity
-    await log_activity(message.from_user.id)
+    # Save user activity with username
+    await log_activity(message.from_user.id, message.from_user.username)
     
     if message.from_user.id in ADMIN_IDS:
         return
