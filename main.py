@@ -12,14 +12,20 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import aiohttp
 
+
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
+from admin import router as admin_router
 
 load_dotenv()
 
+
+ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 session = AiohttpSession()
 bot = Bot(
@@ -28,6 +34,8 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
+
+dp.include_router(admin_router)
 
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
@@ -38,6 +46,10 @@ error_messages = [
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
+    if message.from_user.id in ADMIN_IDS:
+
+        return
+
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
