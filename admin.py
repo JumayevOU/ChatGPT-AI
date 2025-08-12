@@ -9,7 +9,10 @@ from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.enums import ParseMode
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
+
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 
 load_dotenv()
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
@@ -36,7 +39,6 @@ async def init_db():
     try:
         pool = await get_db_pool()
         
-        # Create tables if they don't exist
         async with pool.acquire() as conn:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -48,7 +50,7 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
-            
+
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_activity (
                     activity_id SERIAL PRIMARY KEY,
@@ -56,14 +58,14 @@ async def init_db():
                     activity_time TIMESTAMP DEFAULT NOW()
                 )
             ''')
-            
+
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS admins (
                     user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
                     added_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
-            
+
         logger.info("Database tables initialized")
         return pool
     except Exception as e:
@@ -97,18 +99,33 @@ async def fetch_value(query: str, *args) -> Any:
             logger.error(f"Fetch value failed: {e}")
             raise
 
-# Admin keyboard
+# --- FSM States ---
+
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_confirmation = State()
+
+class AddAdminStates(StatesGroup):
+    waiting_for_admin_id = State()
+
+class SendMessageToUserStates(StatesGroup):
+    waiting_for_user_identifier = State()
+    waiting_for_message = State()
+
+# --- Admin keyboard ---
+
 admin_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Statistikalar"), KeyboardButton(text="📤 Xabar yuborish")],
-        [KeyboardButton(text="👥 Foydalanuvchilar"), KeyboardButton(text="➕ Admin qo'shish")],
-        [KeyboardButton(text="🏆 Faol foydalanuvchilar")]
+        [KeyboardButton(text="📨 Bitta foydalanuvchiga xabar"), KeyboardButton(text="👥 Foydalanuvchilar")],
+        [KeyboardButton(text="➕ Admin qo'shish"), KeyboardButton(text="🏆 Faol foydalanuvchilar")]
     ],
     resize_keyboard=True,
     input_field_placeholder="Admin paneli"
 )
 
-# Admin decorator
+# --- Admin decorator ---
+
 def admin_required(func):
     async def wrapper(message: Message, *args, **kwargs):
         if message.from_user.id not in ADMIN_IDS:
@@ -117,19 +134,13 @@ def admin_required(func):
         return await func(message, *args, **kwargs)
     return wrapper
 
+# --- Handlers ---
+
 @router.message(CommandStart())
 @admin_required
 async def admin_start(message: Message):
     await message.answer(
         "👋 Admin paneliga xush kelibsiz!",
-        reply_markup=admin_kb
-    )
-
-@router.message(Command("admin"))
-@admin_required
-async def admin_panel(message: Message):
-    await message.answer(
-        "📋 Admin paneli menyusi:",
         reply_markup=admin_kb
     )
 
@@ -162,62 +173,120 @@ async def show_stats(message: Message):
             reply_markup=admin_kb
         )
 
+# --- Xabar yuborish (barchaga) ---
+
 @router.message(F.text == "📤 Xabar yuborish")
 @admin_required
-async def start_broadcast(message: Message):
-    await message.answer(
-        "✍️ Yubormoqchi bo'lgan xabaringizni kiriting:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    router.message.register(process_broadcast, F.text & ~F.text.startswith('/'))
+async def start_broadcast(message: Message, state: FSMContext):
+    await message.answer("✍️ Yubormoqchi bo'lgan xabaringizni kiriting:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(BroadcastStates.waiting_for_message)
 
-async def process_broadcast(message: Message):
-    if not message.text or not message.text.strip():
-        await message.answer("❗ Xabar bo'sh bo'lmasligi kerak!", reply_markup=admin_kb)
-        router.message.unregister(process_broadcast)
+@router.message(BroadcastStates.waiting_for_message)
+@admin_required
+async def process_broadcast_message(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text:
+        await message.answer("❗ Xabar bo'sh bo'lmasligi kerak! Iltimos, qayta kiriting.")
         return
+    await state.update_data(broadcast_text=text)
     
     confirm_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="✅ Ha"), KeyboardButton(text="❌ Yo'q")]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    
-    await message.answer(
-        f"Quyidagi xabarni barchaga yuborishni tasdiqlaysizmi?\n\n{message.text}",
-        reply_markup=confirm_kb
-    )
-    router.message.register(confirm_broadcast, F.text.in_(["✅ Ha", "❌ Yo'q"]))
+    await message.answer(f"Quyidagi xabarni barchaga yuborishni tasdiqlaysizmi?\n\n{text}", reply_markup=confirm_kb)
+    await state.set_state(BroadcastStates.waiting_for_confirmation)
 
-async def confirm_broadcast(message: Message):
+@router.message(BroadcastStates.waiting_for_confirmation)
+@admin_required
+async def confirm_broadcast(message: Message, state: FSMContext):
     if message.text == "❌ Yo'q":
         await message.answer("❌ Xabar yuborish bekor qilindi.", reply_markup=admin_kb)
+        await state.clear()
+        return
+    if message.text != "✅ Ha":
+        await message.answer("Iltimos, ✅ Ha yoki ❌ Yo'q bilan javob bering.")
+        return
+
+    data = await state.get_data()
+    text = data.get("broadcast_text")
+
+    await message.answer("⏳ Xabar yuborilmoqda...", reply_markup=ReplyKeyboardRemove())
+
+    users = await fetch_query("SELECT user_id FROM users WHERE is_active = TRUE")
+    results = {"success": 0, "failed": 0}
+
+    for user in users:
+        try:
+            await message.bot.send_message(user['user_id'], text)
+            results["success"] += 1
+            await asyncio.sleep(0.1)
+        except (TelegramForbiddenError, TelegramNotFound):
+            await execute_query("UPDATE users SET is_active = FALSE WHERE user_id = $1", user['user_id'])
+            results["failed"] += 1
+        except Exception as e:
+            logger.error(f"Xabar yuborishda xato (ID: {user['user_id']}): {e}")
+            results["failed"] += 1
+
+    await message.answer(
+        f"📊 Natijalar:\n✅ {results['success']} ta foydalanuvchiga\n❌ {results['failed']} ta foydalanuvchiga yuborilmadi.",
+        reply_markup=admin_kb
+    )
+    await state.clear()
+
+# --- Bitta foydalanuvchiga xabar yuborish ---
+
+@router.message(F.text == "📨 Bitta foydalanuvchiga xabar")
+@admin_required
+async def start_send_single(message: Message, state: FSMContext):
+    await message.answer("🆔 Foydalanuvchi ID yoki @username ni kiriting:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(SendMessageToUserStates.waiting_for_user_identifier)
+
+@router.message(SendMessageToUserStates.waiting_for_user_identifier)
+@admin_required
+async def get_user_identifier(message: Message, state: FSMContext):
+    user_identifier = message.text.strip()
+    await state.update_data(user_identifier=user_identifier)
+    await message.answer("✍️ Xabar matnini kiriting:")
+    await state.set_state(SendMessageToUserStates.waiting_for_message)
+
+@router.message(SendMessageToUserStates.waiting_for_message)
+@admin_required
+async def send_message_to_user(message: Message, state: FSMContext):
+    text = message.text.strip()
+    data = await state.get_data()
+    user_identifier = data.get("user_identifier")
+
+    user_id = None
+    if user_identifier.startswith("@"):
+        username = user_identifier[1:]
+        user_id = await fetch_value("SELECT user_id FROM users WHERE username = $1", username)
+        if not user_id:
+            await message.answer(f"❌ @{username} topilmadi.", reply_markup=admin_kb)
+            await state.clear()
+            return
     else:
-        text = message.reply_to_message.text.split('\n\n')[-1]
-        await message.answer("⏳ Xabar yuborilmoqda...", reply_markup=ReplyKeyboardRemove())
-        
-        users = await fetch_query("SELECT user_id FROM users WHERE is_active = TRUE")
-        results = {"success": 0, "failed": 0}
-        
-        for user in users:
-            try:
-                await message.bot.send_message(user['user_id'], text)
-                results["success"] += 1
-                await asyncio.sleep(0.1)
-            except (TelegramForbiddenError, TelegramNotFound):
-                await execute_query("UPDATE users SET is_active = FALSE WHERE user_id = $1", user['user_id'])
-                results["failed"] += 1
-            except Exception as e:
-                logger.error(f"Xabar yuborishda xato (ID: {user['user_id']}): {e}")
-                results["failed"] += 1
-        
-        await message.answer(
-            f"📊 Natijalar:\n✅ {results['success']}\n❌ {results['failed']}",
-            reply_markup=admin_kb
-        )
-    
-    router.message.unregister(confirm_broadcast)
-    router.message.unregister(process_broadcast)
+        try:
+            user_id = int(user_identifier)
+        except ValueError:
+            await message.answer("❗ Noto‘g‘ri format. Foydalanuvchi ID yoki @username kiriting.", reply_markup=admin_kb)
+            await state.clear()
+            return
+
+    try:
+        await message.bot.send_message(user_id, text)
+        await message.answer(f"✅ Xabar yuborildi: {user_identifier}", reply_markup=admin_kb)
+    except (TelegramForbiddenError, TelegramNotFound):
+        await execute_query("UPDATE users SET is_active = FALSE WHERE user_id = $1", user_id)
+        await message.answer(f"❌ {user_identifier} ga xabar yuborilmadi, foydalanuvchi nofaol.", reply_markup=admin_kb)
+    except Exception as e:
+        logger.error(f"Bitta userga xabar yuborishda xato: {e}")
+        await message.answer("❌ Xatolik yuz berdi.", reply_markup=admin_kb)
+
+    await state.clear()
+
+# --- Foydalanuvchilarni json ko‘rinishda yuborish ---
 
 @router.message(F.text == "👥 Foydalanuvchilar")
 @admin_required
@@ -245,40 +314,40 @@ async def export_users(message: Message):
             reply_markup=admin_kb
         )
 
+# --- Admin qo'shish ---
+
 @router.message(F.text == "➕ Admin qo'shish")
 @admin_required
-async def add_admin_prompt(message: Message):
-    await message.answer(
-        "🆔 Yangi admin ID yoki @username kiriting:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    router.message.register(process_admin_add, F.text & ~F.text.startswith('/'))
+async def add_admin_prompt(message: Message, state: FSMContext):
+    await message.answer("🆔 Yangi admin ID yoki @username kiriting:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(AddAdminStates.waiting_for_admin_id)
 
-async def process_admin_add(message: Message):
+@router.message(AddAdminStates.waiting_for_admin_id)
+@admin_required
+async def process_admin_add(message: Message, state: FSMContext):
     input_text = message.text.strip()
-    
+
     try:
         if input_text.startswith('@'):
             username = input_text[1:]
             user_id = await fetch_value("SELECT user_id FROM users WHERE username = $1", username)
             if not user_id:
                 await message.answer(f"❌ @{username} topilmadi!", reply_markup=admin_kb)
+                await state.clear()
                 return
         else:
             user_id = int(input_text)
-        
-        # Add to users table if not exists
+
         await execute_query(
             "INSERT INTO users (user_id, is_active) VALUES ($1, TRUE) ON CONFLICT (user_id) DO NOTHING",
             user_id
         )
-        
-        # Add to admins table
+
         await execute_query(
             "INSERT INTO admins (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
             user_id
         )
-        
+
         ADMIN_IDS.add(user_id)
         await message.answer(f"✅ {input_text} admin qilindi!", reply_markup=admin_kb)
     except ValueError:
@@ -286,8 +355,10 @@ async def process_admin_add(message: Message):
     except Exception as e:
         logger.error(f"Admin qo'shish xatosi: {e}")
         await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.", reply_markup=admin_kb)
-    
-    router.message.unregister(process_admin_add)
+
+    await state.clear()
+
+# --- Faol foydalanuvchilar (haftalik va oylik) ---
 
 @router.message(F.text == "🏆 Faol foydalanuvchilar")
 @admin_required
@@ -301,9 +372,9 @@ async def show_top_users(message: Message):
             AND u.user_id NOT IN (SELECT user_id FROM admins)
             GROUP BY u.user_id, u.username, u.first_name
             ORDER BY activity_count DESC
-            LIMIT 5
+            LIMIT 10
         ''')
-        
+
         monthly_top = await fetch_query('''
             SELECT u.user_id, u.username, u.first_name, COUNT(*) as activity_count
             FROM user_activity a
@@ -314,19 +385,21 @@ async def show_top_users(message: Message):
             ORDER BY activity_count DESC
             LIMIT 10
         ''')
-        
+
         def format_top(data, title):
             text = f"🏆 <b>{title}</b>\n\n"
             for i, user in enumerate(data, 1):
-                name = user['username'] or user['first_name']
+                name = user['username'] or user['first_name'] or "NoName"
                 text += f"{i}. {name} - {user['activity_count']} marta\n"
             return text
-        
-        response = format_top(weekly_top, "1 haftalik") + "\n" + format_top(monthly_top, "1 oylik")
+
+        response = format_top(weekly_top, "1 haftalik") + "\n\n" + format_top(monthly_top, "1 oylik")
         await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=admin_kb)
     except Exception as e:
         logger.error(f"Top foydalanuvchilar xatosi: {e}")
         await message.answer("❌ Statistika yuklanmadi.", reply_markup=admin_kb)
+
+# --- Startup & shutdown hooks ---
 
 async def on_startup():
     await init_db()
