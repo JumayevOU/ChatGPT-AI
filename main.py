@@ -3,7 +3,6 @@ import logging
 import random
 import os
 import json
-from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.types import Message, BotCommand, FSInputFile
@@ -44,13 +43,20 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+# Global connection pool
+pool: asyncpg.Pool = None
+
 async def create_db_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
 
 async def create_users_table():
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
-        
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -60,31 +66,29 @@ async def create_users_table():
                 is_active BOOLEAN DEFAULT TRUE
             )
         ''')
-        
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY
             )
         ''')
-        
         await conn.execute('''
-    CREATE TABLE IF NOT EXISTS user_activity (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT REFERENCES users(user_id),
-        username VARCHAR(100),
-        activity_time TIMESTAMP DEFAULT NOW(),
-        activity_type VARCHAR(50)
-    )
-''')
-
-        
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                username VARCHAR(100),
+                activity_time TIMESTAMP DEFAULT NOW(),
+                activity_type VARCHAR(50)
+            )
+        ''')
         await conn.execute('''
             INSERT INTO admins (user_id) VALUES ($1)
             ON CONFLICT DO NOTHING
         ''', ADMIN_ID)
 
 async def save_user(user_id: int, username: str = None):
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO users (user_id, username, last_seen)
@@ -97,7 +101,9 @@ async def save_user(user_id: int, username: str = None):
         ''', user_id, username)
 
 async def log_user_activity(user_id: int, username: str, activity_type: str):
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO user_activity (user_id, username, activity_type)
@@ -105,17 +111,23 @@ async def log_user_activity(user_id: int, username: str, activity_type: str):
         ''', user_id, username, activity_type)
 
 async def get_all_users():
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
 
 async def deactivate_user(user_id: int):
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
 async def get_users_count():
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
@@ -180,7 +192,9 @@ async def handle_pm(message: Message):
         identifier, text = parts[1], parts[2]
         
         if identifier.startswith('@'):
-            pool = await create_db_pool()
+            global pool
+            if pool is None:
+                await create_db_pool()
             async with pool.acquire() as conn:
                 user_id = await conn.fetchval(
                     'SELECT user_id FROM users WHERE username = $1', 
@@ -210,7 +224,9 @@ async def handle_top(message: Message):
     if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Bu buyruq faqat admin uchun")
     
-    pool = await create_db_pool()
+    global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         two_weeks_top = await conn.fetch('''
             SELECT user_id, username, COUNT(*) as activity_count
@@ -289,7 +305,9 @@ async def handle_add_admin(message: Message):
     
     try:
         new_admin_id = int(message.text.split()[1])
-        pool = await create_db_pool()
+        global pool
+        if pool is None:
+            await create_db_pool()
         async with pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO admins (user_id) VALUES ($1)
@@ -301,6 +319,7 @@ async def handle_add_admin(message: Message):
 
 @dp.startup()
 async def on_startup(bot: Bot):
+    await create_db_pool()
     await create_users_table()
     await bot.set_my_commands(
         commands=[
