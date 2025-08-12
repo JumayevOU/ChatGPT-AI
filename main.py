@@ -11,6 +11,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import aiohttp
+import asyncpg
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
@@ -20,6 +21,7 @@ from admin import router as admin_router
 load_dotenv()
 
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +39,37 @@ dp = Dispatcher()
 
 dp.include_router(admin_router)
 
+# Database connection pool
+pool = None
+
+async def get_db_pool():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
+
+async def save_user(user_id: int, username: str, first_name: str, last_name: str = None):
+    """Save or update user in database"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users (user_id, username, first_name, last_name, is_active)
+            VALUES ($1, $2, $3, $4, TRUE)
+            ON CONFLICT (user_id) DO UPDATE SET
+            username = EXCLUDED.username,
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            is_active = TRUE
+        ''', user_id, username, first_name, last_name)
+
+async def log_activity(user_id: int):
+    """Log user activity"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO user_activity (user_id) VALUES ($1)
+        ''', user_id)
+
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
     "🔧 Biror vintim bo'shab qolgan shekilli... Yaqinda yig'ishtirib olaman 🤖",
@@ -46,8 +79,15 @@ error_messages = [
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
+    # Save user to database
+    await save_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name
+    )
+    
     if message.from_user.id in ADMIN_IDS:
-        
         await message.answer(
             "👋 Admin paneliga xush kelibsiz!",
             reply_markup=ReplyKeyboardRemove()
@@ -56,16 +96,7 @@ async def handle_start(message: Message):
 
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
-        "➤ Savollaringizga javob beraman\n"
-        "➤ Til va tarjima\n"
-        "➤ Texnik yordam\n"
-        "➤ Ijtimoiy va madaniy masalalar\n"
-        "➤ Hujjatlar va yozuvlar\n"
-        "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
-        "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n"
-        "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o'qib, tushunaman va yechim topib beraman.\n\n"
-        "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?",
+        "🤖 Men sizning AI yordamchingizman...",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -86,8 +117,10 @@ def add_emoji_instruction_to_prompt(text: str) -> str:
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
+    # Save user activity
+    await log_activity(message.from_user.id)
+    
     if message.from_user.id in ADMIN_IDS:
-        
         return
     
     if len(message.text) > 5000:
@@ -137,8 +170,10 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
+    # Save user activity
+    await log_activity(message.from_user.id)
+    
     if message.from_user.id in ADMIN_IDS:
-        
         return
     
     chat_id = message.chat.id
@@ -172,7 +207,22 @@ async def handle_photo(message: Message):
             pass
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
+async def on_startup():
+    # Initialize database connection
+    await get_db_pool()
+    logger.info("Bot ishga tushdi")
+
+async def on_shutdown():
+    global pool
+    if pool:
+        await pool.close()
+        logger.info("Database connection closed")
+    logger.info("Bot to'xtatildi")
+
 async def main():
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
 
