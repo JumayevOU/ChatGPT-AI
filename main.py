@@ -2,32 +2,30 @@ import asyncio
 import logging
 import random
 import os
-from aiogram import Bot, Dispatcher, F, types
+import json
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message, ReplyKeyboardRemove
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, BotCommand, FSInputFile
+from aiogram.filters import Command, CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommandScopeChat
 from dotenv import load_dotenv
 import aiohttp
-import asyncpg
-from datetime import datetime
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
-from admin import router as admin_router
 
 load_dotenv()
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+OCR_API_KEY = os.getenv("OCR_API_KEY")
+USERS_FILE = "user_ids.json"
 
-ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 session = AiohttpSession()
@@ -38,75 +36,6 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-dp.include_router(admin_router)
-
-# Database connection pool
-pool = None
-
-async def get_db_pool():
-    global pool
-    if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL)
-    return pool
-
-async def init_db():
-    """Initialize database tables"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username VARCHAR(32),
-                created_at TIMESTAMP DEFAULT NOW(),
-                last_seen TIMESTAMP,
-                is_active BOOLEAN DEFAULT TRUE
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_activity (
-                activity_id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                username VARCHAR(32),
-                activity_time TIMESTAMP DEFAULT NOW(),
-                activity_type VARCHAR(50)
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
-                added_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-    logger.info("Database tables initialized")
-
-async def save_user(user_id: int, username: str):
-    """Save or update user in database"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO users (user_id, username, last_seen, is_active)
-            VALUES ($1, $2, NOW(), TRUE)
-            ON CONFLICT (user_id) DO UPDATE SET
-                username = EXCLUDED.username,
-                last_seen = NOW(),
-                is_active = TRUE
-        ''', user_id, username)
-
-async def log_activity(user_id: int, username: str = None, activity_type: str = "message"):
-    """Log user activity"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        # Save or update user with current username if provided
-        if username is not None:
-            await save_user(user_id, username)
-        else:
-            # Save with empty username if none provided
-            await save_user(user_id, "")
-        # Log activity with username and type
-        await conn.execute('''
-            INSERT INTO user_activity (user_id, username, activity_type) VALUES ($1, $2, $3)
-        ''', user_id, username or "", activity_type)
-
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
     "🔧 Biror vintim bo'shab qolgan shekilli... Yaqinda yig'ishtirib olaman 🤖",
@@ -114,55 +43,132 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+def load_user_ids():
+    try:
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_user_id(user_id: int):
+    user_ids = load_user_ids()
+    if user_id not in user_ids:
+        user_ids.append(user_id)
+        with open(USERS_FILE, "w") as f:
+            json.dump(user_ids, f, indent=4)
+
+def save_user_ids_list(user_ids: list):
+    with open(USERS_FILE, "w") as f:
+        json.dump(user_ids, f, indent=4)
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    # Save user to database
-    await save_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username or ""
-    )
-    
-    if message.from_user.id in ADMIN_IDS:
-        await message.answer(
-            "👋 Admin paneliga xush kelibsiz!",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return
-
+    save_user_id(message.from_user.id)
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchingizman...",
-        reply_markup=ReplyKeyboardRemove()
+        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
+        "➤ Savollaringizga javob beraman\n"
+        "➤ Til va tarjima\n"
+        "➤ Texnik yordam\n"
+        "➤ Ijtimoiy va madaniy masalalar\n"
+        "➤ Hujjatlar va yozuvlar\n"
+        "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
+        "➤ Rasm ko‘rinishida savol yuborsangiz — matnni o‘qib, yechimini to‘liq tushuntirib beraman\n"
+        "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o‘qib, tushunaman va yechim topib beraman.\n\n"
+        "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-@dp.message(Command("admin"))
-async def admin_command(message: Message):
-    """Admin panelni ochish"""
-    if message.from_user.id in ADMIN_IDS:
-        from admin import admin_kb  
-        await message.answer(
-            "📋 Admin paneli menyusi:",
-            reply_markup=admin_kb
+@dp.message(Command("send"))
+async def handle_sendall(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Bu buyruq faqat admin uchun.")
+        return
+
+    text_to_send = message.text.replace("/send", "", 1).strip()
+    if not text_to_send:
+        await message.answer("✍️ Yuboriladigan xabarni ham yozing: /send Xabar matni")
+        return
+
+    user_ids = load_user_ids()
+    updated_user_ids = []
+    success, fail = 0, 0
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(user_id, text_to_send)
+            updated_user_ids.append(user_id)
+            success += 1
+            await asyncio.sleep(0.05)
+        except (TelegramForbiddenError, TelegramNotFound):
+            logger.warning(f"❌ Bot bloklangan yoki foydalanuvchi topilmadi: {user_id}")
+            fail += 1
+        except Exception as e:
+            logger.warning(f"Xatolik: {user_id} - {e}")
+            updated_user_ids.append(user_id)
+            fail += 1
+
+    save_user_ids_list(updated_user_ids)
+
+    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas).")
+
+@dp.message(Command("users"))
+async def handle_users_command(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+    
+    try:
+        user_ids = load_user_ids()
+        total_users = len(user_ids)
+
+        text = (
+            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
+            f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n"
+            "🕵️‍♂️ Har bir foydalanuvchi men bilan tanishib chiqqan! 😊\n\n"
+            "📅 Statistikani yangilash: <i>real vaqtda</i>"
         )
-    else:
-        await message.answer("⚠️ Sizga ruxsat yo'q!")
+
+        await message.answer(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
+@dp.message(Command("dump_users"))
+async def handle_dump_users(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+
+    file_path = USERS_FILE
+    if not os.path.exists(file_path):
+        return await message.answer("📂 Foydalanuvchilar fayli topilmadi.")
+
+    file_to_send = FSInputFile(file_path)
+    await message.answer_document(file_to_send, caption="📄 user_ids.json fayli tayyor!")
+
+@dp.startup()
+async def on_startup(bot: Bot):
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="start", description="Botni ishga tushirish"),
+            BotCommand(command="send", description="Barchaga xabar yuborish"),
+            BotCommand(command="users", description="Foydalanuvchilar soni"),
+            BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
+        ],
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
+
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
-    # Save user activity with username
-    await log_activity(message.from_user.id, message.from_user.username)
-    
-    if message.from_user.id in ADMIN_IDS:
-        return
-    
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
 
+    user_id = message.from_user.id
     chat_id = message.chat.id
+    save_user_id(user_id)
+
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
     try:
@@ -175,7 +181,7 @@ async def handle_text(message: Message):
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"[Xatolik] {e}", exc_info=True)
+        logger.error(f"[Xatolik] {e}")
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
@@ -185,7 +191,6 @@ async def handle_text(message: Message):
         )
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
-    OCR_API_KEY = os.getenv("OCR_API_KEY")
     url = "https://api.ocr.space/parse/image"
     headers = {"apikey": OCR_API_KEY}
     data = {"language": "eng", "isOverlayRequired": False}
@@ -205,13 +210,10 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    # Save user activity with username
-    await log_activity(message.from_user.id, message.from_user.username)
-    
-    if message.from_user.id in ADMIN_IDS:
-        return
-    
+    user_id = message.from_user.id
     chat_id = message.chat.id
+    save_user_id(user_id)
+
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
     try:
@@ -235,29 +237,39 @@ async def handle_photo(message: Message):
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"[OCR xatolik] {e}", exc_info=True)
+        logger.error(f"[OCR xatolik] {e}")
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
             pass
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
-async def on_startup():
-    await init_db()
-    logger.info("Bot ishga tushdi")
+async def notify_inactive_users():
+    while True:
+        await asyncio.sleep(3600 * 24 * 7)  
+        user_ids = load_user_ids()
+        active_users = []
+        inactive_users = []
 
-async def on_shutdown():
-    global pool
-    if pool:
-        await pool.close()
-        logger.info("Database connection closed")
-    logger.info("Bot to'xtatildi")
+        for user_id in user_ids:
+            try:
+                await bot.send_message(
+                    user_id,
+                    "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
+                )
+                active_users.append(user_id)
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                inactive_users.append(user_id)
+                logger.warning(f"{user_id} ga xabar yuborishda xatolik: {e}")
+
+        logger.info(f"✅ Xabar yuborilgan foydalanuvchilar: {len(active_users)} ta")
+        logger.info(f"❌ Xabar yuborilmagan foydalanuvchilar: {len(inactive_users)} ta")
+
 
 async def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
     await bot(DeleteWebhook(drop_pending_updates=True))
+    asyncio.create_task(notify_inactive_users())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
