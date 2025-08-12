@@ -3,7 +3,7 @@ import asyncio
 import logging
 import json
 import asyncpg
-from aiogram import Router, F
+from aiogram import Router, F, types
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
@@ -15,15 +15,18 @@ load_dotenv()
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_ID", "0").split(',')))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 router = Router(name="admin")
 
-# Global pool for database connections
+
 pool: Optional[asyncpg.Pool] = None
 
-# Admin keyboard
+
 admin_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Statistikalar"), KeyboardButton(text="📤 Xabar yuborish")],
@@ -35,40 +38,52 @@ admin_kb = ReplyKeyboardMarkup(
 )
 
 async def get_db_pool() -> asyncpg.Pool:
-    """Get or create database connection pool"""
     global pool
     if pool is None:
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
 async def execute_query(query: str, *args) -> None:
-    """Execute a query without returning results"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(query, *args)
 
 async def fetch_query(query: str, *args) -> List[Dict[str, Any]]:
-    """Fetch multiple rows from database"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetch(query, *args)
 
 async def fetch_value(query: str, *args) -> Any:
-    """Fetch a single value from database"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval(query, *args)
 
-# ========== ADMIN COMMANDS ==========
+
+def admin_required(func):
+    async def wrapper(message: Message, *args, **kwargs):
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer("⚠️ Sizga ruxsat yo'q!")
+            return
+        return await func(message, *args, **kwargs)
+    return wrapper
+
+
 
 @router.message(CommandStart())
+@admin_required
 async def admin_start(message: Message) -> None:
     """Handle /start command for admin"""
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
     await message.answer(
         "👋 Admin paneliga xush kelibsiz!",
+        reply_markup=admin_kb
+    )
+
+@router.message(Command("admin"))
+@admin_required
+async def admin_panel(message: Message) -> None:
+    """Admin panel command"""
+    await message.answer(
+        "📋 Admin paneli menyusi:",
         reply_markup=admin_kb
     )
 
@@ -92,7 +107,7 @@ async def show_stats(message: Message) -> None:
         return
     
     try:
-        # Get total active users
+
         total_users = await fetch_value(
             "SELECT COUNT(*) FROM users WHERE is_active = TRUE"
         )
