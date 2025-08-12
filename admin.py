@@ -23,8 +23,79 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="admin")
 
-# Global pool for database connections
-pool: Optional[asyncpg.Pool] = None
+# Database connection pool
+pool = None
+
+async def get_db_pool():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
+
+async def init_db():
+    try:
+        pool = await get_db_pool()
+        
+        # Create tables if they don't exist
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username VARCHAR(32),
+                    first_name VARCHAR(64),
+                    last_name VARCHAR(64),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    activity_id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(user_id),
+                    activity_time TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+        logger.info("Database tables initialized")
+        return pool
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+
+async def execute_query(query: str, *args):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await conn.execute(query, *args)
+        except Exception as e:
+            logger.error(f"Query execution failed: {e}")
+            raise
+
+async def fetch_query(query: str, *args) -> List[Dict]:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await conn.fetch(query, *args)
+        except Exception as e:
+            logger.error(f"Fetch query failed: {e}")
+            raise
+
+async def fetch_value(query: str, *args) -> Any:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await conn.fetchval(query, *args)
+        except Exception as e:
+            logger.error(f"Fetch value failed: {e}")
+            raise
 
 # Admin keyboard
 admin_kb = ReplyKeyboardMarkup(
@@ -34,36 +105,10 @@ admin_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="🏆 Faol foydalanuvchilar")]
     ],
     resize_keyboard=True,
-    input_field_placeholder="Admin paneli",
-    selective=True
+    input_field_placeholder="Admin paneli"
 )
 
-async def get_db_pool() -> asyncpg.Pool:
-    """Get or create database connection pool"""
-    global pool
-    if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL)
-    return pool
-
-async def execute_query(query: str, *args) -> None:
-    """Execute a query without returning results"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(query, *args)
-
-async def fetch_query(query: str, *args) -> List[Dict[str, Any]]:
-    """Fetch multiple rows from database"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetch(query, *args)
-
-async def fetch_value(query: str, *args) -> Any:
-    """Fetch a single value from database"""
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetchval(query, *args)
-
-# Admin decorator for access control
+# Admin decorator
 def admin_required(func):
     async def wrapper(message: Message, *args, **kwargs):
         if message.from_user.id not in ADMIN_IDS:
@@ -72,12 +117,9 @@ def admin_required(func):
         return await func(message, *args, **kwargs)
     return wrapper
 
-# ========== ADMIN COMMANDS ==========
-
 @router.message(CommandStart())
 @admin_required
-async def admin_start(message: Message) -> None:
-    """Handle /start command for admin"""
+async def admin_start(message: Message):
     await message.answer(
         "👋 Admin paneliga xush kelibsiz!",
         reply_markup=admin_kb
@@ -85,57 +127,51 @@ async def admin_start(message: Message) -> None:
 
 @router.message(Command("admin"))
 @admin_required
-async def admin_panel(message: Message) -> None:
-    """Admin panel command"""
+async def admin_panel(message: Message):
     await message.answer(
         "📋 Admin paneli menyusi:",
         reply_markup=admin_kb
     )
 
-# ========== ADMIN FEATURES HANDLERS ==========
-
 @router.message(F.text == "📊 Statistikalar")
 @admin_required
-async def show_stats(message: Message) -> None:
-    """Show bot statistics with improved formatting"""
+async def show_stats(message: Message):
     try:
         total_users = await fetch_value("SELECT COUNT(*) FROM users WHERE is_active = TRUE")
         daily_active = await fetch_value(
-            "SELECT COUNT(DISTINCT user_id) FROM user_activity WHERE activity_time >= CURRENT_DATE"
+            "SELECT COUNT(DISTINCT user_id) FROM user_activity "
+            "WHERE activity_time >= CURRENT_DATE"
         )
         new_users = await fetch_value(
-            "SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE"
+            "SELECT COUNT(*) FROM users "
+            "WHERE created_at >= CURRENT_DATE"
         )
         
         response = (
-            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
-            f"📌 Umumiy faol foydalanuvchilar soni: <b>{total_users:,}</b> ta\n"
-            f"🟢 Bugun faol foydalanuvchilar: <b>{daily_active:,}</b> ta\n"
-            f"🆕 Bugun qo‘shilgan yangi foydalanuvchilar: <b>{new_users:,}</b> ta\n\n"
-            "📅 Statistikalar <i>real vaqtda</i> yangilanmoqda."
+            "📊 Bot statistikasi:\n\n"
+            f"👥 Jami foydalanuvchilar: <b>{total_users}</b>\n"
+            f"🔄 Bugun faol: <b>{daily_active}</b>\n"
+            f"🆕 Yangi foydalanuvchilar: <b>{new_users}</b>"
         )
         
         await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=admin_kb)
     except Exception as e:
-        logger.error(f"Statistika xatosi: {e}", exc_info=True)
+        logger.error(f"Statistika olishda xato: {e}")
         await message.answer(
-            "❌ Statistika yuklanmadi. Qayta urinib ko'ring.",
+            "❌ Statistika yuklanmadi. Iltimos, keyinroq urinib ko'ring.",
             reply_markup=admin_kb
         )
 
 @router.message(F.text == "📤 Xabar yuborish")
 @admin_required
-async def start_broadcast(message: Message) -> None:
-    """Start broadcast process"""
+async def start_broadcast(message: Message):
     await message.answer(
         "✍️ Yubormoqchi bo'lgan xabaringizni kiriting:",
         reply_markup=ReplyKeyboardRemove()
     )
-    # Register temporary handler
     router.message.register(process_broadcast, F.text & ~F.text.startswith('/'))
 
-async def process_broadcast(message: Message) -> None:
-    """Process broadcast message"""
+async def process_broadcast(message: Message):
     if not message.text or not message.text.strip():
         await message.answer("❗ Xabar bo'sh bo'lmasligi kerak!", reply_markup=admin_kb)
         router.message.unregister(process_broadcast)
@@ -153,8 +189,7 @@ async def process_broadcast(message: Message) -> None:
     )
     router.message.register(confirm_broadcast, F.text.in_(["✅ Ha", "❌ Yo'q"]))
 
-async def confirm_broadcast(message: Message) -> None:
-    """Confirm and send broadcast"""
+async def confirm_broadcast(message: Message):
     if message.text == "❌ Yo'q":
         await message.answer("❌ Xabar yuborish bekor qilindi.", reply_markup=admin_kb)
     else:
@@ -181,14 +216,12 @@ async def confirm_broadcast(message: Message) -> None:
             reply_markup=admin_kb
         )
     
-    # Cleanup handlers
     router.message.unregister(confirm_broadcast)
     router.message.unregister(process_broadcast)
 
 @router.message(F.text == "👥 Foydalanuvchilar")
 @admin_required
-async def export_users(message: Message) -> None:
-    """Export users list"""
+async def export_users(message: Message):
     try:
         users = await fetch_query(
             "SELECT user_id, username, first_name, last_name, created_at "
@@ -206,24 +239,22 @@ async def export_users(message: Message) -> None:
         )
         os.remove(temp_file)
     except Exception as e:
-        logger.error(f"Foydalanuvchilar eksporti xatosi: {e}", exc_info=True)
+        logger.error(f"Foydalanuvchilar ro'yxatini yuklashda xato: {e}")
         await message.answer(
-            "❌ Ro'yxat yuklanmadi. Qayta urinib ko'ring.",
+            "❌ Ro'yxat yuklanmadi. Iltimos, keyinroq urinib ko'ring.",
             reply_markup=admin_kb
         )
 
 @router.message(F.text == "➕ Admin qo'shish")
 @admin_required
-async def add_admin_prompt(message: Message) -> None:
-    """Prompt to add new admin"""
+async def add_admin_prompt(message: Message):
     await message.answer(
         "🆔 Yangi admin ID yoki @username kiriting:",
         reply_markup=ReplyKeyboardRemove()
     )
     router.message.register(process_admin_add, F.text & ~F.text.startswith('/'))
 
-async def process_admin_add(message: Message) -> None:
-    """Process adding new admin"""
+async def process_admin_add(message: Message):
     input_text = message.text.strip()
     
     try:
@@ -236,21 +267,31 @@ async def process_admin_add(message: Message) -> None:
         else:
             user_id = int(input_text)
         
-        await execute_query("INSERT INTO admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+        # Add to users table if not exists
+        await execute_query(
+            "INSERT INTO users (user_id, is_active) VALUES ($1, TRUE) ON CONFLICT (user_id) DO NOTHING",
+            user_id
+        )
+        
+        # Add to admins table
+        await execute_query(
+            "INSERT INTO admins (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+            user_id
+        )
+        
         ADMIN_IDS.add(user_id)
         await message.answer(f"✅ {input_text} admin qilindi!", reply_markup=admin_kb)
     except ValueError:
         await message.answer("❗ Noto'g'ri format. ID yoki @username kiriting.", reply_markup=admin_kb)
     except Exception as e:
-        logger.error(f"Admin qo'shish xatosi: {e}", exc_info=True)
+        logger.error(f"Admin qo'shish xatosi: {e}")
         await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.", reply_markup=admin_kb)
     
     router.message.unregister(process_admin_add)
 
 @router.message(F.text == "🏆 Faol foydalanuvchilar")
 @admin_required
-async def show_top_users(message: Message) -> None:
-    """Show top active users"""
+async def show_top_users(message: Message):
     try:
         weekly_top = await fetch_query('''
             SELECT u.user_id, u.username, u.first_name, COUNT(*) as activity_count
@@ -284,5 +325,13 @@ async def show_top_users(message: Message) -> None:
         response = format_top(weekly_top, "1 haftalik") + "\n" + format_top(monthly_top, "1 oylik")
         await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=admin_kb)
     except Exception as e:
-        logger.error(f"Top foydalanuvchilar xatosi: {e}", exc_info=True)
+        logger.error(f"Top foydalanuvchilar xatosi: {e}")
         await message.answer("❌ Statistika yuklanmadi.", reply_markup=admin_kb)
+
+async def on_startup():
+    await init_db()
+
+async def on_shutdown():
+    global pool
+    if pool:
+        await pool.close()
