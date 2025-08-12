@@ -12,6 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import aiohttp
 import asyncpg
+from datetime import datetime
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
@@ -48,24 +49,48 @@ async def get_db_pool():
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
-async def save_user(user_id: int, username: str, first_name: str, last_name: str = None):
+async def init_db():
+    """Initialize database tables"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(32),
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_activity (
+                activity_id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                activity_time TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+    logger.info("Database tables initialized")
+
+async def save_user(user_id: int, username: str):
     """Save or update user in database"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO users (user_id, username, first_name, last_name, is_active)
-            VALUES ($1, $2, $3, $4, TRUE)
+            INSERT INTO users (user_id, username, last_seen, is_active)
+            VALUES ($1, $2, NOW(), TRUE)
             ON CONFLICT (user_id) DO UPDATE SET
             username = EXCLUDED.username,
-            first_name = EXCLUDED.first_name,
-            last_name = EXCLUDED.last_name,
+            last_seen = NOW(),
             is_active = TRUE
-        ''', user_id, username, first_name, last_name)
+        ''', user_id, username)
 
 async def log_activity(user_id: int):
     """Log user activity"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
+        # First ensure user exists
+        await save_user(user_id, "")
+        # Then log activity
         await conn.execute('''
             INSERT INTO user_activity (user_id) VALUES ($1)
         ''', user_id)
@@ -82,9 +107,7 @@ async def handle_start(message: Message):
     # Save user to database
     await save_user(
         user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name
+        username=message.from_user.username or ""
     )
     
     if message.from_user.id in ADMIN_IDS:
@@ -208,8 +231,7 @@ async def handle_photo(message: Message):
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
 async def on_startup():
-    # Initialize database connection
-    await get_db_pool()
+    await init_db()
     logger.info("Bot ishga tushdi")
 
 async def on_shutdown():
