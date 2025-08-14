@@ -161,19 +161,14 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-# Unified text handler (avvalgi dublikatlar birlashtirildi)
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    # Admin matn yozsa
+   
     if await is_admin(user_id):
-        await message.answer(
-            "👋 Siz admin paneldasiz. AI funksiyalar sizga mavjud emas.", 
-            reply_markup=admin_keyboard
-        )
-        return
+        return  
 
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
@@ -201,7 +196,8 @@ async def handle_text(message: Message):
             pass
         await message.answer(
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
-        )    
+        )
+
 
 @dp.message(F.text == "📢 Barchaga xabar yuborish")
 async def handle_sendall(message: Message):
