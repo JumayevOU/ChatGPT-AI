@@ -17,19 +17,17 @@ import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 import asyncpg  
 
+from services.mistral_service import get_mistral_reply
+from utils.history import update_chat_history, clear_user_history
+from keyboards.default.admin import admin_keyboard
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OCR_API_KEY = os.getenv("OCR_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-
 if not all([BOT_TOKEN, DATABASE_URL]):
     raise ValueError("Missing required environment variables (BOT_TOKEN, DATABASE_URL)")
-
-from services.mistral_service import get_mistral_reply
-from utils.history import update_chat_history, clear_user_history
-from keyboards.default.admin import admin_keyboard
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,7 +46,6 @@ error_messages = [
     "🧠 Men hozirda biroz charchab qoldim, keyinroq urinib ko'ring 😴",
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
-
 
 pool = None
 
@@ -135,6 +132,10 @@ async def get_all_admins():
     async with pool.acquire() as conn:
         return await conn.fetch('SELECT user_id FROM admins')
 
+def add_emoji_instruction_to_prompt(text: str) -> str:
+    return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
+
+# Start handler
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     await save_user(message.from_user.id, message.from_user.username)
@@ -156,10 +157,51 @@ async def handle_start(message: Message):
         "➤ Ijtimoiy va madaniy masalalar\n"
         "➤ Hujjatlar va yozuvlar\n"
         "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
-        "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n"
         "📸 Faqat matn emas, rasm orqali ham savolingizni bera olasiz — men uni o'qib, tushunaman va yechim topib beraman.\n\n"
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
+
+# Unified text handler (avvalgi dublikatlar birlashtirildi)
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_text(message: Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+
+    # Admin matn yozsa
+    if await is_admin(user_id):
+        await message.answer(
+            "👋 Siz admin paneldasiz. AI funksiyalar sizga mavjud emas.", 
+            reply_markup=admin_keyboard
+        )
+        return
+
+    if len(message.text) > 5000:
+        await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
+        return
+
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "text_message")
+
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+
+    try:
+        update_chat_history(chat_id, message.text)
+        prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
+        update_chat_history(chat_id, reply, role="assistant")
+
+        await bot.delete_message(chat_id, loading.message_id)
+        await message.answer(reply, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"[Xatolik] {e}")
+        try:
+            await bot.delete_message(chat_id, loading.message_id)
+        except:
+            pass
+        await message.answer(
+            random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
+        )    
 
 @dp.message(F.text == "📢 Barchaga xabar yuborish")
 async def handle_sendall(message: Message):
@@ -234,6 +276,63 @@ async def handle_pm(message: Message):
     except Exception as e:
         logger.error(f"PM xatosi: {e}")
         await message.answer("❌ Xatolik yuz berdi. Iltimos, formatga e'tibor bering.", reply_markup=admin_keyboard)
+
+@dp.message(F.text == "📊 Statistika")
+async def handle_stats_command(message: Message):
+    if not await is_admin(message.from_user.id):
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.", reply_markup=admin_keyboard)
+    
+    try:
+        total_users = await get_users_count()
+        
+        global pool
+        async with pool.acquire() as conn:
+         
+            most_active_30days = await conn.fetchrow('''
+                SELECT user_id, username, COUNT(*) as activity_count 
+                FROM user_activity 
+                WHERE activity_time >= NOW() - INTERVAL '30 days'
+                GROUP BY user_id, username 
+                ORDER BY activity_count DESC 
+                LIMIT 1
+            ''')
+            
+         
+            most_active_today = await conn.fetchrow('''
+                SELECT user_id, username, COUNT(*) as activity_count 
+                FROM user_activity 
+                WHERE activity_time >= CURRENT_DATE
+                GROUP BY user_id, username 
+                ORDER BY activity_count DESC 
+                LIMIT 1
+            ''')
+            
+      
+            last_user = await conn.fetchrow('''
+                SELECT user_id, username, created_at FROM users 
+                ORDER BY created_at DESC LIMIT 1
+            ''')
+
+  
+        def format_user(user):
+            if not user:
+                return "Mavjud emas"
+            return f"@{user['username']}" if user['username'] else f"ID:{user['user_id']}"
+
+        text = (
+            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
+            f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n\n"
+            "🏆 <b>Eng faol foydalanuvchilar:</b>\n"
+            f"• Oxirgi 30 kun: {format_user(most_active_30days)}\n"
+            f"• Bugun: {format_user(most_active_today)}\n\n"
+            f"🆕 Oxirgi qo'shilgan: {format_user(last_user)}\n\n"
+            f"⏳ So'rov vaqti: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
+    except Exception as e:
+        logger.error(f"Statistika xatosi: {e}")
+        await message.answer("❌ Statistikani yuklashda xatolik yuz berdi", reply_markup=admin_keyboard)
 
 @dp.message(F.text == "🏆 Faol foydalanuvchilar")
 async def handle_top(message: Message):
@@ -391,6 +490,13 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
+    if await is_admin(message.from_user.id):
+        await message.answer(
+            "👋 Siz admin paneldasiz. AI funksiyalar sizga mavjud emas.", 
+            reply_markup=admin_keyboard
+        )
+        return
+
     if not OCR_API_KEY:
         await message.answer("❌ Rasmni tahlil qilish funksiyasi hozircha ishlamayapti.")
         return
@@ -456,17 +562,6 @@ async def notify_inactive_users():
                     logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
 async def main():
-
-    required_vars = {
-        "BOT_TOKEN": BOT_TOKEN,
-        "DATABASE_URL": DATABASE_URL,
-    }
-    
-    missing_vars = [name for name, value in required_vars.items() if not value]
-    if missing_vars:
-        logger.error(f"Quyidagi o'zgaruvchilar topilmadi: {', '.join(missing_vars)}")
-        raise ValueError(f"Konfiguratsiya o'zgaruvchilari topilmadi: {', '.join(missing_vars)}")
-
     await create_db_pool()
     await create_users_table()
     
