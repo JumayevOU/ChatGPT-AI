@@ -373,7 +373,7 @@ async def handle_dump_users(message: Message):
         await message.answer_document(
             file_to_send,
             caption="📄 Foydalanuvchilar ro'yxati",
-            reply_markup=admin_keyboard)
+            reply_markup=admin_keyboard
         )
         os.remove(temp_file)
 
