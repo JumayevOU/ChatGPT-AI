@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 import asyncpg  
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
 from config import BOT_TOKEN
 from services.mistral_service import get_mistral_reply
