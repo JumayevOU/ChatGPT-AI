@@ -19,7 +19,7 @@ import asyncpg
 
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
-from admin import get_admin_keyboard
+from admin import admin_keyboard
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -64,7 +64,7 @@ async def create_users_table():
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        # Users jadvali
+        
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
