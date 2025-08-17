@@ -501,77 +501,44 @@ async def handle_photo(message: Message):
     await log_user_activity(user_id, message.from_user.username, "photo_message")
     
     
-    loading = await message.answer("🖼️ <b>Rasm yuklanmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
     
     try:
-        start_time = time.time()
-        total_duration = 3.0  
-
         
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        image_bytes = await bot.download_file(file.file_path)
-        
-        for percent in range(10, 41, 10):
-            elapsed = time.time() - start_time
-            if elapsed >= total_duration: break
-            
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🖼️ <b>Rasm yuklanmoqda...</b>\n{bar} {percent}%", 
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.3)
-
-    
-        text = await extract_text_from_image(image_bytes.read())
-        if not text or len(text.strip()) < 3:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
-            await asyncio.sleep(0.5)
-            await loading.delete()
-            await message.answer("❗ Rasmda aniq matn topilmadi.")
-            return
-
-        for percent in range(50, 81, 10):
-            elapsed = time.time() - start_time
-            if elapsed >= total_duration: break
-            
+        for percent in range(10, 101, 10):
             bar = "▰"*(percent//10) + "▱"*(10-percent//10)
             await loading.edit_text(
                 f"🧠 <b>Savolingiz tahlil qilinmoqda...</b>\n{bar} {percent}%", 
                 parse_mode="HTML"
             )
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)  
 
-        reply = await get_mistral_reply(chat_id, text)
+  
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        image_bytes = await bot.download_file(file.file_path)
+        text = await extract_text_from_image(image_bytes.read())
         
-        for percent in range(90, 101, 10):
-            elapsed = time.time() - start_time
-            if elapsed >= total_duration: break
+        if not text or len(text.strip()) < 3:
+            await bot.delete_message(chat_id, loading.message_id)
+            await message.answer("❗ Rasmda aniq matn topilmadi.")
+            return
             
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%", 
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.2)
-
-
-        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.5)
-        await loading.delete()
+        update_chat_history(chat_id, text)
+        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
+        update_chat_history(chat_id, reply, role="assistant")
+        
+        await bot.delete_message(chat_id, loading.message_id)
         await message.answer(reply, parse_mode="Markdown")
         
     except Exception as e:
         logger.error(f"[OCR xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
-            await asyncio.sleep(1.5)
-            await loading.delete()
+            await bot.delete_message(chat_id, loading.message_id)
         except:
             pass
-        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
-
+        await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
 async def notify_inactive_users():
     while True:
