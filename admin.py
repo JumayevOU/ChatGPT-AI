@@ -5,16 +5,16 @@ def get_admin_keyboard():
     builder = ReplyKeyboardBuilder()
     
     # Birinchi qator
-    builder.add(KeyboardButton(text="📢 Barchaga xabar yuborish"))
-    builder.add(KeyboardButton(text="📨 Userga xabar yuborish"))
+    builder.add(KeyboardButton(text="Barchaga xabar yuborish"))
+    builder.add(KeyboardButton(text="Userga xabar yuborish"))
     
     # Ikkinchi qator
-    builder.add(KeyboardButton(text="📊 Statistika"))
-    builder.add(KeyboardButton(text="🏆 Faol foydalanuvchilar"))
+    builder.add(KeyboardButton(text="Statistika"))
+    builder.add(KeyboardButton(text="Faol foydalanuvchilar"))
     
     # Uchinchi qator
-    builder.add(KeyboardButton(text="📄 Userlar ro'yxati"))
-    builder.add(KeyboardButton(text="➕ Admin qo'shish"))
+    builder.add(KeyboardButton(text="Userlar ro'yxati"))
+    builder.add(KeyboardButton(text="Admin qo'shish"))
     
     # Tugmalarni joylashtirish
     builder.adjust(2, 2, 2)
@@ -26,3 +26,4 @@ def get_admin_keyboard():
     )
 
 admin_keyboard = get_admin_keyboard()
+
