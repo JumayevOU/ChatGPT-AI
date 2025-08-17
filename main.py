@@ -276,59 +276,67 @@ async def handle_pm(message: Message):
 @dp.message(F.text == "📊 Statistika")
 async def handle_stats_command(message: Message):
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.", reply_markup=admin_keyboard)
-    
+        return await message.answer(
+            "❌ Sizda bu buyruqni ishlatish huquqi yo'q.",
+            reply_markup=admin_keyboard
+        )
+
     try:
-        total_users = await get_users_count()
-        
         global pool
         async with pool.acquire() as conn:
-         
+            # Umumiy foydalanuvchilar soni
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+
+            # Oxirgi 30 kun ichida eng faol foydalanuvchi
             most_active_30days = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) as activity_count 
+                SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
                 WHERE activity_time >= NOW() - INTERVAL '30 days'
                 GROUP BY user_id, username 
                 ORDER BY activity_count DESC 
                 LIMIT 1
             ''')
-            
-         
+
+            # Bugungi kunda eng faol foydalanuvchi
             most_active_today = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) as activity_count 
+                SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
                 WHERE activity_time >= CURRENT_DATE
                 GROUP BY user_id, username 
                 ORDER BY activity_count DESC 
                 LIMIT 1
             ''')
-            
-      
+
+            # Eng oxirgi qo‘shilgan foydalanuvchi
             last_user = await conn.fetchrow('''
-                SELECT user_id, username, created_at FROM users 
-                ORDER BY created_at DESC LIMIT 1
+                SELECT user_id, username, created_at 
+                FROM users 
+                ORDER BY created_at DESC 
+                LIMIT 1
             ''')
 
-  
-        def format_user(user):
-            if not user:
-                return "Mavjud emas"
-            return f"@{user['username']}" if user['username'] else f"ID:{user['user_id']}"
-
+        # Statistika matnini tayyorlash
         text = (
-            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
-            f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n\n"
-            "🏆 <b>Eng faol foydalanuvchilar:</b>\n"
-            f"• Oxirgi 30 kun: {format_user(most_active_30days)}\n"
-            f"• Bugun: {format_user(most_active_today)}\n\n"
-            f"🆕 Oxirgi qo'shilgan: {format_user(last_user)}\n\n"
-            f"⏳ So'rov vaqti: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            "📊 <b>Statistika</b>\n\n"
+            f"👥 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
+            
+            f"🏆 Oxirgi 30 kun eng faol:\n"
+            f"├ 👤 <b>{most_active_30days['username'] if most_active_30days else '—'}</b>\n"
+            f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
+
+            f"🔥 Bugungi eng faol:\n"
+            f"├ 👤 <b>{most_active_today['username'] if most_active_today else '—'}</b>\n"
+            f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
+
+            f"🆕 Oxirgi foydalanuvchi:\n"
+            f"├ 👤 <b>{last_user['username'] if last_user else '—'}</b>\n"
+            f"└ 📅 Qo‘shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
         )
 
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
+        await message.answer(text, parse_mode="HTML")
+
     except Exception as e:
-        logger.error(f"Statistika xatosi: {e}")
-        await message.answer("❌ Statistikani yuklashda xatolik yuz berdi", reply_markup=admin_keyboard)
+        await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 @dp.message(F.text == "🏆 Faol foydalanuvchilar")
 async def handle_top(message: Message):
