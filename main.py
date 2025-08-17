@@ -49,17 +49,22 @@ error_messages = [
 
 pool = None
 
+
+pool = None
+
 async def create_db_pool():
     global pool
     if pool is None:
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
+
 async def create_users_table():
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
+        # Users jadvali
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -69,6 +74,7 @@ async def create_users_table():
                 is_active BOOLEAN DEFAULT TRUE
             );
         ''')
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY,
@@ -76,6 +82,7 @@ async def create_users_table():
                 added_by BIGINT
             );
         ''')
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -85,6 +92,7 @@ async def create_users_table():
                 activity_type VARCHAR(50)
             );
         ''')
+
 
 async def save_user(user_id: int, username: str = None):
     global pool
@@ -99,6 +107,7 @@ async def save_user(user_id: int, username: str = None):
                 is_active = TRUE
         ''', user_id, username)
 
+
 async def log_user_activity(user_id: int, username: str, activity_type: str):
     global pool
     async with pool.acquire() as conn:
@@ -107,25 +116,33 @@ async def log_user_activity(user_id: int, username: str, activity_type: str):
             VALUES ($1, $2, $3)
         ''', user_id, username, activity_type)
 
+
 async def get_all_users():
     global pool
     async with pool.acquire() as conn:
-        return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
+        return await conn.fetch('SELECT user_id, username FROM users WHERE is_active = TRUE')
+
 
 async def deactivate_user(user_id: int):
     global pool
     async with pool.acquire() as conn:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
+
 async def get_users_count():
     global pool
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
+
 async def is_admin(user_id: int) -> bool:
     global pool
     async with pool.acquire() as conn:
-        return await conn.fetchval('SELECT EXISTS(SELECT 1 FROM admins WHERE user_id = $1)', user_id)
+        return await conn.fetchval(
+            'SELECT EXISTS(SELECT 1 FROM admins WHERE user_id = $1)',
+            user_id
+        )
+
 
 async def get_all_admins():
     global pool
@@ -135,7 +152,7 @@ async def get_all_admins():
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
-# Start handler
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     await save_user(message.from_user.id, message.from_user.username)
