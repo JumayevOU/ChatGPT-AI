@@ -438,14 +438,14 @@ async def handle_text(message: Message):
     await log_user_activity(user_id, message.from_user.username, "text_message")
     
     
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
     
     try:
         
         for percent in range(10, 91, 10):
             filled = percent // 10
             progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda...</b> {progress_bar} {percent}%")
+            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%")
             await asyncio.sleep(0.2)  
 
       
@@ -455,7 +455,7 @@ async def handle_text(message: Message):
         update_chat_history(chat_id, reply, role="assistant")
         
         
-        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda...</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.3)  
         await bot.delete_message(chat_id, loading.message_id)
         
