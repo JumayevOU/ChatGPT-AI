@@ -238,20 +238,29 @@ async def handle_top(message: Message):
             ORDER BY activity_count DESC
             LIMIT 10
         ''')
+
+    def format_user(user_id, username):
+        if username:
+            return f"@{username}"
+        else:
+            return f'<a href="tg://user?id={user_id}">User {user_id}</a>'
     
     def format_table(data, title):
         result = f"🏆 <b>{title}</b>\n\n"
+        emojis = ["👑", "🥈", "🥉"]  
         for i, row in enumerate(data, 1):
-            username = row['username'] or f"ID:{row['user_id']}"
-            result += f"{i}. {username} - {row['activity_count']} marta\n"
+            medal = emojis[i-1] if i <= 3 else f"{i}️⃣"
+            user_link = format_user(row["user_id"], row["username"])
+            result += f"{medal} 👤 {user_link} — <b>{row['activity_count']}</b> marta\n"
         return result
     
     response = (
-        format_table(two_weeks_top, "So'nggi 2 hafta top 5") + "\n\n" +
-        format_table(one_month_top, "So'nggi 1 oy top 10")
+        format_table(two_weeks_top, "So'nggi 2 hafta — TOP 5") + "\n\n" +
+        format_table(one_month_top, "So'nggi 1 oy — TOP 10")
     )
     
-    await message.answer(response, parse_mode=ParseMode.HTML)
+    await message.answer(response, parse_mode="HTML")
+
 
 @dp.message(Command("users"))
 async def handle_users_command(message: Message):
@@ -262,7 +271,7 @@ async def handle_users_command(message: Message):
         global pool
         async with pool.acquire() as conn:
 
-            # Adminni hisoblamaslik
+            
             total_users = await conn.fetchval(
                 "SELECT COUNT(*) FROM users WHERE user_id != $1", ADMIN_ID
             )
@@ -295,7 +304,7 @@ async def handle_users_command(message: Message):
                 LIMIT 1
             ''', ADMIN_ID)
 
-        # 🔗 Username yoki ID link yasash funksiyasi
+        
         def format_user(user):
             if not user:
                 return "—"
