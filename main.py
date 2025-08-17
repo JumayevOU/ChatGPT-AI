@@ -161,7 +161,7 @@ async def handle_start(message: Message):
     if await is_admin(message.from_user.id):
         await message.answer(
             "👋 <b>Admin panelga xush kelibsiz!</b>",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard
         )
         return
 
@@ -219,12 +219,12 @@ async def handle_text(message: Message):
 @dp.message(F.text == "📢 Barchaga xabar yuborish")
 async def handle_sendall(message: Message):
     if not await is_admin(message.from_user.id):
-        await message.answer("❌ Bu buyruq faqat admin uchun.", reply_markup=admin_keyboard())
+        await message.answer("❌ Bu buyruq faqat admin uchun.", reply_markup=admin_keyboard)
         return
 
     text_to_send = message.text.replace("📢 Barchaga xabar yuborish", "", 1).strip()
     if not text_to_send:
-        await message.answer("✍️ Yuboriladigan xabarni ham yozing:", reply_markup=admin_keyboard())
+        await message.answer("✍️ Yuboriladigan xabarni ham yozing:", reply_markup=admin_keyboard)
         return
 
     user_ids = await get_all_users()
@@ -244,23 +244,23 @@ async def handle_sendall(message: Message):
             logger.warning(f"Xatolik: {user_id} - {e}")
             fail += 1
 
-    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta yuborilmadi.", reply_markup=admin_keyboard())
+    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta yuborilmadi.", reply_markup=admin_keyboard)
 
 @dp.message(F.text == "📨 Userga xabar yuborish")
 async def handle_pm(message: Message):
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard())
+        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard)
     
     try:
         command, *rest = message.text.split(maxsplit=1)
         if not rest:
             return await message.answer("❗ Format: <code>📨 Userga xabar yuborish user_id xabar matni</code>", 
-                                      reply_markup=admin_keyboard())
+                                      reply_markup=admin_keyboard)
         
         parts = rest[0].split(maxsplit=1)
         if len(parts) < 2:
             return await message.answer("❗ Format: <code>📨 Userga xabar yuborish user_id xabar matni</code>", 
-                                      reply_markup=admin_keyboard())
+                                      reply_markup=admin_keyboard)
         
         identifier, text = parts[0], parts[1]
         
@@ -271,24 +271,24 @@ async def handle_pm(message: Message):
                     identifier[1:]
                 )
             if not user_id:
-                return await message.answer("❌ Foydalanuvchi topilmadi", reply_markup=admin_keyboard())
+                return await message.answer("❌ Foydalanuvchi topilmadi", reply_markup=admin_keyboard)
         else:
             try:
                 user_id = int(identifier)
             except ValueError:
                 return await message.answer("❗ Noto'g'ri ID format. Faqat raqam yoki @username kiriting", 
-                                         reply_markup=admin_keyboard())
+                                         reply_markup=admin_keyboard)
         
         await bot.send_message(
             user_id,
             f"📨 <b>Admin xabari:</b>\n\n{text}\n\n",
             parse_mode=ParseMode.HTML
         )
-        await message.answer(f"✅ Xabar {identifier} ga yuborildi", reply_markup=admin_keyboard())
+        await message.answer(f"✅ Xabar {identifier} ga yuborildi", reply_markup=admin_keyboard)
         
     except Exception as e:
         logger.error(f"PM xatosi: {e}")
-        await message.answer("❌ Xatolik yuz berdi. Iltimos, formatga e'tibor bering.", reply_markup=admin_keyboard())
+        await message.answer("❌ Xatolik yuz berdi. Iltimos, formatga e'tibor bering.", reply_markup=admin_keyboard)
 
 @dp.message(F.text == "📊 Statistika")
 async def handle_stats_command(message: Message):
@@ -299,7 +299,7 @@ async def handle_stats_command(message: Message):
 @dp.message(F.text == "🏆 Faol foydalanuvchilar")
 async def handle_top(message: Message):
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard())
+        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard)
     
     global pool
     async with pool.acquire() as conn:
@@ -335,7 +335,7 @@ async def handle_top(message: Message):
         format_table(one_month_top, "So'nggi 1 oy top 10")
     )
     
-    await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=admin_keyboard())
+    await message.answer(response, parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
 
 @dp.message(F.text == "📄 Userlar ro'yxati")
 async def handle_dump_users(message: Message):
@@ -373,34 +373,34 @@ async def handle_dump_users(message: Message):
         await message.answer_document(
             file_to_send,
             caption="📄 Foydalanuvchilar ro'yxati",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard)
         )
         os.remove(temp_file)
 
     except Exception as e:
         await message.answer(
             f"❌ Xatolik yuz berdi: {str(e)}",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard
         )
 
 
 @dp.message(F.text == "➕ Admin qo'shish")
 async def handle_add_admin(message: Message):
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard())
+        return await message.answer("❌ Bu buyruq faqat admin uchun", reply_markup=admin_keyboard)
     
     try:
         command, *rest = message.text.split(maxsplit=1)
         if not rest:
             return await message.answer("❗ Format: <code>➕ Admin qo'shish user_id</code>", 
-                                      reply_markup=admin_keyboard())
+                                      reply_markup=admin_keyboard)
         
         new_admin_id = rest[0].strip()
         
         try:
             new_admin_id = int(new_admin_id)
         except ValueError:
-            return await message.answer("❗ Faqat raqam kiriting!", reply_markup=admin_keyboard())
+            return await message.answer("❗ Faqat raqam kiriting!", reply_markup=admin_keyboard)
         
         async with pool.acquire() as conn:
             user_exists = await conn.fetchval(
@@ -410,7 +410,7 @@ async def handle_add_admin(message: Message):
             
             if not user_exists:
                 return await message.answer("❌ Bunday foydalanuvchi topilmadi. Avval botga start bosishi kerak.",
-                                           reply_markup=admin_keyboard())
+                                           reply_markup=admin_keyboard)
             
             await conn.execute('''
                 INSERT INTO admins (user_id, added_by) 
@@ -418,9 +418,9 @@ async def handle_add_admin(message: Message):
                 ON CONFLICT DO NOTHING
             ''', new_admin_id, message.from_user.id)
         
-        await message.answer(f"✅ {new_admin_id} admin qilindi", reply_markup=admin_keyboard())
+        await message.answer(f"✅ {new_admin_id} admin qilindi", reply_markup=admin_keyboard)
     except Exception as e:
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}", reply_markup=admin_keyboard())
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}", reply_markup=admin_keyboard)
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
@@ -485,7 +485,7 @@ async def handle_photo(message: Message):
     if await is_admin(message.from_user.id):
         await message.answer(
             "👋 Siz admin paneldasiz. AI funksiyalar sizga mavjud emas.", 
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard
         )
         return
 
