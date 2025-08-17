@@ -225,7 +225,7 @@ async def process_user(message: Message, state: FSMContext):
                 return
 
     if not user_id:
-        await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko‘ring:")
+        await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko‘ring. Yoki user ID kiriting..!")
         return
 
     await state.update_data(user_id=user_id)
