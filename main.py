@@ -262,47 +262,62 @@ async def handle_users_command(message: Message):
         global pool
         async with pool.acquire() as conn:
 
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            # Adminni hisoblamaslik
+            total_users = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE user_id != $1", ADMIN_ID
+            )
 
             most_active_30days = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
                 WHERE activity_time >= NOW() - INTERVAL '30 days'
+                AND user_id != $1
                 GROUP BY user_id, username 
                 ORDER BY activity_count DESC 
                 LIMIT 1
-            ''')
+            ''', ADMIN_ID)
 
             most_active_today = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
                 WHERE activity_time >= CURRENT_DATE
+                AND user_id != $1
                 GROUP BY user_id, username 
                 ORDER BY activity_count DESC 
                 LIMIT 1
-            ''')
+            ''', ADMIN_ID)
 
             last_user = await conn.fetchrow('''
                 SELECT user_id, username, created_at 
                 FROM users 
+                WHERE user_id != $1
                 ORDER BY created_at DESC 
                 LIMIT 1
-            ''')
+            ''', ADMIN_ID)
+
+        # 🔗 Username yoki ID link yasash funksiyasi
+        def format_user(user):
+            if not user:
+                return "—"
+            if user["username"]:
+                return f"@{user['username']}"
+            else:
+                return f'<a href="tg://user?id={user["user_id"]}">User {user["user_id"]}</a>'
 
         text = (
             "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
             f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
             
             f"🏆 Oxirgi 30 kun eng faol:\n"
-            f"├ 👤 <b>{most_active_30days['username'] if most_active_30days else '—'}</b>\n"
+            f"├ 👤 {format_user(most_active_30days)}\n"
             f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
 
             f"🔥 Bugungi eng faol:\n"
-            f"├ 👤 <b>{most_active_today['username'] if most_active_today else '—'}</b>\n"
+            f"├ 👤 {format_user(most_active_today)}\n"
             f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
 
             f"🆕 Oxirgi foydalanuvchi:\n"
-            f"├ 👤 <b>{last_user['username'] if last_user else '—'}</b>\n"
+            f"├ 👤 {format_user(last_user)}\n"
             f"└ 📅 Qo‘shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
         )
 
@@ -310,6 +325,7 @@ async def handle_users_command(message: Message):
 
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
 
 
 @dp.message(Command("dump_users"))
