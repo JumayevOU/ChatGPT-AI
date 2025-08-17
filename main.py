@@ -299,10 +299,12 @@ async def handle_stats_command(message: Message):
         )
 
     try:
-        global pool
         async with pool.acquire() as conn:
 
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            total_users = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE is_active = TRUE"
+            )
+
 
             most_active_30days = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
@@ -330,6 +332,7 @@ async def handle_stats_command(message: Message):
                 LIMIT 1
             ''')
 
+   
         text = (
             "📊 <b>Statistika</b>\n\n"
             f"👥 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
@@ -351,6 +354,7 @@ async def handle_stats_command(message: Message):
 
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
 
 @dp.message(F.text == "🏆 Faol foydalanuvchilar")
 async def handle_top(message: Message):
