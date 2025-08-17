@@ -523,13 +523,13 @@ async def handle_photo(message: Message):
             )
             await asyncio.sleep(0.3)
 
-        
+    
         text = await extract_text_from_image(image_bytes.read())
         if not text or len(text.strip()) < 3:
             await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
             await asyncio.sleep(0.5)
             await loading.delete()
-            await message.answer("❗ Rasmda tushunarlik matn topilmadi.")
+            await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
         for percent in range(50, 81, 10):
@@ -542,7 +542,6 @@ async def handle_photo(message: Message):
                 parse_mode="HTML"
             )
             await asyncio.sleep(0.3)
-
 
         reply = await get_mistral_reply(chat_id, text)
         
@@ -557,16 +556,16 @@ async def handle_photo(message: Message):
             )
             await asyncio.sleep(0.2)
 
-       
+
         await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.5)
         await loading.delete()
         await message.answer(reply, parse_mode="Markdown")
         
     except Exception as e:
-        logger.error(f"Xatolik: {str(e)}")
+        logger.error(f"[OCR xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
             await asyncio.sleep(1.5)
             await loading.delete()
         except:
