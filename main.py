@@ -292,68 +292,8 @@ async def handle_pm(message: Message):
 
 @dp.message(F.text == "📊 Statistika")
 async def handle_stats_command(message: Message):
-    if not await is_admin(message.from_user.id):
-        return await message.answer(
-            "❌ Sizda bu buyruqni ishlatish huquqi yo'q.",
-            reply_markup=admin_keyboard()
-        )
+    await message.answer("Handler ishladi ✅")
 
-    try:
-        async with pool.acquire() as conn:
-
-            total_users = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE is_active = TRUE"
-            )
-
-
-            most_active_30days = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) AS activity_count 
-                FROM user_activity 
-                WHERE activity_time >= NOW() - INTERVAL '30 days'
-                GROUP BY user_id, username 
-                ORDER BY activity_count DESC 
-                LIMIT 1
-            ''')
-
-            most_active_today = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) AS activity_count 
-                FROM user_activity 
-                WHERE activity_time >= CURRENT_DATE
-                GROUP BY user_id, username 
-                ORDER BY activity_count DESC 
-                LIMIT 1
-            ''')
-
-
-            last_user = await conn.fetchrow('''
-                SELECT user_id, username, created_at 
-                FROM users 
-                ORDER BY created_at DESC 
-                LIMIT 1
-            ''')
-
-   
-        text = (
-            "📊 <b>Statistika</b>\n\n"
-            f"👥 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
-            
-            f"🏆 Oxirgi 30 kun eng faol:\n"
-            f"├ 👤 <b>{most_active_30days['username'] if most_active_30days else '—'}</b>\n"
-            f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
-
-            f"🔥 Bugungi eng faol:\n"
-            f"├ 👤 <b>{most_active_today['username'] if most_active_today else '—'}</b>\n"
-            f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
-
-            f"🆕 Oxirgi foydalanuvchi:\n"
-            f"├ 👤 <b>{last_user['username'] if last_user else '—'}</b>\n"
-            f"└ 📅 Qo‘shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
-        )
-
-        await message.answer(text, parse_mode="HTML")
-
-    except Exception as e:
-        await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 
 @dp.message(F.text == "🏆 Faol foydalanuvchilar")
