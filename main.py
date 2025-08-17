@@ -438,14 +438,14 @@ async def handle_text(message: Message):
     await log_user_activity(user_id, message.from_user.username, "text_message")
 
     # Progress xabari
-    progress_message = await message.answer("📤 Javob tayyorlanmoqda: 0%")
+    progress_message = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b> 0%")
 
     async def progress_updater(msg):
         progress = 0
         try:
             while True:
                 progress = min(progress + 5, 95)
-                await msg.edit_text(f"📤 Javob tayyorlanmoqda: {progress}%")
+                await msg.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda...</b> {progress}%")
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             await msg.delete()
@@ -460,7 +460,7 @@ async def handle_text(message: Message):
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-        # AI javobi kelganda progress taskni to‘xtatamiz va xabarni o‘chirib yuboramiz
+        # AI javobi kelganda progress taskni to‘xtatamiz
         progress_task.cancel()
         await message.answer(reply, parse_mode="Markdown")
 
@@ -479,14 +479,14 @@ async def handle_photo(message: Message):
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "photo_message")
 
-    progress_message = await message.answer("📤 Javob tayyorlanmoqda: 0%")
+    progress_message = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b> 0%")
 
     async def progress_updater(msg):
         progress = 0
         try:
             while True:
                 progress = min(progress + 5, 95)
-                await msg.edit_text(f"📤 Javob tayyorlanmoqda: {progress}%")
+                await msg.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda...</b> {progress}%")
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             await msg.delete()
@@ -518,6 +518,7 @@ async def handle_photo(message: Message):
         logger.error(f"[OCR xatolik] {e}")
         progress_task.cancel()
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
+
 
 
 async def notify_inactive_users():
