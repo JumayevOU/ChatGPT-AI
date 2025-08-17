@@ -146,72 +146,105 @@ async def handle_start(message: Message):
 
 @dp.message(Command("send"))
 async def handle_sendall(message: Message):
+    
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Bu buyruq faqat admin uchun.")
         return
 
+    
     text_to_send = message.text.replace("/send", "", 1).strip()
     if not text_to_send:
-        await message.answer("✍️ Yuboriladigan xabarni ham yozing: /send Xabar matni")
+        await message.answer("✍️ Iltimos, yuboriladigan xabarni yozing: /send Xabar matni")
         return
 
+   
     user_ids = await get_all_users()
-    success, fail = 0, 0
+    
+    success, fail = 0, 0  
 
-    for record in user_ids:
+    
+    progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
+
+    
+    for i, record in enumerate(user_ids, 1):
         user_id = record['user_id']
         try:
-            await bot.send_message(user_id, text_to_send)
+            await bot.send_message(user_id, text_to_send)  
             success += 1
-            await asyncio.sleep(0.05)
         except (TelegramForbiddenError, TelegramNotFound):
-            logger.warning(f"❌ Bot bloklangan yoki foydalanuvchi topilmadi: {user_id}")
+            
+            logger.warning(f"❌ Foydalanuvchi topilmadi yoki bloklangan: {user_id}")
             await deactivate_user(user_id)
             fail += 1
         except Exception as e:
-            logger.warning(f"Xatolik: {user_id} - {e}")
+           
+            logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
             fail += 1
 
-    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas).")
+        
+        percent = int(i / len(user_ids) * 100)
+        await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
+        await asyncio.sleep(0.05)  
+
+    
+    await progress_message.edit_text(
+        f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
+        f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
+    )
+
+
+class PMStates(StatesGroup):
+    waiting_for_user = State()
+    waiting_for_message = State()
 
 @dp.message(Command("pm"))
-async def handle_pm(message: Message):
+async def cmd_pm(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
-        return await message.answer("❌ Bu buyruq faqat admin uchun")
-    
-    try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            return await message.answer("❗ Format: /pm <ID yoki @username> <xabar>")
-        
-        identifier, text = parts[1], parts[2]
-        
-        if identifier.startswith('@'):
-            global pool
-            async with pool.acquire() as conn:
-                user_id = await conn.fetchval(
-                    'SELECT user_id FROM users WHERE username = $1', 
-                    identifier[1:]
-                )
-            if not user_id:
-                return await message.answer("❌ Foydalanuvchi topilmadi")
+        await message.answer("❌ Bu buyruq faqat admin uchun.")
+        return
+
+    await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
+    await state.set_state(PMStates.waiting_for_user)
+
+
+@dp.message(PMStates.waiting_for_user)
+async def process_user(message: Message, state: FSMContext):
+    identifier = message.text.strip()
+    async with pool.acquire() as conn:
+        if identifier.startswith("@"):
+            user_id = await conn.fetchval(
+                "SELECT user_id FROM users WHERE username = $1", identifier[1:]
+            )
         else:
             try:
                 user_id = int(identifier)
             except ValueError:
-                return await message.answer("❗ Noto'g'ri ID format")
-        
-        await bot.send_message(
-            user_id,
-            f"📨 <b>Admin xabari:</b>\n\n{text}\n\n",
-            parse_mode=ParseMode.HTML
-        )
-        await message.answer(f"✅ Xabar {identifier} ga yuborildi")
-        
-    except Exception as e:
-        logger.error(f"PM xatosi: {e}")
-        await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring")
+                await message.answer("❌ Noto‘g‘ri ID format. Qayta urinib ko‘ring:")
+                return
 
+    if not user_id:
+        await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko‘ring:")
+        return
+
+    await state.update_data(user_id=user_id)
+    await message.answer("✍️ Endi xabar matnini kiriting:")
+    await state.set_state(PMStates.waiting_for_message)
+
+
+@dp.message(PMStates.waiting_for_message)
+async def process_message(message: Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data["user_id"]
+    text = message.text.strip()
+    
+    progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
+    try:
+        await bot.send_message(user_id, f"📨 <b>Admin xabari:</b>\n\n{text}", parse_mode=ParseMode.HTML)
+        await progress_message.edit_text("📤 Xabar yuborildi ✅")
+    except Exception as e:
+        await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
+
+    await state.clear()
 @dp.message(Command("top"))
 async def handle_top(message: Message):
     if message.from_user.id != ADMIN_ID:
