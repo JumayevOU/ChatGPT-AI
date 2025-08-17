@@ -525,6 +525,31 @@ async def progress_updater(chat_id, loading_message):
        
         return
 
+async def notify_inactive_users():
+    while True:
+        await asyncio.sleep(3600 * 24 * 7)
+        global pool
+        async with pool.acquire() as conn:
+            inactive_users = await conn.fetch('''
+                SELECT user_id FROM users 
+                WHERE last_seen < NOW() - INTERVAL '7 days' 
+                AND is_active = TRUE
+            ''')
+            for record in inactive_users:
+                user_id = record['user_id']
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
+                    )
+                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
+                    await asyncio.sleep(0.1)
+                except (TelegramForbiddenError, TelegramNotFound):
+                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+                except Exception as e:
+                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
+
+
 async def main():
     await bot(DeleteWebhook(drop_pending_updates=True))
     asyncio.create_task(notify_inactive_users())
