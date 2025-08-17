@@ -284,10 +284,9 @@ async def handle_stats_command(message: Message):
     try:
         global pool
         async with pool.acquire() as conn:
-            # Umumiy foydalanuvchilar soni
+
             total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
 
-            # Oxirgi 30 kun ichida eng faol foydalanuvchi
             most_active_30days = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
@@ -297,7 +296,6 @@ async def handle_stats_command(message: Message):
                 LIMIT 1
             ''')
 
-            # Bugungi kunda eng faol foydalanuvchi
             most_active_today = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
@@ -307,7 +305,7 @@ async def handle_stats_command(message: Message):
                 LIMIT 1
             ''')
 
-            # Eng oxirgi qo‘shilgan foydalanuvchi
+
             last_user = await conn.fetchrow('''
                 SELECT user_id, username, created_at 
                 FROM users 
@@ -315,7 +313,6 @@ async def handle_stats_command(message: Message):
                 LIMIT 1
             ''')
 
-        # Statistika matnini tayyorlash
         text = (
             "📊 <b>Statistika</b>\n\n"
             f"👥 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
@@ -390,12 +387,26 @@ async def handle_dump_users(message: Message):
     try:
         global pool
         async with pool.acquire() as conn:
-            users = await conn.fetch("SELECT user_id, username, created_at FROM users")
+            users = await conn.fetch("""
+                SELECT user_id, username 
+                FROM users
+                ORDER BY created_at ASC
+            """)
 
         temp_file = "temp_users.json"
-        with open(temp_file, "w") as f:
-            json.dump([dict(user) for user in users], f, indent=4, default=str)  
-            
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(
+                [
+                    {
+                        "user_id": user["user_id"],
+                        "username": user["username"] if user["username"] else None
+                    }
+                    for user in users
+                ],
+                f,
+                indent=4,
+                ensure_ascii=False
+            )
 
         file_to_send = FSInputFile(temp_file)
         await message.answer_document(
