@@ -255,20 +255,59 @@ async def handle_top(message: Message):
 
 @dp.message(Command("users"))
 async def handle_users_command(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if not await is_admin(message.from_user.id):
         return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
-    
+
     try:
-        total_users = await get_users_count()
+        global pool
+        async with pool.acquire() as conn:
+
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+
+            most_active_30days = await conn.fetchrow('''
+                SELECT user_id, username, COUNT(*) AS activity_count 
+                FROM user_activity 
+                WHERE activity_time >= NOW() - INTERVAL '30 days'
+                GROUP BY user_id, username 
+                ORDER BY activity_count DESC 
+                LIMIT 1
+            ''')
+
+            most_active_today = await conn.fetchrow('''
+                SELECT user_id, username, COUNT(*) AS activity_count 
+                FROM user_activity 
+                WHERE activity_time >= CURRENT_DATE
+                GROUP BY user_id, username 
+                ORDER BY activity_count DESC 
+                LIMIT 1
+            ''')
+
+            last_user = await conn.fetchrow('''
+                SELECT user_id, username, created_at 
+                FROM users 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            ''')
 
         text = (
             "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
-            f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n"
-            "🕵️‍♂️ Har bir foydalanuvchi men bilan tanishib chiqqan! 😊\n\n"
-            "📅 Statistikani yangilash: <i>real vaqtda</i>"
+            f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
+            
+            f"🏆 Oxirgi 30 kun eng faol:\n"
+            f"├ 👤 <b>{most_active_30days['username'] if most_active_30days else '—'}</b>\n"
+            f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
+
+            f"🔥 Bugungi eng faol:\n"
+            f"├ 👤 <b>{most_active_today['username'] if most_active_today else '—'}</b>\n"
+            f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
+
+            f"🆕 Oxirgi foydalanuvchi:\n"
+            f"├ 👤 <b>{last_user['username'] if last_user else '—'}</b>\n"
+            f"└ 📅 Qo‘shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
         )
 
-        await message.answer(text, parse_mode=ParseMode.HTML)
+        await message.answer(text, parse_mode="HTML")
+
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
