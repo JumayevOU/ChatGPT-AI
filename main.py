@@ -382,19 +382,35 @@ async def handle_top(message: Message):
 @dp.message(F.text == "📄 Userlar ro'yxati")
 async def handle_dump_users(message: Message):
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.", reply_markup=admin_keyboard)
+        return await message.answer(
+            "❌ Sizda bu buyruqni ishlatish huquqi yo'q.",
+            reply_markup=admin_keyboard
+        )
 
     try:
-        users = await get_all_users()
+        global pool
+        async with pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id, username, created_at FROM users")
+
         temp_file = "temp_users.json"
         with open(temp_file, "w") as f:
-            json.dump([dict(user) for user in users], f, indent=4)
-        
+            json.dump([dict(user) for user in users], f, indent=4, default=str)  
+            
+
         file_to_send = FSInputFile(temp_file)
-        await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati", reply_markup=admin_keyboard)
+        await message.answer_document(
+            file_to_send,
+            caption="📄 Foydalanuvchilar ro'yxati",
+            reply_markup=admin_keyboard
+        )
         os.remove(temp_file)
+
     except Exception as e:
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}", reply_markup=admin_keyboard)
+        await message.answer(
+            f"❌ Xatolik yuz berdi: {str(e)}",
+            reply_markup=admin_keyboard
+        )
+
 
 @dp.message(F.text == "➕ Admin qo'shish")
 async def handle_add_admin(message: Message):
