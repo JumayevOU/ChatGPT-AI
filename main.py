@@ -401,7 +401,7 @@ async def handle_text(message: Message):
     chat_id = message.chat.id
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
-
+    await message.react("👀")
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
     try:
