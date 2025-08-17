@@ -256,8 +256,7 @@ async def handle_top(message: Message):
 @dp.message(Command("users"))
 async def handle_users_command(message: Message):
     if message.from_user.id != ADMIN_ID:
-    return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
-
+        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
 
     try:
         global pool
@@ -311,6 +310,7 @@ async def handle_users_command(message: Message):
 
     except Exception as e:
         await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
 
 @dp.message(Command("dump_users"))
 async def handle_dump_users(message: Message):
