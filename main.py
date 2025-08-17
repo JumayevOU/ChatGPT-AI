@@ -436,24 +436,45 @@ async def handle_text(message: Message):
     chat_id = message.chat.id
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+    
+    # Yuklash xabarini yuborish
+    loading = await message.answer("🧠 ▱▱▱▱▱▱▱▱▱▱ 0%")
+    
     try:
+        # Progress bar animatsiyasi (10% dan 90% gacha)
+        for percent in range(10, 91, 10):
+            filled = percent // 10
+            progress_bar = "▰" * filled + "▱" * (10 - filled)
+            await loading.edit_text(f"🧠 {progress_bar} {percent}%")
+            await asyncio.sleep(0.2)  # Har bir yangilanish oralig'i
+
+        # Asosiy ishlar
         update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
+        
+        # Yakuniy animatsiya (100%)
+        await loading.edit_text("🧠 ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.3)  # Foydalanuvchi ko'ra olishi uchun
         await bot.delete_message(chat_id, loading.message_id)
+        
+        # Javobni yuborish
         await message.answer(reply, parse_mode="Markdown")
+        
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
+            # Xatolik yuz berganda progress barni qizil qilish
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await asyncio.sleep(2)
             await bot.delete_message(chat_id, loading.message_id)
         except:
             pass
+        
         await message.answer(
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
-
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
