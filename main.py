@@ -266,14 +266,14 @@ async def handle_text(message: Message):
         logger.error(f"Matnli xabar handlerida xato: {e}")
         await message.answer(random.choice(error_messages))
 
-@dp.message(F.text == "📢 Barchaga xabar yuborish")
+@dp.message(F.text == "Barchaga xabar yuborish")
 async def handle_sendall(message: Message):
     try:
         if not await is_admin(message.from_user.id):
             await message.answer("❌ Bu buyruq faqat admin uchun.", reply_markup=admin_keyboard)
             return
 
-        text_to_send = message.text.replace("📢 Barchaga xabar yuborish", "", 1).strip()
+        text_to_send = message.text.replace("Barchaga xabar yuborish", "", 1).strip()
         if not text_to_send:
             await message.answer("✍️ Yuboriladigan xabarni ham yozing:", reply_markup=admin_keyboard)
             return
@@ -300,7 +300,7 @@ async def handle_sendall(message: Message):
         logger.error(f"Barchaga xabar yuborishda xato: {e}")
         await message.answer("❌ Xabarlarni yuborishda xatolik yuz berdi.", reply_markup=admin_keyboard)
 
-@dp.message(F.text == "📨 Userga xabar yuborish")
+@dp.message(F.text == "Userga xabar yuborish")
 async def handle_pm(message: Message):
     try:
         if not await is_admin(message.from_user.id):
@@ -308,12 +308,12 @@ async def handle_pm(message: Message):
         
         command, *rest = message.text.split(maxsplit=1)
         if not rest:
-            return await message.answer("❗ Format: <code>📨 Userga xabar yuborish user_id xabar matni</code>", 
+            return await message.answer("❗ Format: <code>Userga xabar yuborish user_id xabar matni</code>", 
                                       reply_markup=admin_keyboard)
         
         parts = rest[0].split(maxsplit=1)
         if len(parts) < 2:
-            return await message.answer("❗ Format: <code>📨 Userga xabar yuborish user_id xabar matni</code>", 
+            return await message.answer("❗ Format: <code>Userga xabar yuborish user_id xabar matni</code>", 
                                       reply_markup=admin_keyboard)
         
         identifier, text = parts[0], parts[1]
@@ -344,7 +344,7 @@ async def handle_pm(message: Message):
         logger.error(f"PM xatosi: {e}")
         await message.answer("❌ Xatolik yuz berdi. Iltimos, formatga e'tibor bering.", reply_markup=admin_keyboard)
 
-@dp.message(F.text == "📊 Statistika")
+@dp.message(F.text == "Statistika")
 async def handle_stats_command(message: Message):
     try:
         if not await is_admin(message.from_user.id):
@@ -392,7 +392,7 @@ async def handle_stats_command(message: Message):
         logger.error(f"Statistika handlerida xato: {e}")
         await message.answer("❌ Statistikani yuklashda xato. Iltimos, keyinroq urinib ko'ring.", reply_markup=admin_keyboard)
 
-@dp.message(F.text == "🏆 Faol foydalanuvchilar")
+@dp.message(F.text == "Faol foydalanuvchilar")
 async def handle_top(message: Message):
     try:
         if not await is_admin(message.from_user.id):
@@ -436,7 +436,7 @@ async def handle_top(message: Message):
         logger.error(f"Faol foydalanuvchilar handlerida xato: {e}")
         await message.answer("❌ Ma'lumotlarni yuklashda xato. Iltimos, keyinroq urinib ko'ring.", reply_markup=admin_keyboard)
 
-@dp.message(F.text == "📄 Userlar ro'yxati")
+@dp.message(F.text == "Userlar ro'yxati")
 async def handle_dump_users(message: Message):
     try:
         if not await is_admin(message.from_user.id):
@@ -482,7 +482,7 @@ async def handle_dump_users(message: Message):
             reply_markup=admin_keyboard
         )
 
-@dp.message(F.text == "➕ Admin qo'shish")
+@dp.message(F.text == "Admin qo'shish")
 async def handle_add_admin(message: Message):
     try:
         if not await is_admin(message.from_user.id):
