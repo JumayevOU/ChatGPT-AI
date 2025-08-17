@@ -1,20 +1,18 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.types import KeyboardButton
 
-admin_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text="📢 Barchaga xabar yuborish"),
-            KeyboardButton(text="📨 Userga xabar yuborish")
-        ],
-        [
-            KeyboardButton(text="📊 Statistika"),
-            KeyboardButton(text="🏆 Faol foydalanuvchilar")
-        ],
-        [
-            KeyboardButton(text="📄 Userlar ro'yxati"),
-            KeyboardButton(text="➕ Admin qo'shish")
-        ]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=False
-)
+def get_admin_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(text="📢 Barchaga xabar yuborish"),
+        KeyboardButton(text="📨 Userga xabar yuborish")
+    )
+    builder.row(
+        KeyboardButton(text="📊 Statistika"),
+        KeyboardButton(text="🏆 Faol foydalanuvchilar")
+    )
+    builder.row(
+        KeyboardButton(text="📄 Userlar ro'yxati"),
+        KeyboardButton(text="➕ Admin qo'shish")
+    )
+    return builder.as_markup(resize_keyboard=True)
