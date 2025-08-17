@@ -439,17 +439,24 @@ async def handle_text(message: Message):
     
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
+  
+    progress_task = asyncio.create_task(progress_updater(chat_id, loading))
+
     try:
         update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-        await bot.delete_message(chat_id, loading.message_id)
+       
+        progress_task.cancel()
+        await loading.edit_text("📤 100% - Javob tayyor ✅")
+
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
+        progress_task.cancel()
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
@@ -458,23 +465,6 @@ async def handle_text(message: Message):
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
 
-async def extract_text_from_image(image_bytes: bytes) -> str:
-    url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": OCR_API_KEY}
-    data = {"language": "eng", "isOverlayRequired": False}
-
-    async with aiohttp.ClientSession() as session:
-        form = aiohttp.FormData()
-        form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-        for key, val in data.items():
-            form.add_field(key, str(val))
-
-        async with session.post(url, data=form, headers=headers) as resp:
-            result = await resp.json()
-            try:
-                return result["ParsedResults"][0]["ParsedText"].strip()
-            except Exception:
-                return ""
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
@@ -485,6 +475,9 @@ async def handle_photo(message: Message):
 
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
+  
+    progress_task = asyncio.create_task(progress_updater(chat_id, loading))
+
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -493,6 +486,7 @@ async def handle_photo(message: Message):
         text = await extract_text_from_image(image_bytes.read())
 
         if not text or len(text.strip()) < 3:
+            progress_task.cancel()
             await bot.delete_message(chat_id, loading.message_id)
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
@@ -502,41 +496,34 @@ async def handle_photo(message: Message):
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-        await bot.delete_message(chat_id, loading.message_id)
+        progress_task.cancel()
+        await loading.edit_text("📤 100% - Javob tayyor ✅")
+
         await message.answer(reply, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"[OCR xatolik] {e}")
+        progress_task.cancel()
         try:
             await bot.delete_message(chat_id, loading.message_id)
         except:
             pass
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
-async def notify_inactive_users():
-    while True:
-        await asyncio.sleep(3600 * 24 * 7)
-        global pool
-        async with pool.acquire() as conn:
-            inactive_users = await conn.fetch('''
-                SELECT user_id FROM users 
-                WHERE last_seen < NOW() - INTERVAL '7 days' 
-                AND is_active = TRUE
-            ''')
 
-            for record in inactive_users:
-                user_id = record['user_id']
-                try:
-                    await bot.send_message(
-                        user_id,
-                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
-                    )
-                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
-                    await asyncio.sleep(0.1)
-                except (TelegramForbiddenError, TelegramNotFound):
-                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
-                except Exception as e:
-                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
+async def progress_updater(chat_id, loading_message):
+    """AI javobi kelguncha progress yangilash"""
+    progress = 0
+    try:
+        while True:
+            progress += 5
+            if progress > 95:
+                progress = 95  
+            await loading_message.edit_text(f"📤 Xabar yuborilmoqda: {progress}%")
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+       
+        return
 
 async def main():
     await bot(DeleteWebhook(drop_pending_updates=True))
