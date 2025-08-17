@@ -19,7 +19,7 @@ import asyncpg
 
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
-from keyboards.default.admin import admin_keyboard
+from admin
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
