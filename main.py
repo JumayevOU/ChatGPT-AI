@@ -437,35 +437,35 @@ async def handle_text(message: Message):
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
     
-    # Yuklash xabarini yuborish
-    loading = await message.answer("🧠 ▱▱▱▱▱▱▱▱▱▱ 0%")
+    
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
     
     try:
-        # Progress bar animatsiyasi (10% dan 90% gacha)
+        
         for percent in range(10, 91, 10):
             filled = percent // 10
             progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(f"🧠 {progress_bar} {percent}%")
-            await asyncio.sleep(0.2)  # Har bir yangilanish oralig'i
+            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda...</b> {progress_bar} {percent}%")
+            await asyncio.sleep(0.2)  
 
-        # Asosiy ishlar
+      
         update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
         
-        # Yakuniy animatsiya (100%)
-        await loading.edit_text("🧠 ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.3)  # Foydalanuvchi ko'ra olishi uchun
+        
+        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda...</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.3)  
         await bot.delete_message(chat_id, loading.message_id)
         
-        # Javobni yuborish
+        
         await message.answer(reply, parse_mode="Markdown")
         
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
-            # Xatolik yuz berganda progress barni qizil qilish
+           
             await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
             await asyncio.sleep(2)
             await bot.delete_message(chat_id, loading.message_id)
@@ -495,33 +495,38 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    await save_user(user_id, message.from_user.username)
-    await log_user_activity(user_id, message.from_user.username, "photo_message")
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+    
+    
+    loading = await message.answer("🖼️ ▱▱▱▱▱▱▱▱▱▱ 0%")
+    
     try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        image_bytes = await bot.download_file(file.file_path)
+        
+        stages = [
+            (30, "🖼️ <b>Rasm yuklanmoqda...</b>"),
+            (60, "🔍 <b>Matn o'qilmoqda...</b>"), 
+            (90, "🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+        ]
+        
+        for percent, text in stages:
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(f"{text}\n{bar} {percent}%")
+            await asyncio.sleep(0.25)
+            
+        
         text = await extract_text_from_image(image_bytes.read())
-        if not text or len(text.strip()) < 3:
-            await bot.delete_message(chat_id, loading.message_id)
-            await message.answer("❗ Rasmda aniq matn topilmadi.")
-            return
-        update_chat_history(chat_id, text)
-        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
-        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
-        update_chat_history(chat_id, reply, role="assistant")
-        await bot.delete_message(chat_id, loading.message_id)
-        await message.answer(reply, parse_mode="Markdown")
+        reply = await get_mistral_reply(chat_id, text)
+        
+        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.3)
+        await loading.delete()
+        await message.answer(reply)
+        
     except Exception as e:
-        logger.error(f"[OCR xatolik] {e}")
-        try:
-            await bot.delete_message(chat_id, loading.message_id)
-        except:
-            pass
-        await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
+        
+        await loading.edit_text("❌ Jarayon bekor qilindi")
+        await asyncio.sleep(1.5)
+        await loading.delete()
+        await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
 
 async def notify_inactive_users():
