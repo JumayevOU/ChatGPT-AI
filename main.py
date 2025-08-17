@@ -255,8 +255,9 @@ async def handle_top(message: Message):
 
 @dp.message(Command("users"))
 async def handle_users_command(message: Message):
-    if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+    if message.from_user.id != ADMIN_ID:
+    return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+
 
     try:
         global pool
