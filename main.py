@@ -436,11 +436,11 @@ async def handle_text(message: Message):
     chat_id = message.chat.id
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
-    
+
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
-  
-    progress_task = asyncio.create_task(progress_updater(chat_id, loading))
+    # Progress task yaratish
+    progress_task = asyncio.create_task(progress_updater(loading))
 
     try:
         update_chat_history(chat_id, message.text)
@@ -448,9 +448,9 @@ async def handle_text(message: Message):
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-       
+        # Progress task ni cancel qilamiz (oxirida 100% matnni beradi)
         progress_task.cancel()
-        await loading.edit_text("📤 100% - Javob tayyor ✅")
+        await asyncio.sleep(0.1)  # cancelni ishlashi uchun kichik tanaffus
 
         await message.answer(reply, parse_mode="Markdown")
 
@@ -475,8 +475,8 @@ async def handle_photo(message: Message):
 
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
 
-  
-    progress_task = asyncio.create_task(progress_updater(chat_id, loading))
+    # Progress task yaratish
+    progress_task = asyncio.create_task(progress_updater(loading))
 
     try:
         photo = message.photo[-1]
@@ -497,7 +497,7 @@ async def handle_photo(message: Message):
         update_chat_history(chat_id, reply, role="assistant")
 
         progress_task.cancel()
-        await loading.edit_text("📤 100% - Javob tayyor ✅")
+        await asyncio.sleep(0.1)
 
         await message.answer(reply, parse_mode="Markdown")
 
@@ -509,6 +509,21 @@ async def handle_photo(message: Message):
         except:
             pass
         await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
+
+
+async def progress_updater(loading_message):
+    """AI javobi kelguncha progress yangilash"""
+    progress = 0
+    try:
+        while True:
+            progress = min(progress + 5, 95)
+            await loading_message.edit_text(f"📤 Javob tayyorlanmoqda: {progress}%")
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        # AI javobi kelgan va progress tugadi, 100% matnini qo'yamiz
+        await loading_message.edit_text("📤 100% - Javob tayyor ✅")
+        return
+
 
 
 async def progress_updater(chat_id, loading_message):
