@@ -495,33 +495,47 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    await save_user(user_id, message.from_user.username)
-    await log_user_activity(user_id, message.from_user.username, "photo_message")
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+    loading = await message.answer("🖼️ ▱▱▱▱▱▱▱▱▱▱ 0%")
+    start_time = time.time()
+    
     try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        image_bytes = await bot.download_file(file.file_path)
-        text = await extract_text_from_image(image_bytes.read())
-        if not text or len(text.strip()) < 3:
-            await bot.delete_message(chat_id, loading.message_id)
-            await message.answer("❗ Rasmda aniq matn topilmadi.")
-            return
-        update_chat_history(chat_id, text)
-        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
-        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
-        update_chat_history(chat_id, reply, role="assistant")
-        await bot.delete_message(chat_id, loading.message_id)
-        await message.answer(reply, parse_mode="Markdown")
+        
+        async with asyncio.TaskGroup() as tg:
+            
+            process_task = tg.create_task(process_image_message(message))
+            
+            
+            progress_task = tg.create_task(show_extended_progress(loading, 3.0))
+            
+        
+        text, reply = process_task.result()
+        
+        
+        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.5)
+        await loading.delete()
+        await message.answer(reply)
+        
     except Exception as e:
-        logger.error(f"[OCR xatolik] {e}")
-        try:
-            await bot.delete_message(chat_id, loading.message_id)
-        except:
-            pass
-        await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
+        await handle_photo_error(loading, message, e)
+
+async def show_extended_progress(loading_msg, total_duration):
+    """3 soniya davomida progressni ko'rsatish"""
+    start = time.time()
+    while (time.time() - start) < total_duration:
+        elapsed = time.time() - start
+        percent = min(99, int(elapsed/total_duration * 100))
+        bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+        
+        if percent < 40:
+            status = "🖼️ <b>Rasm yuklanmoqda...</b>"
+        elif percent < 80:
+            status = "🧠 <b>Savolingiz tahlil qilinmoqda...</b>"
+        else:
+            status = "🧠 <b>AI javob yozmoqda...</b>"
+        
+        await loading_msg.edit_text(f"{status}\n{bar} {percent}%")
+        await asyncio.sleep(0.2)
 
 
 async def notify_inactive_users():
