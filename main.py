@@ -495,47 +495,83 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    loading = await message.answer("🖼️ ▱▱▱▱▱▱▱▱▱▱ 0%")
-    start_time = time.time()
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "photo_message")
+    
+    
+    loading = await message.answer("🖼️ <b>Rasm yuklanmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
     
     try:
+        start_time = time.time()
+        total_duration = 3.0  
+
         
-        async with asyncio.TaskGroup() as tg:
-            
-            process_task = tg.create_task(process_image_message(message))
-            
-            
-            progress_task = tg.create_task(show_extended_progress(loading, 3.0))
-            
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        image_bytes = await bot.download_file(file.file_path)
         
-        text, reply = process_task.result()
+        for percent in range(10, 41, 10):
+            elapsed = time.time() - start_time
+            if elapsed >= total_duration: break
+            
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(
+                f"🖼️ <b>Rasm yuklanmoqda...</b>\n{bar} {percent}%", 
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.3)
+
         
+        text = await extract_text_from_image(image_bytes.read())
+        if not text or len(text.strip()) < 3:
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
+            await asyncio.sleep(0.5)
+            await loading.delete()
+            await message.answer("❗ Rasmda tushunarlik matn topilmadi.")
+            return
+
+        for percent in range(50, 81, 10):
+            elapsed = time.time() - start_time
+            if elapsed >= total_duration: break
+            
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(
+                f"🧠 <b>Savolingiz tahlil qilinmoqda...</b>\n{bar} {percent}%", 
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.3)
+
+
+        reply = await get_mistral_reply(chat_id, text)
         
+        for percent in range(90, 101, 10):
+            elapsed = time.time() - start_time
+            if elapsed >= total_duration: break
+            
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(
+                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%", 
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.2)
+
+       
         await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.5)
         await loading.delete()
-        await message.answer(reply)
+        await message.answer(reply, parse_mode="Markdown")
         
     except Exception as e:
-        await handle_photo_error(loading, message, e)
-
-async def show_extended_progress(loading_msg, total_duration):
-    """3 soniya davomida progressni ko'rsatish"""
-    start = time.time()
-    while (time.time() - start) < total_duration:
-        elapsed = time.time() - start
-        percent = min(99, int(elapsed/total_duration * 100))
-        bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-        
-        if percent < 40:
-            status = "🖼️ <b>Rasm yuklanmoqda...</b>"
-        elif percent < 80:
-            status = "🧠 <b>Savolingiz tahlil qilinmoqda...</b>"
-        else:
-            status = "🧠 <b>AI javob yozmoqda...</b>"
-        
-        await loading_msg.edit_text(f"{status}\n{bar} {percent}%")
-        await asyncio.sleep(0.2)
+        logger.error(f"Xatolik: {str(e)}")
+        try:
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await asyncio.sleep(1.5)
+            await loading.delete()
+        except:
+            pass
+        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
 
 async def notify_inactive_users():
