@@ -10,7 +10,6 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
-
 from keyboards import admin_keyboard
 
 logger = logging.getLogger(__name__)
@@ -25,24 +24,42 @@ class BroadcastStates(StatesGroup):
 class AddAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
-def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
+def register_admin_handlers(dp, bot: Bot, database_module):
+    """
+    database_module — import qilingan database moduli (misol: __import__('database'))
+    Endi ADMIN_ID talab qilinmaydi — har bir handler ichida DB orqali is_admin tekshiradi.
+    """
+
+    async def require_admin_or_deny(message: Message):
+        """Tez-tez ishlatiladigan admin tekshiruvi (handler ichida chaqiring)."""
+        try:
+            if not await database_module.is_admin(message.from_user.id):
+                await message.answer("❌ Bu buyruq faqat admin uchun.")
+                return False
+            return True
+        except Exception as e:
+            logger.exception("is_admin tekshiruvida xato")
+            await message.answer("❌ Server xatosi. Keyinroq urinib ko'ring.")
+            return False
+
     async def show_admin_keyboard(message: Message):
-        """Ko'rsatish uchun: /buyruqlar buyrug'i yoki admin kirganda ishlatish mumkin."""
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu faqat admin uchun.")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
 
-
     async def start_broadcast(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu faqat admin uchun.")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         await message.answer("✍️ Iltimos, barcha foydalanuvchilarga yuboriladigan xabar matnini kiriting:")
         await state.set_state(BroadcastStates.waiting_for_broadcast_text)
 
     async def process_broadcast(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
+        ok = await require_admin_or_deny(message)
+        if not ok:
             await state.clear()
-            return await message.answer("❌ Bu faqat admin uchun.")
+            return
         text_to_send = message.text.strip()
         if not text_to_send:
             await message.answer("❗ Xabar bo'sh. Iltimos matn yozing.")
@@ -81,16 +98,17 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         )
         await state.clear()
 
-
     async def cmd_pm(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu buyruq faqat admin uchun.")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
         await state.set_state(PMStates.waiting_for_user)
 
     async def process_user(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu buyruq faqat admin uchun.")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         identifier = message.text.strip()
         user_id = None
         try:
@@ -120,9 +138,10 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         await state.set_state(PMStates.waiting_for_message)
 
     async def process_message(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
+        ok = await require_admin_or_deny(message)
+        if not ok:
             await state.clear()
-            return await message.answer("❌ Bu buyruq faqat admin uchun.")
+            return
 
         data = await state.get_data()
         user_id = data.get("user_id")
@@ -142,10 +161,10 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
 
         await state.clear()
 
-
     async def handle_top(message: Message):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu buyruq faqat admin uchun")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
 
         async with database_module.pool.acquire() as conn:
             two_weeks_top = await conn.fetch('''
@@ -189,45 +208,41 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         )
         await message.answer(response, parse_mode="HTML")
 
-
     async def handle_users_command(message: Message):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
 
         try:
             async with database_module.pool.acquire() as conn:
                 total_users = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE user_id != $1",
-                    ADMIN_ID
+                    "SELECT COUNT(*) FROM users"
                 )
 
                 most_active_30days = await conn.fetchrow('''
                     SELECT user_id, username, COUNT(*) AS activity_count
                     FROM user_activity
                     WHERE activity_time >= NOW() - INTERVAL '30 days'
-                    AND user_id != $1
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 1
-                ''', ADMIN_ID)
+                ''')
 
                 most_active_today = await conn.fetchrow('''
                     SELECT user_id, username, COUNT(*) AS activity_count
                     FROM user_activity
                     WHERE activity_time >= CURRENT_DATE
-                    AND user_id != $1
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 1
-                ''', ADMIN_ID)
+                ''')
 
                 last_user = await conn.fetchrow('''
                     SELECT user_id, username, created_at
                     FROM users
-                    WHERE user_id != $1
                     ORDER BY created_at DESC
                     LIMIT 1
-                ''', ADMIN_ID)
+                ''')
 
             def format_user(user):
                 if not user:
@@ -255,11 +270,10 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             logger.exception("handle_users_command error")
             await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
-
     async def handle_dump_users(message: Message):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
-
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         try:
             users = await database_module.get_all_users()
             temp_file = "temp_users.json"
@@ -273,17 +287,18 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             logger.exception("handle_dump_users error")
             await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
 
-
     async def start_add_admin(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
-            return await message.answer("❌ Bu buyruq faqat admin uchun")
+        ok = await require_admin_or_deny(message)
+        if not ok:
+            return
         await message.answer("➕ Iltimos, yangi admin qilmoqchi bo'lgan foydalanuvchi ID sini kiriting:")
         await state.set_state(AddAdminStates.waiting_for_admin_id)
 
     async def process_add_admin(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
+        ok = await require_admin_or_deny(message)
+        if not ok:
             await state.clear()
-            return await message.answer("❌ Bu buyruq faqat admin uchun")
+            return
         try:
             new_admin_id = int(message.text.strip())
             async with database_module.pool.acquire() as conn:
@@ -302,10 +317,6 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             await state.clear()
 
 
-    dp.message.register(show_admin_keyboard, Command("buyruqlar"))
-    dp.message.register(show_admin_keyboard, Command("admin")) 
-
-  
     dp.message.register(start_broadcast, lambda message: message.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, lambda message: message.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, lambda message: message.text == '🏆 Faol foydalanuvchilar')
@@ -313,19 +324,16 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
     dp.message.register(handle_dump_users, lambda message: message.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, lambda message: message.text == "➕ Admin qo'shish")
 
-
+ 
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
 
-
-    dp.message.register(show_admin_keyboard, Command("start"))  
-
-
+  
     async def legacy_send_command(message: Message):
-
-        if message.from_user.id != ADMIN_ID:
+        ok = await require_admin_or_deny(message)
+        if not ok:
             return
         text_to_send = message.text.replace("/send", "", 1).strip()
         if not text_to_send:
@@ -357,4 +365,3 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         )
 
     dp.message.register(legacy_send_command, Command("send"))
-

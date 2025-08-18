@@ -1,15 +1,15 @@
 import os
 import asyncpg
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Optional, List
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 pool: Optional[asyncpg.pool.Pool] = None
 
 async def create_db_pool():
+    """Create and return a global asyncpg pool (if not created yet)."""
     global pool
     if pool is None:
         if not DATABASE_URL:
@@ -18,6 +18,7 @@ async def create_db_pool():
     return pool
 
 async def create_users_table():
+    """Create required tables if they do not exist. Does NOT insert any admin from .env."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -48,15 +49,12 @@ async def create_users_table():
             );
         ''')
 
-        
-        await conn.execute('''
-            INSERT INTO admins (user_id) VALUES ($1)
-            ON CONFLICT DO NOTHING
-        ''', ADMIN_ID)
 
-
-async def save_user(user_id: int, username: str = None):
+async def save_user(user_id: int, username: str | None = None) -> None:
+    """Insert or update user record (sets last_seen and is_active=True)."""
     global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO users (user_id, username, last_seen)
@@ -68,8 +66,11 @@ async def save_user(user_id: int, username: str = None):
                 is_active = TRUE
         ''', user_id, username)
 
-async def log_user_activity(user_id: int, username: str, activity_type: str):
+async def log_user_activity(user_id: int, username: str | None, activity_type: str) -> None:
+    """Log a row into user_activity."""
     global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO user_activity (user_id, username, activity_type)
@@ -77,16 +78,64 @@ async def log_user_activity(user_id: int, username: str, activity_type: str):
         ''', user_id, username, activity_type)
 
 async def get_all_users():
+    """Return list of active users (records with field user_id)."""
     global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
 
-async def deactivate_user(user_id: int):
+async def deactivate_user(user_id: int) -> None:
+    """Mark user as inactive."""
     global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
-async def get_users_count():
+async def get_users_count() -> int:
+    """Return count of active users."""
     global pool
+    if pool is None:
+        await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
+
+
+async def is_admin(user_id: int) -> bool:
+    """Return True if user_id exists in admins table."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
+        return bool(val)
+
+async def get_admins() -> List[int]:
+    """Return list of admin user_ids."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT user_id FROM admins')
+        return [r['user_id'] for r in rows]
+
+async def add_admin(user_id: int) -> None:
+    """Insert a new admin (idempotent)."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO admins (user_id)
+            VALUES ($1)
+            ON CONFLICT DO NOTHING
+        ''', user_id)
+
+async def remove_admin(user_id: int) -> None:
+    """Remove admin."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('DELETE FROM admins WHERE user_id = $1', user_id)
