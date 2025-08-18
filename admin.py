@@ -2,7 +2,6 @@ import logging
 import json
 import os
 import asyncio
-import functools
 from aiogram import Bot
 from aiogram.types import Message, FSInputFile
 from aiogram.enums import ParseMode
@@ -17,69 +16,9 @@ class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
 
-
 def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
-    async def is_admin_db(user_id: int) -> bool:
-        try:
-            if user_id == ADMIN_ID:
-                return True
-            async with database_module.pool.acquire() as conn:
-                exists = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM admins WHERE user_id = $1)", user_id
-                )
-                return bool(exists)
-        except Exception as e:
-            logger.exception("Adminni tekshirishda xatolik: %s", e)
-
-            return False
-
-
-    def admin_ai_guard(func):
-        @functools.wraps(func)
-        async def wrapper(message: Message, *args, **kwargs):
-            try:
-                if await is_admin_db(message.from_user.id):
-                    await message.answer("❌ Adminlar uchun AI funksiyasi o'chirilgan — faqat admin buyruqlaridan foydalaning.")
-                    return
-            except Exception as e:
-                logger.exception("admin_ai_guard xatosi: %s", e)
-
-                await message.answer("❌ Adminlar uchun AI funksiyasi o'chirilgan — faqat admin buyruqlaridan foydalaning.")
-                return
-            return await func(message, *args, **kwargs)
-        return wrapper
-
-
-    async def block_admin_non_admin_messages(message: Message):
-        
-        try:
-            if not await is_admin_db(message.from_user.id):
-                return  
-        except Exception as e:
-            logger.exception("block_admin_non_admin_messages admin tekshiruvida xato: %s", e)
-            return
-
-
-        allowed_admin_commands = {
-            "/send", "/pm", "/top", "/users", "/dump_users", "/add_admin", "/start"
-        }
-
-        text = (message.text or "").strip()
-        if text.startswith("/"):
-            cmd = text.split()[0]
-            if cmd in allowed_admin_commands:
-                return  
-            else:
-                await message.answer("❌ Bu admin komandasi emas. Adminlar faqat admin buyruqlarini ishlata oladi.")
-                return
-
-
-        await message.answer("❌ Siz admin hisobingiz bilan AI funksiyalaridan foydalanolmaysiz. Faqat admin buyruqlarini ishlating.")
-        return
-
-
     async def handle_send(message: Message):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             await message.answer("❌ Bu buyruq faqat admin uchun.")
             return
 
@@ -115,9 +54,10 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         )
 
     async def cmd_pm(message: Message, state: FSMContext):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             await message.answer("❌ Bu buyruq faqat admin uchun.")
             return
+
         await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
         await state.set_state(PMStates.waiting_for_user)
 
@@ -126,18 +66,19 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         async with database_module.pool.acquire() as conn:
             if identifier.startswith("@"):
                 user_id = await conn.fetchval(
-                    "SELECT user_id FROM users WHERE username = $1", identifier[1:]
+                    "SELECT user_id FROM users WHERE username = $1",
+                    identifier[1:]
                 )
             else:
                 try:
                     user_id = int(identifier)
                 except ValueError:
-                    await message.answer("❌ Noto‘g‘ri ID format. Qayta urinib ko‘ring:")
+                    await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
                     return
 
-        if not user_id:
-            await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko‘ring. Yoki user ID kiriting..!")
-            return
+            if not user_id:
+                await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring. Yoki user ID kiriting..!")
+                return
 
         await state.update_data(user_id=user_id)
         await message.answer("✍️ Endi xabar matnini kiriting:")
@@ -147,16 +88,18 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         data = await state.get_data()
         user_id = data["user_id"]
         text = message.text.strip()
+
         progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
         try:
             await bot.send_message(user_id, f"📨 <b>Admin xabari:</b>\n\n{text}", parse_mode=ParseMode.HTML)
             await progress_message.edit_text("📤 Xabar yuborildi ✅")
         except Exception as e:
             await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
+        
         await state.clear()
 
     async def handle_top(message: Message):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             return await message.answer("❌ Bu buyruq faqat admin uchun")
 
         async with database_module.pool.acquire() as conn:
@@ -196,47 +139,47 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             return result
 
         response = (
-            format_table(two_weeks_top, "So'nggi 2 hafta — TOP 5") + "\n\n" +
-            format_table(one_month_top, "So'nggi 1 oy — TOP 10")
+            format_table(two_weeks_top, "So'nggi 2 hafta — TOP 5") + "\n\n"
+            + format_table(one_month_top, "So'nggi 1 oy — TOP 10")
         )
-
         await message.answer(response, parse_mode="HTML")
 
     async def handle_users_command(message: Message):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
 
         try:
             async with database_module.pool.acquire() as conn:
                 total_users = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE user_id != $1", ADMIN_ID
+                    "SELECT COUNT(*) FROM users WHERE user_id != $1",
+                    ADMIN_ID
                 )
 
                 most_active_30days = await conn.fetchrow('''
-                    SELECT user_id, username, COUNT(*) AS activity_count 
-                    FROM user_activity 
+                    SELECT user_id, username, COUNT(*) AS activity_count
+                    FROM user_activity
                     WHERE activity_time >= NOW() - INTERVAL '30 days'
                     AND user_id != $1
-                    GROUP BY user_id, username 
-                    ORDER BY activity_count DESC 
+                    GROUP BY user_id, username
+                    ORDER BY activity_count DESC
                     LIMIT 1
                 ''', ADMIN_ID)
 
                 most_active_today = await conn.fetchrow('''
-                    SELECT user_id, username, COUNT(*) AS activity_count 
-                    FROM user_activity 
+                    SELECT user_id, username, COUNT(*) AS activity_count
+                    FROM user_activity
                     WHERE activity_time >= CURRENT_DATE
                     AND user_id != $1
-                    GROUP BY user_id, username 
-                    ORDER BY activity_count DESC 
+                    GROUP BY user_id, username
+                    ORDER BY activity_count DESC
                     LIMIT 1
                 ''', ADMIN_ID)
 
                 last_user = await conn.fetchrow('''
-                    SELECT user_id, username, created_at 
-                    FROM users 
+                    SELECT user_id, username, created_at
+                    FROM users
                     WHERE user_id != $1
-                    ORDER BY created_at DESC 
+                    ORDER BY created_at DESC
                     LIMIT 1
                 ''', ADMIN_ID)
 
@@ -259,17 +202,16 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
                 f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
                 f"🆕 Oxirgi foydalanuvchi:\n"
                 f"├ 👤 {format_user(last_user)}\n"
-                f"└ 📅 Qo‘shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
+                f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
             )
-
             await message.answer(text, parse_mode="HTML")
-
         except Exception as e:
             await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
     async def handle_dump_users(message: Message):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+
         try:
             users = await database_module.get_all_users()
             temp_file = "temp_users.json"
@@ -283,22 +225,20 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
 
     async def handle_add_admin(message: Message):
-        if not await is_admin_db(message.from_user.id):
+        if message.from_user.id != ADMIN_ID:
             return await message.answer("❌ Bu buyruq faqat admin uchun")
+
         try:
             new_admin_id = int(message.text.split()[1])
             async with database_module.pool.acquire() as conn:
                 await conn.execute('''
-                    INSERT INTO admins (user_id) VALUES ($1)
+                    INSERT INTO admins (user_id)
+                    VALUES ($1)
                     ON CONFLICT DO NOTHING
                 ''', new_admin_id)
             await message.answer(f"✅ {new_admin_id} admin qilindi")
         except:
             await message.answer("❗ /add_admin 1234567")
-
-
-    dp.message.register(block_admin_non_admin_messages)
-
 
     dp.message.register(handle_send, Command("send"))
     dp.message.register(cmd_pm, Command("pm"))
@@ -308,6 +248,3 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
     dp.message.register(handle_users_command, Command("users"))
     dp.message.register(handle_dump_users, Command("dump_users"))
     dp.message.register(handle_add_admin, Command("add_admin"))
-
-   
-    return admin_ai_guard, is_admin_db
