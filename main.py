@@ -19,8 +19,9 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
-from . import database  
-from . import admin     
+import database
+import admin
+   
 
 load_dotenv()
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
