@@ -1,7 +1,7 @@
 import os
 import asyncpg
 from dotenv import load_dotenv
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -9,7 +9,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 pool: Optional[asyncpg.pool.Pool] = None
 
 async def create_db_pool():
-    """Create and return a global asyncpg pool (if not created yet)."""
     global pool
     if pool is None:
         if not DATABASE_URL:
@@ -18,7 +17,7 @@ async def create_db_pool():
     return pool
 
 async def create_users_table():
-    """Create required tables if they do not exist."""
+    """Create required tables if they do not exist. Also ensure admins table has username column."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -35,9 +34,17 @@ async def create_users_table():
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
-                user_id BIGINT PRIMARY KEY
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100)
             );
         ''')
+
+
+        try:
+            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS username VARCHAR(100);")
+        except Exception:
+
+            pass
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
@@ -51,7 +58,6 @@ async def create_users_table():
 
 
 async def save_user(user_id: int, username: str | None = None) -> None:
-    """Insert or update user record (sets last_seen and is_active=True)."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -67,7 +73,6 @@ async def save_user(user_id: int, username: str | None = None) -> None:
         ''', user_id, username)
 
 async def log_user_activity(user_id: int, username: str | None, activity_type: str) -> None:
-    """Log a row into user_activity."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -78,7 +83,6 @@ async def log_user_activity(user_id: int, username: str | None, activity_type: s
         ''', user_id, username, activity_type)
 
 async def get_all_users():
-    """Return list of active users (records with field user_id)."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -86,7 +90,6 @@ async def get_all_users():
         return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
 
 async def deactivate_user(user_id: int) -> None:
-    """Mark user as inactive."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -94,7 +97,6 @@ async def deactivate_user(user_id: int) -> None:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
 async def get_users_count() -> int:
-    """Return count of active users."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -103,7 +105,6 @@ async def get_users_count() -> int:
 
 
 async def is_admin(user_id: int) -> bool:
-    """Return True if user_id exists in admins table."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -111,29 +112,28 @@ async def is_admin(user_id: int) -> bool:
         val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
         return bool(val)
 
-async def get_admins() -> List[int]:
-    """Return list of admin user_ids."""
+async def get_admins() -> List[Dict]:
+    """Return list of admins as dicts: [{'user_id': int, 'username': str|None}, ...]"""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT user_id FROM admins')
-        return [r['user_id'] for r in rows]
+        rows = await conn.fetch('SELECT user_id, username FROM admins ORDER BY user_id')
+        return [{'user_id': r['user_id'], 'username': r.get('username')} for r in rows]
 
-async def add_admin(user_id: int) -> None:
+async def add_admin(user_id: int, username: str | None = None) -> None:
     """Insert a new admin (idempotent)."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO admins (user_id)
-            VALUES ($1)
-            ON CONFLICT DO NOTHING
-        ''', user_id)
+            INSERT INTO admins (user_id, username)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
+        ''', user_id, username)
 
 async def remove_admin(user_id: int) -> None:
-    """Remove admin."""
     global pool
     if pool is None:
         await create_db_pool()
