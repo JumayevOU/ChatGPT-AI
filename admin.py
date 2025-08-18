@@ -143,7 +143,8 @@ async def handle_users_command(message: Message):
     try:
         async with message.bot.get('pool').acquire() as conn:
             total_users = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE user_id != $1", int(os.getenv("ADMIN_ID"))
+    "SELECT COUNT(*) FROM users WHERE user_id != $1", int(os.getenv("ADMIN_ID"))
+)
             most_active_30days = await conn.fetchrow('''
                 SELECT user_id, username, COUNT(*) AS activity_count 
                 FROM user_activity 
@@ -225,4 +226,5 @@ async def handle_add_admin(message: Message):
             ''', new_admin_id)
         await message.answer(f"✅ {new_admin_id} admin qilindi")
     except:
+
         await message.answer("❗ /add_admin 1234567")
