@@ -2,7 +2,7 @@ import logging
 import json
 import os
 import asyncio
-from aiogram import Bot
+from aiogram import Bot, F
 from aiogram.types import Message, FSInputFile
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -14,30 +14,28 @@ from keyboards import admin_keyboard
 
 logger = logging.getLogger(__name__)
 
+
 class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
 
+
 class BroadcastStates(StatesGroup):
     waiting_for_broadcast_text = State()
+
 
 class AddAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
-def register_admin_handlers(dp, bot: Bot, database_module):
-    """
-    database_module — import qilingan database moduli (misol: __import__('database'))
-    Endi ADMIN_ID talab qilinmaydi — har bir handler ichida DB orqali is_admin tekshiradi.
-    """
 
-    async def require_admin_or_deny(message: Message):
-        """Tez-tez ishlatiladigan admin tekshiruvi (handler ichida chaqiring)."""
+def register_admin_handlers(dp, bot: Bot, database_module):
+    async def require_admin_or_deny(message: Message) -> bool:
         try:
             if not await database_module.is_admin(message.from_user.id):
                 await message.answer("❌ Bu buyruq faqat admin uchun.")
                 return False
             return True
-        except Exception as e:
+        except Exception:
             logger.exception("is_admin tekshiruvida xato")
             await message.answer("❌ Server xatosi. Keyinroq urinib ko'ring.")
             return False
@@ -47,6 +45,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not ok:
             return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
+
 
     async def start_broadcast(message: Message, state: FSMContext):
         ok = await require_admin_or_deny(message)
@@ -60,7 +59,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not ok:
             await state.clear()
             return
-        text_to_send = message.text.strip()
+
+        text_to_send = (message.text or "").strip()
         if not text_to_send:
             await message.answer("❗ Xabar bo'sh. Iltimos matn yozing.")
             return
@@ -69,6 +69,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         success, fail = 0, 0
         progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
 
+        total = len(user_ids) if user_ids else 0
         for i, record in enumerate(user_ids, 1):
             user_id = record['user_id']
             try:
@@ -85,7 +86,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
                 fail += 1
 
-            percent = int(i / len(user_ids) * 100) if user_ids else 100
+            percent = int(i / total * 100) if total else 100
             try:
                 await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
             except Exception:
@@ -109,7 +110,12 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         ok = await require_admin_or_deny(message)
         if not ok:
             return
-        identifier = message.text.strip()
+
+        identifier = (message.text or "").strip()
+        if not identifier:
+            await message.answer("❗ Iltimos ID yoki @username kiriting.")
+            return
+
         user_id = None
         try:
             async with database_module.pool.acquire() as conn:
@@ -124,7 +130,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     except ValueError:
                         await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
                         return
-        except Exception as e:
+        except Exception:
             logger.exception("DB error in process_user")
             await message.answer("❌ DB xatosi.")
             return
@@ -145,7 +151,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         data = await state.get_data()
         user_id = data.get("user_id")
-        text = message.text.strip()
+        text = (message.text or "").strip()
 
         if not user_id:
             await state.clear()
@@ -166,26 +172,31 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not ok:
             return
 
-        async with database_module.pool.acquire() as conn:
-            two_weeks_top = await conn.fetch('''
-                SELECT user_id, username, COUNT(*) as activity_count
-                FROM user_activity
-                WHERE activity_time >= NOW() - INTERVAL '14 days'
-                AND user_id NOT IN (SELECT user_id FROM admins)
-                GROUP BY user_id, username
-                ORDER BY activity_count DESC
-                LIMIT 5
-            ''')
+        try:
+            async with database_module.pool.acquire() as conn:
+                two_weeks_top = await conn.fetch('''
+                    SELECT user_id, username, COUNT(*) as activity_count
+                    FROM user_activity
+                    WHERE activity_time >= NOW() - INTERVAL '14 days'
+                    AND user_id NOT IN (SELECT user_id FROM admins)
+                    GROUP BY user_id, username
+                    ORDER BY activity_count DESC
+                    LIMIT 5
+                ''')
 
-            one_month_top = await conn.fetch('''
-                SELECT user_id, username, COUNT(*) as activity_count
-                FROM user_activity
-                WHERE activity_time >= NOW() - INTERVAL '30 days'
-                AND user_id NOT IN (SELECT user_id FROM admins)
-                GROUP BY user_id, username
-                ORDER BY activity_count DESC
-                LIMIT 10
-            ''')
+                one_month_top = await conn.fetch('''
+                    SELECT user_id, username, COUNT(*) as activity_count
+                    FROM user_activity
+                    WHERE activity_time >= NOW() - INTERVAL '30 days'
+                    AND user_id NOT IN (SELECT user_id FROM admins)
+                    GROUP BY user_id, username
+                    ORDER BY activity_count DESC
+                    LIMIT 10
+                ''')
+        except Exception:
+            logger.exception("handle_top DB error")
+            await message.answer("❌ DB xatosi.")
+            return
 
         def format_user(user_id, username):
             if username:
@@ -215,9 +226,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         try:
             async with database_module.pool.acquire() as conn:
-                total_users = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users"
-                )
+                total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
 
                 most_active_30days = await conn.fetchrow('''
                     SELECT user_id, username, COUNT(*) AS activity_count
@@ -243,32 +252,33 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     ORDER BY created_at DESC
                     LIMIT 1
                 ''')
-
-            def format_user(user):
-                if not user:
-                    return "—"
-                if user["username"]:
-                    return f"@{user['username']}"
-                else:
-                    return f'<a href="tg://user?id={user["user_id"]}">User {user["user_id"]}</a>'
-
-            text = (
-                "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
-                f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
-                f"🏆 Oxirgi 30 kun eng faol:\n"
-                f"├ 👤 {format_user(most_active_30days)}\n"
-                f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
-                f"🔥 Bugungi eng faol:\n"
-                f"├ 👤 {format_user(most_active_today)}\n"
-                f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
-                f"🆕 Oxirgi foydalanuvchi:\n"
-                f"├ 👤 {format_user(last_user)}\n"
-                f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
-            )
-            await message.answer(text, parse_mode="HTML")
-        except Exception as e:
+        except Exception:
             logger.exception("handle_users_command error")
-            await message.answer("❌ Xatolik yuz berdi: " + str(e))
+            await message.answer("❌ DB xatosi.")
+            return
+
+        def format_user(user):
+            if not user:
+                return "—"
+            if user["username"]:
+                return f"@{user['username']}"
+            else:
+                return f'<a href="tg://user?id={user["user_id"]}">User {user["user_id"]}</a>'
+
+        text = (
+            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
+            f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
+            f"🏆 Oxirgi 30 kun eng faol:\n"
+            f"├ 👤 {format_user(most_active_30days)}\n"
+            f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
+            f"🔥 Bugungi eng faol:\n"
+            f"├ 👤 {format_user(most_active_today)}\n"
+            f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
+            f"🆕 Oxirgi foydalanuvchi:\n"
+            f"├ 👤 {format_user(last_user)}\n"
+            f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
+        )
+        await message.answer(text, parse_mode="HTML")
 
     async def handle_dump_users(message: Message):
         ok = await require_admin_or_deny(message)
@@ -283,9 +293,9 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             file_to_send = FSInputFile(temp_file)
             await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati")
             os.remove(temp_file)
-        except Exception as e:
+        except Exception:
             logger.exception("handle_dump_users error")
-            await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
+            await message.answer(f"❌ Xatolik yuz berdi: server yoki fayl tizimi")
 
     async def start_add_admin(message: Message, state: FSMContext):
         ok = await require_admin_or_deny(message)
@@ -300,7 +310,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await state.clear()
             return
         try:
-            new_admin_id = int(message.text.strip())
+            new_admin_id = int((message.text or "").strip())
             async with database_module.pool.acquire() as conn:
                 await conn.execute('''
                     INSERT INTO admins (user_id)
@@ -310,27 +320,24 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer(f"✅ {new_admin_id} admin qilindi")
         except ValueError:
             await message.answer("❗ Iltimos faqat sonli ID kiriting. Masalan: 123456789")
-        except Exception as e:
+        except Exception:
             logger.exception("process_add_admin error")
-            await message.answer("❗ Xatolik yuz berdi: " + str(e))
+            await message.answer("❗ Xatolik yuz berdi: DB yoki server xatosi")
         finally:
             await state.clear()
 
+    dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
+    dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
+    dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
+    dp.message.register(handle_users_command, F.text == '📊 Statistika')
+    dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
+    dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
 
-    dp.message.register(start_broadcast, lambda message: message.text == '📢 Barchaga xabar yuborish')
-    dp.message.register(cmd_pm, lambda message: message.text == '📨 Userga xabar yuborish')
-    dp.message.register(handle_top, lambda message: message.text == '🏆 Faol foydalanuvchilar')
-    dp.message.register(handle_users_command, lambda message: message.text == '📊 Statistika')
-    dp.message.register(handle_dump_users, lambda message: message.text == "📄 Userlar ro'yxati")
-    dp.message.register(start_add_admin, lambda message: message.text == "➕ Admin qo'shish")
-
- 
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
 
-  
     async def legacy_send_command(message: Message):
         ok = await require_admin_or_deny(message)
         if not ok:
@@ -342,6 +349,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         user_ids = await database_module.get_all_users()
         success, fail = 0, 0
         progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
+        total = len(user_ids) if user_ids else 0
         for i, record in enumerate(user_ids, 1):
             user_id = record['user_id']
             try:
@@ -353,7 +361,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             except Exception as e:
                 logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
                 fail += 1
-            percent = int(i / len(user_ids) * 100) if user_ids else 100
+            percent = int(i / total * 100) if total else 100
             try:
                 await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
             except Exception:

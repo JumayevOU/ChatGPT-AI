@@ -107,27 +107,18 @@ async def handle_text(message: Message, state: FSMContext):
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
 
-
     try:
         current_state = await state.get_state()
     except Exception:
         current_state = None
 
-
     try:
         if await is_admin(user_id):
-            if current_state:
-                return
-            if message.text in ADMIN_BUTTON_TEXTS:
-                return
-            await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
             return
     except Exception as e:
         logger.exception("is_admin tekshiruvida xato")
 
-  
     if current_state:
-        
         return
 
     loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
@@ -193,10 +184,8 @@ async def handle_photo(message: Message, state: FSMContext):
         current_state = None
 
     try:
+        # Same change here: don't let admin photo/button interactions be consumed by generic handler
         if await is_admin(user_id):
-            if current_state:
-                return
-            await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
             return
     except Exception as e:
         logger.exception("is_admin tekshiruvida xato (photo)")
@@ -279,23 +268,24 @@ async def main():
     await create_users_table()
 
 
-    admin_module.register_admin_handlers(dp, bot, __import__('database'))
+
+    admin_module.register_admin_handlers(dp, bot, database)
 
     try:
         admins = await database.get_admins()  
 
         for admin_user_id in admins:
-         await bot.set_my_commands(
-        commands=[
-            BotCommand(command="send", description="Barchaga xabar yuborish"),
-            BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
-            BotCommand(command="top", description="Eng faol foydalanuvchilar"),
-            BotCommand(command="users", description="Foydalanuvchilar soni"),
-            BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
-            BotCommand(command="add_admin", description="Yangi admin qo'shish"),
-        ],
-        scope=BotCommandScopeChat(chat_id=admin_user_id)
-    )
+            await bot.set_my_commands(
+                commands=[
+                    BotCommand(command="send", description="Barchaga xabar yuborish"),
+                    BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
+                    BotCommand(command="top", description="Eng faol foydalanuvchilar"),
+                    BotCommand(command="users", description="Foydalanuvchilar soni"),
+                    BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
+                    BotCommand(command="add_admin", description="Yangi admin qo'shish"),
+                ],
+                scope=BotCommandScopeChat(chat_id=admin_user_id),
+            )
     except Exception as e:
         logger.exception("admin commands set qilishda xato")
 
