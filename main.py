@@ -13,8 +13,10 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 import aiohttp
+
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
+
 load_dotenv()
 
 from database import (
@@ -49,7 +51,6 @@ error_messages = [
     "🧠 Men hozirda biroz charchab qoldim, keyinroq urinib ko'ring 😴",
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
-
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
@@ -94,8 +95,12 @@ async def handle_start(message: Message):
     )
 
 
-@dp.message(F.text & ~F.text.startswith("/"))
+
+
 async def handle_text(message: Message, state: FSMContext):
+    if not message.text:
+        return
+
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
@@ -110,13 +115,6 @@ async def handle_text(message: Message, state: FSMContext):
         current_state = await state.get_state()
     except Exception:
         current_state = None
-
-    try:
-        # Agar foydalanuvchi admin bo'lsa — umumiy handler admin tugmalarini egallab olmasin.
-        if await is_admin(user_id):
-            return
-    except Exception:
-        logger.exception("is_admin tekshiruvida xato")
 
     if current_state:
         return
@@ -171,7 +169,6 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         return ""
 
 
-@dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -184,11 +181,8 @@ async def handle_photo(message: Message, state: FSMContext):
     except Exception:
         current_state = None
 
-    try:
-        if await is_admin(user_id):
-            return
-    except Exception:
-        logger.exception("is_admin tekshiruvida xato (photo)")
+    if current_state:
+        return
 
     loading = await message.answer("🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
     try:
@@ -245,9 +239,9 @@ async def notify_inactive_users():
         await asyncio.sleep(3600 * 24 * 7)
         async with database.pool.acquire() as conn:
             inactive_users = await conn.fetch('''
-                SELECT user_id
-                FROM users
-                WHERE last_seen < NOW() - INTERVAL '7 days'
+                SELECT user_id 
+                FROM users 
+                WHERE last_seen < NOW() - INTERVAL '7 days' 
                 AND is_active = TRUE
             ''')
             for record in inactive_users:
@@ -269,15 +263,37 @@ async def main():
     await create_db_pool()
     await create_users_table()
 
-    # register admin handlers (admin identifikatsiyasi faqat DBdan olinadi)
+
     admin_module.register_admin_handlers(dp, bot, database)
 
-    # Biz bot komandalarini (BotCommand) o'rnatmaymiz — faqat default reply-keyboard ustida ishlaymiz.
 
-    # Fon vazifa: inaktiv foydalanuvchilarga xabar yuborish
+    async def non_admin_text_predicate(message: Message):
+
+        if not message.text:
+            return False
+        if message.text.startswith("/"):
+            return False
+        try:
+            return not await database.is_admin(message.from_user.id)
+        except Exception:
+            logger.exception("DB error in non_admin_text_predicate")
+            return False
+
+    async def non_admin_photo_predicate(message: Message):
+        try:
+            return not await database.is_admin(message.from_user.id)
+        except Exception:
+            logger.exception("DB error in non_admin_photo_predicate")
+            return False
+
+
+    dp.message.register(handle_text, non_admin_text_predicate)
+    dp.message.register(handle_photo, non_admin_photo_predicate)
+
+
     asyncio.create_task(notify_inactive_users())
 
-    # Agar ilgari webhook mavjud bo'lsa — uni o'chiramiz va pollingni boshlaymiz
+
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
 
