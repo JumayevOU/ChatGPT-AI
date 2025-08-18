@@ -18,7 +18,7 @@ async def create_db_pool():
     return pool
 
 async def create_users_table():
-    """Create required tables if they do not exist. Does NOT insert any admin from .env."""
+    """Create required tables if they do not exist."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -60,7 +60,7 @@ async def save_user(user_id: int, username: str | None = None) -> None:
             INSERT INTO users (user_id, username, last_seen)
             VALUES ($1, $2, NOW())
             ON CONFLICT (user_id)
-            DO UPDATE SET 
+            DO UPDATE SET
                 username = EXCLUDED.username,
                 last_seen = NOW(),
                 is_active = TRUE

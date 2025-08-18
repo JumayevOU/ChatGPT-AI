@@ -5,7 +5,6 @@ import asyncio
 from aiogram import Bot, F
 from aiogram.types import Message, FSInputFile
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
@@ -29,6 +28,13 @@ class AddAdminStates(StatesGroup):
 
 
 def register_admin_handlers(dp, bot: Bot, database_module):
+    """
+    Register admin handlers. Admin identifikatsiyasi faqat DB orqali tekshiriladi.
+    :param dp: Dispatcher
+    :param bot: Bot instance
+    :param database_module: imported database module object
+    """
+
     async def require_admin_or_deny(message: Message) -> bool:
         try:
             if not await database_module.is_admin(message.from_user.id):
@@ -41,22 +47,18 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             return False
 
     async def show_admin_keyboard(message: Message):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
 
-
     async def start_broadcast(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
         await message.answer("✍️ Iltimos, barcha foydalanuvchilarga yuboriladigan xabar matnini kiriting:")
         await state.set_state(BroadcastStates.waiting_for_broadcast_text)
 
     async def process_broadcast(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             await state.clear()
             return
 
@@ -100,15 +102,13 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await state.clear()
 
     async def cmd_pm(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
         await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
         await state.set_state(PMStates.waiting_for_user)
 
     async def process_user(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
 
         identifier = (message.text or "").strip()
@@ -144,8 +144,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await state.set_state(PMStates.waiting_for_message)
 
     async def process_message(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             await state.clear()
             return
 
@@ -168,8 +167,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await state.clear()
 
     async def handle_top(message: Message):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
 
         try:
@@ -220,8 +218,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await message.answer(response, parse_mode="HTML")
 
     async def handle_users_command(message: Message):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
 
         try:
@@ -281,8 +278,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await message.answer(text, parse_mode="HTML")
 
     async def handle_dump_users(message: Message):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
         try:
             users = await database_module.get_all_users()
@@ -298,15 +294,13 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer(f"❌ Xatolik yuz berdi: server yoki fayl tizimi")
 
     async def start_add_admin(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             return
         await message.answer("➕ Iltimos, yangi admin qilmoqchi bo'lgan foydalanuvchi ID sini kiriting:")
         await state.set_state(AddAdminStates.waiting_for_admin_id)
 
     async def process_add_admin(message: Message, state: FSMContext):
-        ok = await require_admin_or_deny(message)
-        if not ok:
+        if not await require_admin_or_deny(message):
             await state.clear()
             return
         try:
@@ -326,6 +320,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
+
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
@@ -333,9 +328,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
 
+
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
-
-

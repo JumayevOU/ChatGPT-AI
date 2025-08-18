@@ -17,15 +17,12 @@ from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
 load_dotenv()
 
-
 from database import (
     create_db_pool,
     create_users_table,
     save_user,
     log_user_activity,
     is_admin,
-    get_all_users, 
-    deactivate_user,           
 )
 import database
 
@@ -53,18 +50,20 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 
-ADMIN_BUTTON_TEXTS = {
+ADMIN_BUTTON_TEXTS = [
     '📢 Barchaga xabar yuborish',
     '📨 Userga xabar yuborish',
     '🏆 Faol foydalanuvchilar',
     '📊 Statistika',
     "📄 Userlar ro'yxati",
     "➕ Admin qo'shish",
-}
+]
+
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
@@ -78,13 +77,12 @@ async def handle_start(message: Message):
                 reply_markup=admin_keyboard
             )
             return
-    except Exception as e:
+    except Exception:
         logger.exception("is_admin tekshiruvida xato")
-
 
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
+        "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
         "➤ Savollaringizga javob beraman\n"
         "➤ Til va tarjima\n"
         "➤ Texnik yordam\n"
@@ -94,6 +92,7 @@ async def handle_start(message: Message):
         "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n\n"
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
+
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message, state: FSMContext):
@@ -113,9 +112,10 @@ async def handle_text(message: Message, state: FSMContext):
         current_state = None
 
     try:
+        # Agar foydalanuvchi admin bo'lsa — umumiy handler admin tugmalarini egallab olmasin.
         if await is_admin(user_id):
             return
-    except Exception as e:
+    except Exception:
         logger.exception("is_admin tekshiruvida xato")
 
     if current_state:
@@ -170,6 +170,7 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
 
+
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -184,10 +185,9 @@ async def handle_photo(message: Message, state: FSMContext):
         current_state = None
 
     try:
-        # Same change here: don't let admin photo/button interactions be consumed by generic handler
         if await is_admin(user_id):
             return
-    except Exception as e:
+    except Exception:
         logger.exception("is_admin tekshiruvida xato (photo)")
 
     loading = await message.answer("🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
@@ -239,14 +239,15 @@ async def handle_photo(message: Message, state: FSMContext):
             logger.error(f"Xabarni o'chirishda xato: {str(e)}")
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
+
 async def notify_inactive_users():
     while True:
         await asyncio.sleep(3600 * 24 * 7)
         async with database.pool.acquire() as conn:
             inactive_users = await conn.fetch('''
-                SELECT user_id 
-                FROM users 
-                WHERE last_seen < NOW() - INTERVAL '7 days' 
+                SELECT user_id
+                FROM users
+                WHERE last_seen < NOW() - INTERVAL '7 days'
                 AND is_active = TRUE
             ''')
             for record in inactive_users:
@@ -263,13 +264,20 @@ async def notify_inactive_users():
                 except Exception as e:
                     logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
+
 async def main():
     await create_db_pool()
     await create_users_table()
 
-    
+    # register admin handlers (admin identifikatsiyasi faqat DBdan olinadi)
     admin_module.register_admin_handlers(dp, bot, database)
+
+    # Biz bot komandalarini (BotCommand) o'rnatmaymiz — faqat default reply-keyboard ustida ishlaymiz.
+
+    # Fon vazifa: inaktiv foydalanuvchilarga xabar yuborish
     asyncio.create_task(notify_inactive_users())
+
+    # Agar ilgari webhook mavjud bo'lsa — uni o'chiramiz va pollingni boshlaymiz
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
 
