@@ -338,38 +338,4 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
 
-    async def legacy_send_command(message: Message):
-        ok = await require_admin_or_deny(message)
-        if not ok:
-            return
-        text_to_send = message.text.replace("/send", "", 1).strip()
-        if not text_to_send:
-            return await message.answer("✍️ Iltimos, yuboriladigan xabarni yozing: /send Xabar matni")
 
-        user_ids = await database_module.get_all_users()
-        success, fail = 0, 0
-        progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
-        total = len(user_ids) if user_ids else 0
-        for i, record in enumerate(user_ids, 1):
-            user_id = record['user_id']
-            try:
-                await bot.send_message(user_id, text_to_send)
-                success += 1
-            except (TelegramForbiddenError, TelegramNotFound):
-                await database_module.deactivate_user(user_id)
-                fail += 1
-            except Exception as e:
-                logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
-                fail += 1
-            percent = int(i / total * 100) if total else 100
-            try:
-                await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
-        await progress_message.edit_text(
-            f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
-            f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
-        )
-
-    dp.message.register(legacy_send_command, Command("send"))

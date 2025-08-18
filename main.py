@@ -4,7 +4,7 @@ import random
 import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message, BotCommand, FSInputFile, BotCommandScopeChat
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -267,31 +267,12 @@ async def main():
     await create_db_pool()
     await create_users_table()
 
-
-
+    
     admin_module.register_admin_handlers(dp, bot, database)
-
-    try:
-        admins = await database.get_admins()  
-
-        for admin_user_id in admins:
-            await bot.set_my_commands(
-                commands=[
-                    BotCommand(command="send", description="Barchaga xabar yuborish"),
-                    BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
-                    BotCommand(command="top", description="Eng faol foydalanuvchilar"),
-                    BotCommand(command="users", description="Foydalanuvchilar soni"),
-                    BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
-                    BotCommand(command="add_admin", description="Yangi admin qo'shish"),
-                ],
-                scope=BotCommandScopeChat(chat_id=admin_user_id),
-            )
-    except Exception as e:
-        logger.exception("admin commands set qilishda xato")
-
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
