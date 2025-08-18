@@ -20,7 +20,7 @@ from database import create_db_pool, create_users_table, save_user, log_user_act
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
 from admin import (
-    handle_sendall, cmd_pm, process_user, process_message,
+    handle_sendall, 
     handle_top, handle_users_command, handle_dump_users, handle_add_admin
 )
 

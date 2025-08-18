@@ -1,118 +1,161 @@
-import asyncio
-import json
 import os
-import asyncpg
-from aiogram import F
-from aiogram.types import Message, FSInputFile
+import json
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.types import Message, BotCommand, FSInputFile
 from aiogram.filters import Command
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-from database import (
-    get_all_users, deactivate_user, save_user, log_user_activity,
-    get_users_count
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommandScopeChat
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+import asyncpg  
+
+from config import BOT_TOKEN
+
+
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+session = AiohttpSession()
+bot = Bot(
+    token=BOT_TOKEN,
+    session=session,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
+dp = Dispatcher()
 
 
-class PMStates(StatesGroup):
-    waiting_for_user = State()
-    waiting_for_message = State()
+pool = None
+
+async def create_db_pool():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
+
+async def create_users_table():
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100),
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
+            );
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY
+            );
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                username VARCHAR(100),
+                activity_time TIMESTAMP DEFAULT NOW(),
+                activity_type VARCHAR(50)
+            );
+        ''')
+        await conn.execute('''
+            INSERT INTO admins (user_id) VALUES ($1)
+            ON CONFLICT DO NOTHING
+        ''', ADMIN_ID)
+
+async def get_all_users():
+    global pool
+    async with pool.acquire() as conn:
+        return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
+
+async def deactivate_user(user_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+
+async def get_users_count():
+    global pool
+    async with pool.acquire() as conn:
+        return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
 
-# Admin hamma foydalanuvchilarga xabar yuborishi
+
+
+@dp.message(Command("send"))
 async def handle_sendall(message: Message):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
+    if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Bu buyruq faqat admin uchun.")
-
     text_to_send = message.text.replace("/send", "", 1).strip()
     if not text_to_send:
-        return await message.answer("✍️ Iltimos, yuboriladigan xabarni yozing: /send Xabar matni")
-
+        return await message.answer("✍️ Yuboriladigan xabarni ham yozing: /send Xabar matni")
     user_ids = await get_all_users()
     success, fail = 0, 0
-    progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
-
-    for i, record in enumerate(user_ids, 1):
+    for record in user_ids:
         user_id = record['user_id']
         try:
-            await message.bot.send_message(user_id, text_to_send)
+            await bot.send_message(user_id, text_to_send)
             success += 1
-        except Exception:
+            await asyncio.sleep(0.05)
+        except (TelegramForbiddenError, TelegramNotFound):
             await deactivate_user(user_id)
             fail += 1
+        except Exception as e:
+            logger.warning(f"Xatolik: {user_id} - {e}")
+            fail += 1
+    await message.answer(f"✅ {success} ta foydalanuvchiga yuborildi.\n❌ {fail} ta yuborilmadi.")
 
-        percent = int(i / len(user_ids) * 100)
-        await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
-        await asyncio.sleep(0.05)
-
-    await progress_message.edit_text(
-        f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
-        f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
-    )
-
-
-# Admin xohlagan userga xabar yozishi
-async def cmd_pm(message: Message, state: FSMContext):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
-        return await message.answer("❌ Bu buyruq faqat admin uchun.")
-
-    await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
-    await state.set_state(PMStates.waiting_for_user)
-
-
-async def process_user(message: Message, state: FSMContext):
-    identifier = message.text.strip()
-    user_id = None
-
-    if identifier.startswith("@"):
-        try:
-            chat = await message.bot.get_chat(identifier)
-            user_id = chat.id
-        except Exception:
-            user_id = None
-    else:
-        try:
-            user_id = int(identifier)
-        except ValueError:
-            return await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
-
-    if not user_id:
-        return await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
-
-    await state.update_data(user_id=user_id)
-    await message.answer("✍️ Endi xabar matnini kiriting:")
-    await state.set_state(PMStates.waiting_for_message)
-
-
-async def process_message(message: Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data["user_id"]
-    text = message.text.strip()
-
-    progress_message = await message.answer("📤 Xabar yuborilmoqda...")
-    try:
-        await message.bot.send_message(
-            user_id,
-            f"📨 <b>Admin xabari:</b>\n\n{text}",
-            parse_mode="HTML"
-        )
-        await progress_message.edit_text("✅ Xabar yuborildi")
-    except Exception as e:
-        await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
-
-    await state.clear()
-
-
-# Eng faol foydalanuvchilar TOP
-async def handle_top(message: Message):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
+@dp.message(Command("pm"))
+async def handle_pm(message: Message):
+    if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Bu buyruq faqat admin uchun")
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            return await message.answer("❗ Format: /pm <ID yoki @username> <xabar>")
+        identifier, text = parts[1], parts[2]
+        if identifier.startswith('@'):
+            global pool
+            async with pool.acquire() as conn:
+                user_id = await conn.fetchval(
+                    'SELECT user_id FROM users WHERE username = $1',
+                    identifier[1:]
+                )
+            if not user_id:
+                return await message.answer("❌ Foydalanuvchi topilmadi")
+        else:
+            try:
+                user_id = int(identifier)
+            except ValueError:
+                return await message.answer("❗ Noto'g'ri ID format")
+        await bot.send_message(
+            user_id,
+            f"📨 <b>Admin xabari:</b>\n\n{text}\n\n",
+            parse_mode=ParseMode.HTML
+        )
+        await message.answer(f"✅ Xabar {identifier} ga yuborildi")
+    except Exception as e:
+        logger.error(f"PM xatosi: {e}")
+        await message.answer("❌ Xatolik yuz berdi.")
 
-    async with message.bot.get('pool').acquire() as conn:
+@dp.message(Command("top"))
+async def handle_top(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ Bu buyruq faqat admin uchun")
+    global pool
+    async with pool.acquire() as conn:
         two_weeks_top = await conn.fetch('''
             SELECT user_id, username, COUNT(*) as activity_count
             FROM user_activity
             WHERE activity_time >= NOW() - INTERVAL '14 days'
-              AND user_id NOT IN (SELECT user_id FROM admins)
+            AND user_id NOT IN (SELECT user_id FROM admins)
             GROUP BY user_id, username
             ORDER BY activity_count DESC
             LIMIT 5
@@ -121,124 +164,75 @@ async def handle_top(message: Message):
             SELECT user_id, username, COUNT(*) as activity_count
             FROM user_activity
             WHERE activity_time >= NOW() - INTERVAL '30 days'
-              AND user_id NOT IN (SELECT user_id FROM admins)
+            AND user_id NOT IN (SELECT user_id FROM admins)
             GROUP BY user_id, username
             ORDER BY activity_count DESC
             LIMIT 10
         ''')
-
-    def format_user(user_id, username):
-        return f"@{username}" if username else f'<a href="tg://user?id={user_id}">User {user_id}</a>'
-
     def format_table(data, title):
         result = f"🏆 <b>{title}</b>\n\n"
-        emojis = ["👑", "🥈", "🥉"]
         for i, row in enumerate(data, 1):
-            medal = emojis[i-1] if i <= 3 else f"{i}️⃣"
-            user_link = format_user(row["user_id"], row["username"])
-            result += f"{medal} 👤 {user_link} — <b>{row['activity_count']}</b> marta\n"
+            username = row['username'] or f"ID:{row['user_id']}"
+            result += f"{i}. {username} - {row['activity_count']} marta\n"
         return result
-
     response = (
-        format_table(two_weeks_top, "So'nggi 2 hafta — TOP 5") + "\n\n" +
-        format_table(one_month_top, "So'nggi 1 oy — TOP 10")
+        format_table(two_weeks_top, "So'nggi 2 hafta top 5") + "\n\n" +
+        format_table(one_month_top, "So'nggi 1 oy top 10")
     )
-    await message.answer(response, parse_mode="HTML")
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
-
-# Umumiy statistika
+@dp.message(Command("users"))
 async def handle_users_command(message: Message):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
+    if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+    total_users = await get_users_count()
+    text = (
+        "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
+        f"📌 Umumiy foydalanuvchilar soni: <b>{total_users:,}</b> ta\n"
+        "📅 Statistikani yangilash: <i>real vaqtda</i>"
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML)
 
-    try:
-        async with message.bot.get('pool').acquire() as conn:
-            total_users = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE user_id != $1",
-                int(os.getenv("ADMIN_ID"))
-            )  # ❗️ bu yerda qavs yopildi
-
-            most_active_30days = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) AS activity_count 
-                FROM user_activity 
-                WHERE activity_time >= NOW() - INTERVAL '30 days'
-                  AND user_id != $1
-                GROUP BY user_id, username 
-                ORDER BY activity_count DESC 
-                LIMIT 1
-            ''', int(os.getenv("ADMIN_ID")))
-
-            most_active_today = await conn.fetchrow('''
-                SELECT user_id, username, COUNT(*) AS activity_count 
-                FROM user_activity 
-                WHERE activity_time >= CURRENT_DATE
-                  AND user_id != $1
-                GROUP BY user_id, username 
-                ORDER BY activity_count DESC 
-                LIMIT 1
-            ''', int(os.getenv("ADMIN_ID")))
-
-            last_user = await conn.fetchrow('''
-                SELECT user_id, username, created_at 
-                FROM users 
-                WHERE user_id != $1
-                ORDER BY created_at DESC 
-                LIMIT 1
-            ''', int(os.getenv("ADMIN_ID")))
-
-        def format_user(user):
-            if not user:
-                return "—"
-            return f"@{user['username']}" if user["username"] else f'<a href="tg://user?id={user["user_id"]}">User {user["user_id"]}</a>'
-
-        text = (
-            "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
-            f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
-            f"🏆 Oxirgi 30 kun eng faol:\n"
-            f"├ 👤 {format_user(most_active_30days)}\n"
-            f"└ 🔢 Faollik: {most_active_30days['activity_count'] if most_active_30days else 0}\n\n"
-            f"🔥 Bugungi eng faol:\n"
-            f"├ 👤 {format_user(most_active_today)}\n"
-            f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
-            f"🆕 Oxirgi foydalanuvchi:\n"
-            f"├ 👤 {format_user(last_user)}\n"
-            f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
-        )
-        await message.answer(text, parse_mode="HTML")
-    except Exception as e:
-        await message.answer("❌ Xatolik yuz berdi: " + str(e))
-
-
-# Foydalanuvchilarni JSON qilib olish
+@dp.message(Command("dump_users"))
 async def handle_dump_users(message: Message):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
+    if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
+    users = await get_all_users()
+    temp_file = "temp_users.json"
+    with open(temp_file, "w") as f:
+        json.dump([dict(user) for user in users], f, indent=4)
+    file_to_send = FSInputFile(temp_file)
+    await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati")
+    os.remove(temp_file)
 
-    try:
-        users = await get_all_users()
-        temp_file = "temp_users.json"
-        with open(temp_file, "w") as f:
-            json.dump([dict(user) for user in users], f, indent=4)
-
-        file_to_send = FSInputFile(temp_file)
-        await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati")
-        os.remove(temp_file)
-    except Exception as e:
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
-
-
-# Yangi admin qo‘shish
+@dp.message(Command("add_admin"))
 async def handle_add_admin(message: Message):
-    if message.from_user.id != int(os.getenv("ADMIN_ID")):
+    if message.from_user.id != ADMIN_ID:
         return await message.answer("❌ Bu buyruq faqat admin uchun")
-
     try:
         new_admin_id = int(message.text.split()[1])
-        async with message.bot.get('pool').acquire() as conn:
+        global pool
+        async with pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO admins (user_id) VALUES ($1)
                 ON CONFLICT DO NOTHING
             ''', new_admin_id)
         await message.answer(f"✅ {new_admin_id} admin qilindi")
     except:
-        await message.answer("❗ Foydalanish: /add_admin 1234567")
+        await message.answer("❗ /add_admin 1234567")
+
+@dp.startup()
+async def on_startup(bot: Bot):
+    await create_db_pool()
+    await create_users_table()
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="send", description="Barchaga xabar yuborish"),
+            BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
+            BotCommand(command="top", description="Eng faol foydalanuvchilar"),
+            BotCommand(command="users", description="Foydalanuvchilar soni"),
+            BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
+            BotCommand(command="add_admin", description="Yangi admin qo'shish"),
+        ],
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )

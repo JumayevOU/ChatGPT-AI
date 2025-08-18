@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# GLOBAL connection pool
+
 pool = None
 
 async def create_db_pool():
@@ -42,6 +42,7 @@ async def create_users_table():
                 activity_type VARCHAR(50)
             );
         ''')
+
         await conn.execute('''
             INSERT INTO admins (user_id) VALUES ($1)
             ON CONFLICT DO NOTHING
@@ -82,3 +83,32 @@ async def get_users_count():
     global pool
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
+
+async def get_user_id_by_username(username: str):
+    global pool
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            'SELECT user_id FROM users WHERE username = $1',
+            username
+        )
+
+async def add_admin(new_admin_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO admins (user_id) VALUES ($1)
+            ON CONFLICT DO NOTHING
+        ''', new_admin_id)
+
+async def get_top_users(days: int, limit: int):
+    global pool
+    async with pool.acquire() as conn:
+        return await conn.fetch(f'''
+            SELECT user_id, username, COUNT(*) as activity_count
+            FROM user_activity
+            WHERE activity_time >= NOW() - INTERVAL '{days} days'
+            AND user_id NOT IN (SELECT user_id FROM admins)
+            GROUP BY user_id, username
+            ORDER BY activity_count DESC
+            LIMIT {limit}
+        ''')
