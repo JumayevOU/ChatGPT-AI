@@ -3,7 +3,6 @@ import logging
 import random
 import os
 import json
-import time
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
@@ -16,25 +15,24 @@ from aiogram.types import BotCommandScopeChat
 from dotenv import load_dotenv
 import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
-from database import create_db_pool, create_users_table, save_user, log_user_activity
+
+
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
-from admin import (
-    handle_sendall, 
-    handle_top, handle_users_command, handle_dump_users, handle_add_admin
-)
+from . import database  
+from . import admin     
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 OCR_API_KEY = os.getenv("OCR_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 session = AiohttpSession()
 bot = Bot(
-    token=BOT_TOKEN,
+    token=os.getenv("BOT_TOKEN") or "", 
     session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
@@ -47,10 +45,13 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+
+admin.register_admin_handlers(dp, bot, ADMIN_ID)
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    await save_user(message.from_user.id, message.from_user.username)
-    await log_user_activity(message.from_user.id, message.from_user.username, "start")
+    await database.save_user(message.from_user.id, message.from_user.username)
+    await database.log_user_activity(message.from_user.id, message.from_user.username, "start")
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
@@ -76,168 +77,96 @@ async def handle_text(message: Message):
 
     user_id = message.from_user.id
     chat_id = message.chat.id
-    await save_user(user_id, message.from_user.username)
-    await log_user_activity(user_id, message.from_user.username, "text_message")
-    
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
-    
-    try:
-        for percent in range(10, 91, 10):
-            filled = percent // 10
-            progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%")
-            await asyncio.sleep(0.2)
+    await database.save_user(user_id, message.from_user.username)
+    await database.log_user_activity(user_id, message.from_user.username, "text_message")
 
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+
+    try:
         update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
-        
-        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.3)
+
         await bot.delete_message(chat_id, loading.message_id)
-        
         await message.answer(reply, parse_mode="Markdown")
-        
+
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
-            await asyncio.sleep(2)
             await bot.delete_message(chat_id, loading.message_id)
         except:
             pass
-        
         await message.answer(
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
-    """OCR.space API orqali rasmdan matn ajratib olish"""
     url = "https://api.ocr.space/parse/image"
     headers = {"apikey": OCR_API_KEY}
     data = {"language": "eng", "isOverlayRequired": False}
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-            for key, val in data.items():
-                form.add_field(key, str(val))
-                
-            async with session.post(url, data=form, headers=headers) as resp:
-                result = await resp.json()
-                return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-    except Exception as e:
-        logger.error(f"OCR xatosi: {str(e)}")
-        return ""
+
+    async with aiohttp.ClientSession() as session:
+        form = aiohttp.FormData()
+        form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+        for key, val in data.items():
+            form.add_field(key, str(val))
+
+        async with session.post(url, data=form, headers=headers) as resp:
+            result = await resp.json()
+            try:
+                return result["ParsedResults"][0]["ParsedText"].strip()
+            except Exception:
+                return ""
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    
-    await save_user(user_id, message.from_user.username)
-    await log_user_activity(user_id, message.from_user.username, "photo_message")
-    
-    loading = await message.answer("🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
-    
+    await database.save_user(user_id, message.from_user.username)
+    await database.log_user_activity(user_id, message.from_user.username, "photo_message")
+
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda...</b>")
+
     try:
-        start_time = time.time()
-        progress_duration = 3.0
-
-        for percent in range(10, 51, 10):
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🖼️ <b>Rasm tahlil qilinmoqda...</b>\n{bar} {percent}%", 
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.3)
-
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         image_bytes = await bot.download_file(file.file_path)
+
         text = await extract_text_from_image(image_bytes.read())
-        
+
         if not text or len(text.strip()) < 3:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
-            await asyncio.sleep(0.5)
-            await loading.delete()
+            await bot.delete_message(chat_id, loading.message_id)
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
-
-        for percent in range(60, 91, 10):
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%", 
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.3)
 
         update_chat_history(chat_id, text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(text)
         reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.5)
-        await loading.delete()
+        await bot.delete_message(chat_id, loading.message_id)
         await message.answer(reply, parse_mode="Markdown")
-        
+
     except Exception as e:
-        logger.error(f"Rasm tahlili xatosi: {str(e)}")
+        logger.error(f"[OCR xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
-            await asyncio.sleep(2)
-            await loading.delete()
-        except Exception as e:
-            logger.error(f"Xabarni o'chirishda xato: {str(e)}")
-        
-        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
-
-async def notify_inactive_users():
-    while True:
-        await asyncio.sleep(3600 * 24 * 7)
-        async with bot.get('pool').acquire() as conn:
-            inactive_users = await conn.fetch('''
-                SELECT user_id FROM users 
-                WHERE last_seen < NOW() - INTERVAL '7 days' 
-                AND is_active = TRUE
-            ''')
-            for record in inactive_users:
-                user_id = record['user_id']
-                try:
-                    await bot.send_message(
-                        user_id,
-                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
-                    )
-                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
-                    await asyncio.sleep(0.1)
-                except (TelegramForbiddenError, TelegramNotFound):
-                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
-                except Exception as e:
-                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
-
-@dp.startup()
-async def on_startup(bot: Bot):
-    await create_db_pool()
-    await create_users_table()
-    await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="Botni ishga tushirish"),
-            BotCommand(command="send", description="Barchaga xabar yuborish"),
-            BotCommand(command="pm", description="Aniq foydalanuvchiga xabar"),
-            BotCommand(command="top", description="Eng faol foydalanuvchilar"),
-            BotCommand(command="users", description="Foydalanuvchilar soni"),
-            BotCommand(command="dump_users", description="Foydalanuvchilar ro'yxatini yuklash"),
-            BotCommand(command="add_admin", description="Yangi admin qo'shish"),
-        ],
-        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
-    )
+            await bot.delete_message(chat_id, loading.message_id)
+        except:
+            pass
+        await message.answer("❌ Rasmni o'qishda xatolik yuz berdi.")
 
 async def main():
+
     await bot(DeleteWebhook(drop_pending_updates=True))
-    asyncio.create_task(notify_inactive_users())
+
+
+    await database.create_db_pool()
+    await database.create_users_table(ADMIN_ID)
+
+
+    asyncio.create_task(database.notify_inactive_users(bot))
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

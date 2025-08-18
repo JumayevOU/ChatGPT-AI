@@ -1,9 +1,14 @@
-import asyncpg
 import os
+import logging
 from dotenv import load_dotenv
+import asyncpg
+from datetime import datetime, timedelta
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+logger = logging.getLogger(__name__)
 
 
 pool = None
@@ -14,11 +19,12 @@ async def create_db_pool():
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
-async def create_users_table():
+async def create_users_table(admin_id: int):
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
+       
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -28,11 +34,13 @@ async def create_users_table():
                 is_active BOOLEAN DEFAULT TRUE
             );
         ''')
+      
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY
             );
         ''')
+       
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -42,11 +50,11 @@ async def create_users_table():
                 activity_type VARCHAR(50)
             );
         ''')
-
+        
         await conn.execute('''
             INSERT INTO admins (user_id) VALUES ($1)
             ON CONFLICT DO NOTHING
-        ''', int(os.getenv("ADMIN_ID", 0)))
+        ''', admin_id)
 
 async def save_user(user_id: int, username: str = None):
     global pool
@@ -84,31 +92,37 @@ async def get_users_count():
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
-async def get_user_id_by_username(username: str):
-    global pool
-    async with pool.acquire() as conn:
-        return await conn.fetchval(
-            'SELECT user_id FROM users WHERE username = $1',
-            username
-        )
+async def notify_inactive_users(bot):
+    """
+    This function is used as a background task from main.
+    It requires `bot` instance passed in.
+    """
+    while True:
+        await asyncio_sleep(3600 * 24 * 7)
 
-async def add_admin(new_admin_id: int):
-    global pool
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO admins (user_id) VALUES ($1)
-            ON CONFLICT DO NOTHING
-        ''', new_admin_id)
+        global pool
+        async with pool.acquire() as conn:
+            inactive_users = await conn.fetch('''
+                SELECT user_id FROM users 
+                WHERE last_seen < NOW() - INTERVAL '7 days' 
+                AND is_active = TRUE
+            ''')
 
-async def get_top_users(days: int, limit: int):
-    global pool
-    async with pool.acquire() as conn:
-        return await conn.fetch(f'''
-            SELECT user_id, username, COUNT(*) as activity_count
-            FROM user_activity
-            WHERE activity_time >= NOW() - INTERVAL '{days} days'
-            AND user_id NOT IN (SELECT user_id FROM admins)
-            GROUP BY user_id, username
-            ORDER BY activity_count DESC
-            LIMIT {limit}
-        ''')
+            for record in inactive_users:
+                user_id = record['user_id']
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
+                    )
+                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
+                    await asyncio_sleep(0.1)
+                except (TelegramForbiddenError, TelegramNotFound):
+                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+                except Exception as e:
+                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
+
+
+async def asyncio_sleep(seconds: float):
+    import asyncio
+    await asyncio.sleep(seconds)
