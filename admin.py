@@ -4,8 +4,8 @@ import logging
 import asyncio
 from aiogram import BotCommand
 from aiogram.types import FSInputFile
+from aiogram.types import BotCommand, FSInputFile, BotCommandScopeChat
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommandScopeChat
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from . import database  
@@ -193,3 +193,4 @@ def register_admin_handlers(dp, bot, ADMIN_ID):
             ],
             scope=BotCommandScopeChat(chat_id=ADMIN_ID)
         )
+
