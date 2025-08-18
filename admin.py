@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import asyncio
+import functools
 from aiogram import Bot
 from aiogram.types import Message, FSInputFile
 from aiogram.enums import ParseMode
@@ -18,8 +19,67 @@ class PMStates(StatesGroup):
 
 
 def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
+    async def is_admin_db(user_id: int) -> bool:
+        try:
+            if user_id == ADMIN_ID:
+                return True
+            async with database_module.pool.acquire() as conn:
+                exists = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM admins WHERE user_id = $1)", user_id
+                )
+                return bool(exists)
+        except Exception as e:
+            logger.exception("Adminni tekshirishda xatolik: %s", e)
+
+            return False
+
+
+    def admin_ai_guard(func):
+        @functools.wraps(func)
+        async def wrapper(message: Message, *args, **kwargs):
+            try:
+                if await is_admin_db(message.from_user.id):
+                    await message.answer("❌ Adminlar uchun AI funksiyasi o'chirilgan — faqat admin buyruqlaridan foydalaning.")
+                    return
+            except Exception as e:
+                logger.exception("admin_ai_guard xatosi: %s", e)
+
+                await message.answer("❌ Adminlar uchun AI funksiyasi o'chirilgan — faqat admin buyruqlaridan foydalaning.")
+                return
+            return await func(message, *args, **kwargs)
+        return wrapper
+
+
+    async def block_admin_non_admin_messages(message: Message):
+        
+        try:
+            if not await is_admin_db(message.from_user.id):
+                return  
+        except Exception as e:
+            logger.exception("block_admin_non_admin_messages admin tekshiruvida xato: %s", e)
+            return
+
+
+        allowed_admin_commands = {
+            "/send", "/pm", "/top", "/users", "/dump_users", "/add_admin", "/start"
+        }
+
+        text = (message.text or "").strip()
+        if text.startswith("/"):
+            cmd = text.split()[0]
+            if cmd in allowed_admin_commands:
+                return  
+            else:
+                await message.answer("❌ Bu admin komandasi emas. Adminlar faqat admin buyruqlarini ishlata oladi.")
+                return
+
+
+        await message.answer("❌ Siz admin hisobingiz bilan AI funksiyalaridan foydalanolmaysiz. Faqat admin buyruqlarini ishlating.")
+        return
+
+
     async def handle_send(message: Message):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             await message.answer("❌ Bu buyruq faqat admin uchun.")
             return
 
@@ -54,9 +114,8 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
         )
 
-  
     async def cmd_pm(message: Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             await message.answer("❌ Bu buyruq faqat admin uchun.")
             return
         await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
@@ -96,9 +155,8 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
         await state.clear()
 
-
     async def handle_top(message: Message):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             return await message.answer("❌ Bu buyruq faqat admin uchun")
 
         async with database_module.pool.acquire() as conn:
@@ -144,9 +202,8 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
 
         await message.answer(response, parse_mode="HTML")
 
-
     async def handle_users_command(message: Message):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
 
         try:
@@ -210,9 +267,8 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         except Exception as e:
             await message.answer("❌ Xatolik yuz berdi: " + str(e))
 
-   
     async def handle_dump_users(message: Message):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             return await message.answer("❌ Sizda bu buyruqni ishlatish huquqi yo'q.")
         try:
             users = await database_module.get_all_users()
@@ -226,9 +282,8 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         except Exception as e:
             await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
 
-    
     async def handle_add_admin(message: Message):
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_db(message.from_user.id):
             return await message.answer("❌ Bu buyruq faqat admin uchun")
         try:
             new_admin_id = int(message.text.split()[1])
@@ -242,6 +297,9 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             await message.answer("❗ /add_admin 1234567")
 
 
+    dp.message.register(block_admin_non_admin_messages)
+
+
     dp.message.register(handle_send, Command("send"))
     dp.message.register(cmd_pm, Command("pm"))
     dp.message.register(process_user, PMStates.waiting_for_user)
@@ -250,3 +308,6 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
     dp.message.register(handle_users_command, Command("users"))
     dp.message.register(handle_dump_users, Command("dump_users"))
     dp.message.register(handle_add_admin, Command("add_admin"))
+
+   
+    return admin_ai_guard, is_admin_db

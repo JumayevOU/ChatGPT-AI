@@ -15,7 +15,6 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from dotenv import load_dotenv
 import aiohttp
 
-
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
 
@@ -33,7 +32,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 session = AiohttpSession()
 bot = Bot(
     token=BOT_TOKEN,
@@ -49,18 +47,35 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
+# NOTE: bu funksiyalarni dekoratorsiz aniqlaymiz va keyin ro'yxatga olamiz,
+# chunki AI handlerlarini admin_ai_guard bilan o'rashimiz kerak bo'ladi.
 
-@dp.message(CommandStart())
 async def handle_start(message: Message):
+
+    is_admin = globals().get("is_admin_db")  
+    if is_admin and await is_admin(message.from_user.id):
+        await message.answer(
+            "🛠️ <b>Admin panelga xush kelibsiz!</b>\n\n"
+            "Siz faqat admin buyruqlarini ishlata olasiz:\n"
+            "/send — Barchaga xabar yuborish\n"
+            "/pm — Foydalanuvchiga xabar\n"
+            "/top — Eng faol foydalanuvchilar\n"
+            "/users — Foydalanuvchilar statistikasi\n"
+            "/dump_users — Foydalanuvchilar ro'yxatini yuklash\n"
+            "/add_admin — Yangi admin qo'shish\n\n"
+            "Eslatma: Admin hisob bilan AI funksiyalari o'chirilgan."
+        )
+        return
+
+
     await save_user(message.from_user.id, message.from_user.username)
     await log_user_activity(message.from_user.id, message.from_user.username, "start")
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
+        "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
         "➤ Savollaringizga javob beraman\n"
         "➤ Til va tarjima\n"
         "➤ Texnik yordam\n"
@@ -71,8 +86,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-
-@dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
@@ -115,7 +128,6 @@ async def handle_text(message: Message):
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
 
-
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
     headers = {"apikey": OCR_API_KEY}
@@ -135,8 +147,6 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
 
-
-@dp.message(F.photo)
 async def handle_photo(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -194,7 +204,6 @@ async def handle_photo(message: Message):
             logger.error(f"Xabarni o'chirishda xato: {str(e)}")
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
-
 async def notify_inactive_users():
     while True:
         await asyncio.sleep(3600 * 24 * 7)
@@ -218,16 +227,17 @@ async def notify_inactive_users():
                 except Exception as e:
                     logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
-
 async def main():
-   
     await create_db_pool()
     await create_users_table()
 
-    
-    admin_module.register_admin_handlers(dp, bot, ADMIN_ID, __import__('database'))
 
-    
+    admin_ai_guard, is_admin_db = admin_module.register_admin_handlers(dp, bot, ADMIN_ID, __import__('database'))
+
+
+    globals()["is_admin_db"] = is_admin_db
+
+
     await bot.set_my_commands(
         commands=[
             BotCommand(command="start", description="Botni ishga tushirish"),
@@ -241,11 +251,17 @@ async def main():
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
 
-    
+
+    dp.message.register(handle_start, CommandStart())
+
+
+    dp.message.register(admin_ai_guard(handle_text), F.text & ~F.text.startswith("/"))
+    dp.message.register(admin_ai_guard(handle_photo), F.photo)
+
+
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
