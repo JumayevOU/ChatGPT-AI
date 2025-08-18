@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import asyncio
+from datetime import datetime, timezone, timedelta
 from aiogram import Bot, F
 from aiogram.types import (
     Message,
@@ -11,7 +12,6 @@ from aiogram.types import (
     CallbackQuery,
 )
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
@@ -25,23 +25,23 @@ class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
 
-
 class BroadcastStates(StatesGroup):
     waiting_for_broadcast_text = State()
 
-
 class AddAdminStates(StatesGroup):
     waiting_for_admin_id = State()
-
 
 class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
+REMOVE_BLOCK_DAYS = 3  
+
+
 def register_admin_handlers(dp, bot: Bot, database_module):
     """
     Register admin handlers.
-    Admins are stored in DB with user_id and username.
+    database_module should implement: is_admin, get_admins, get_admin_meta, add_admin, remove_admin, get_all_users, deactivate_user
     """
 
     async def require_admin_or_deny(message: Message) -> bool:
@@ -59,7 +59,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not await require_admin_or_deny(message):
             return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
-
     async def start_broadcast(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -304,7 +303,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             logger.exception("handle_dump_users error")
             await message.answer(f"❌ Xatolik yuz berdi: server yoki fayl tizimi")
 
-
     async def start_add_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -322,7 +320,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Iltimos faqat sonli ID kiriting. Masalan: 123456789")
             await state.clear()
             return
-
 
         username = None
         try:
@@ -349,10 +346,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     async def start_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
-
-
         try:
-            admins = await database_module.get_admins()  
+            admins = await database_module.get_admins() 
         except Exception:
             logger.exception("DB error in start_remove_admin")
             await message.answer("❌ DB xatosi.")
@@ -363,49 +358,73 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             return
 
 
-        kb = InlineKeyboardMarkup()
+        kb = InlineKeyboardMarkup(row_width=1)
         for a in admins:
             uid = a.get('user_id')
             uname = a.get('username')
             label = f"{uid}"
             if uname:
                 label += f" — @{uname}"
-  
             kb.add(InlineKeyboardButton(text=label, callback_data=f"remove_admin:{uid}"))
 
         await message.answer("➖ Qaysi adminni o'chirmoqchisiz? Quyidagilardan birini bosing:", reply_markup=kb)
 
     async def remove_admin_callback(query: CallbackQuery):
-
         try:
-            if not await database_module.is_admin(query.from_user.id):
+            requester_id = query.from_user.id
+            try:
+                requester_meta = await database_module.get_admin_meta(requester_id)
+            except Exception:
+                logger.exception("DB error in remove_admin_callback auth")
+                await query.answer("❌ Server xatosi.", show_alert=True)
+                return
+
+            if not requester_meta:
                 await query.answer("❌ Bu amal faqat adminlar uchun.", show_alert=True)
                 return
-        except Exception:
-            logger.exception("DB error in remove_admin_callback auth")
-            await query.answer("❌ Server xatosi.", show_alert=True)
-            return
 
-        data = query.data or ""
-        if not data.startswith("remove_admin:"):
-            await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
-            return
-
-        try:
-            target_id = int(data.split(":", 1)[1])
-        except Exception:
-            await query.answer("❌ Noto'g'ri ID.", show_alert=True)
-            return
-
-        requester = query.from_user.id
-
-        try:
-            if not await database_module.is_admin(target_id):
-                await query.answer("ℹ️ Bu foydalanuvchi admin emas yoki allaqachon o'chirilgan.", show_alert=True)
+            data = query.data or ""
+            if not data.startswith("remove_admin:"):
+                await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
                 return
 
-            if target_id == requester:
+            try:
+                target_id = int(data.split(":", 1)[1])
+            except Exception:
+                await query.answer("❌ Noto'g'ri ID.", show_alert=True)
+                return
+
+
+            if target_id == requester_id:
                 await query.answer("❗ O'zingizni o'chira olmaysiz.", show_alert=True)
+                return
+
+
+            created_at = requester_meta.get('created_at')
+            if created_at is None:
+                await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
+                return
+
+
+            if isinstance(created_at, datetime) and created_at.tzinfo is not None:
+                created_utc = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                created_utc = created_at
+
+            now = datetime.utcnow()
+            allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
+            if now < allowed_after:
+                allowed_str = allowed_after.strftime("%Y-%m-%d %H:%M UTC")
+                await query.answer(
+                    f"❗ Siz yangi admin ekansiz — boshqa adminlarni o'chirish huquqi {allowed_str} dan keyin faollashadi.",
+                    show_alert=True
+                )
+                return
+
+
+            target_meta = await database_module.get_admin_meta(target_id)
+            if not target_meta:
+                await query.answer("ℹ️ Bu foydalanuvchi admin emas yoki allaqachon o'chirilgan.", show_alert=True)
                 return
 
             admins = await database_module.get_admins()
@@ -414,16 +433,17 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             await database_module.remove_admin(target_id)
-            await query.answer("✅ Admin o'chirildi.")
-
+            await query.answer("✅ Admin o'chirildi.", show_alert=True)
             try:
                 await query.message.edit_text("✅ Tanlangan admin o'chirildi.")
             except Exception:
                 pass
         except Exception:
             logger.exception("remove_admin_callback error")
-            await query.answer("❗ Xatolik yuz berdi.", show_alert=True)
-
+            try:
+                await query.answer("❗ Xatolik yuz berdi.", show_alert=True)
+            except Exception:
+                pass
 
     async def process_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
@@ -441,13 +461,39 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         requester = message.from_user.id
 
         try:
-            if not await database_module.is_admin(target_id):
-                await message.answer(f"ℹ️ {target_id} admin emas yoki mavjud emas.")
+            requester_meta = await database_module.get_admin_meta(requester)
+            if not requester_meta:
+                await message.answer("❌ Bu amal faqat adminlar uchun.")
                 await state.clear()
                 return
 
             if target_id == requester:
                 await message.answer("❗ O'zingizni o'chira olmaysiz. Boshqa admin ID kiriting yoki superadmin bilan bog'laning.")
+                await state.clear()
+                return
+
+
+            created_at = requester_meta.get('created_at')
+            if created_at is None:
+                await message.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.")
+                await state.clear()
+                return
+
+            if isinstance(created_at, datetime) and created_at.tzinfo is not None:
+                created_utc = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                created_utc = created_at
+
+            now = datetime.utcnow()
+            allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
+            if now < allowed_after:
+                allowed_str = allowed_after.strftime("%Y-%m-%d %H:%M UTC")
+                await message.answer(f"❗ Siz yangi admin ekansiz — boshqa adminlarni o'chirish huquqi {allowed_str} dan keyin faollashadi.")
+                await state.clear()
+                return
+
+            if not await database_module.is_admin(target_id):
+                await message.answer(f"ℹ️ {target_id} admin emas yoki mavjud emas.")
                 await state.clear()
                 return
 
@@ -483,5 +529,3 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
 
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-
-
