@@ -11,10 +11,11 @@ from aiogram.filters import Command, CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommandScopeChat
 from dotenv import load_dotenv
 import aiohttp
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+import asyncpg  
 
 
 from services.mistral_service import get_mistral_reply
