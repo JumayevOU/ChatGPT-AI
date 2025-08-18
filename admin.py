@@ -10,21 +10,42 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
+
+from keyboards import admin_keyboard
+
 logger = logging.getLogger(__name__)
 
 class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
 
-def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
-    async def handle_send(message: Message):
-        if message.from_user.id != ADMIN_ID:
-            await message.answer("❌ Bu buyruq faqat admin uchun.")
-            return
+class BroadcastStates(StatesGroup):
+    waiting_for_broadcast_text = State()
 
-        text_to_send = message.text.replace("/send", "", 1).strip()
+class AddAdminStates(StatesGroup):
+    waiting_for_admin_id = State()
+
+def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
+    async def show_admin_keyboard(message: Message):
+        """Ko'rsatish uchun: /buyruqlar buyrug'i yoki admin kirganda ishlatish mumkin."""
+        if message.from_user.id != ADMIN_ID:
+            return await message.answer("❌ Bu faqat admin uchun.")
+        await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
+
+
+    async def start_broadcast(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return await message.answer("❌ Bu faqat admin uchun.")
+        await message.answer("✍️ Iltimos, barcha foydalanuvchilarga yuboriladigan xabar matnini kiriting:")
+        await state.set_state(BroadcastStates.waiting_for_broadcast_text)
+
+    async def process_broadcast(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            await state.clear()
+            return await message.answer("❌ Bu faqat admin uchun.")
+        text_to_send = message.text.strip()
         if not text_to_send:
-            await message.answer("✍️ Iltimos, yuboriladigan xabarni yozing: /send Xabar matni")
+            await message.answer("❗ Xabar bo'sh. Iltimos matn yozing.")
             return
 
         user_ids = await database_module.get_all_users()
@@ -38,65 +59,89 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
                 success += 1
             except (TelegramForbiddenError, TelegramNotFound):
                 logger.warning(f"❌ Foydalanuvchi topilmadi yoki bloklangan: {user_id}")
-                await database_module.deactivate_user(user_id)
+                try:
+                    await database_module.deactivate_user(user_id)
+                except Exception:
+                    logger.exception("DB deactivate error")
                 fail += 1
             except Exception as e:
                 logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
                 fail += 1
 
             percent = int(i / len(user_ids) * 100) if user_ids else 100
-            await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
+            try:
+                await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
+            except Exception:
+                pass
             await asyncio.sleep(0.05)
 
         await progress_message.edit_text(
             f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
             f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
         )
+        await state.clear()
+
 
     async def cmd_pm(message: Message, state: FSMContext):
         if message.from_user.id != ADMIN_ID:
-            await message.answer("❌ Bu buyruq faqat admin uchun.")
-            return
-
+            return await message.answer("❌ Bu buyruq faqat admin uchun.")
         await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
         await state.set_state(PMStates.waiting_for_user)
 
     async def process_user(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return await message.answer("❌ Bu buyruq faqat admin uchun.")
         identifier = message.text.strip()
-        async with database_module.pool.acquire() as conn:
-            if identifier.startswith("@"):
-                user_id = await conn.fetchval(
-                    "SELECT user_id FROM users WHERE username = $1",
-                    identifier[1:]
-                )
-            else:
-                try:
-                    user_id = int(identifier)
-                except ValueError:
-                    await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
-                    return
+        user_id = None
+        try:
+            async with database_module.pool.acquire() as conn:
+                if identifier.startswith("@"):
+                    user_id = await conn.fetchval(
+                        "SELECT user_id FROM users WHERE username = $1",
+                        identifier[1:]
+                    )
+                else:
+                    try:
+                        user_id = int(identifier)
+                    except ValueError:
+                        await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
+                        return
+        except Exception as e:
+            logger.exception("DB error in process_user")
+            await message.answer("❌ DB xatosi.")
+            return
 
-            if not user_id:
-                await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring. Yoki user ID kiriting..!")
-                return
+        if not user_id:
+            await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring. Yoki user ID kiriting..!")
+            return
 
         await state.update_data(user_id=user_id)
         await message.answer("✍️ Endi xabar matnini kiriting:")
         await state.set_state(PMStates.waiting_for_message)
 
     async def process_message(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            await state.clear()
+            return await message.answer("❌ Bu buyruq faqat admin uchun.")
+
         data = await state.get_data()
-        user_id = data["user_id"]
+        user_id = data.get("user_id")
         text = message.text.strip()
+
+        if not user_id:
+            await state.clear()
+            return await message.answer("❌ Foydalanuvchi ID topilmadi. Iltimos boshidan boshlang.")
 
         progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
         try:
             await bot.send_message(user_id, f"📨 <b>Admin xabari:</b>\n\n{text}", parse_mode=ParseMode.HTML)
             await progress_message.edit_text("📤 Xabar yuborildi ✅")
         except Exception as e:
+            logger.exception("Send PM error")
             await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
-        
+
         await state.clear()
+
 
     async def handle_top(message: Message):
         if message.from_user.id != ADMIN_ID:
@@ -143,6 +188,7 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             + format_table(one_month_top, "So'nggi 1 oy — TOP 10")
         )
         await message.answer(response, parse_mode="HTML")
+
 
     async def handle_users_command(message: Message):
         if message.from_user.id != ADMIN_ID:
@@ -206,7 +252,9 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
             )
             await message.answer(text, parse_mode="HTML")
         except Exception as e:
+            logger.exception("handle_users_command error")
             await message.answer("❌ Xatolik yuz berdi: " + str(e))
+
 
     async def handle_dump_users(message: Message):
         if message.from_user.id != ADMIN_ID:
@@ -215,21 +263,29 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
         try:
             users = await database_module.get_all_users()
             temp_file = "temp_users.json"
-            with open(temp_file, "w") as f:
-                json.dump([dict(user) for user in users], f, indent=4)
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump([dict(user) for user in users], f, indent=4, ensure_ascii=False)
 
             file_to_send = FSInputFile(temp_file)
             await message.answer_document(file_to_send, caption="📄 Foydalanuvchilar ro'yxati")
             os.remove(temp_file)
         except Exception as e:
+            logger.exception("handle_dump_users error")
             await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
 
-    async def handle_add_admin(message: Message):
+
+    async def start_add_admin(message: Message, state: FSMContext):
         if message.from_user.id != ADMIN_ID:
             return await message.answer("❌ Bu buyruq faqat admin uchun")
+        await message.answer("➕ Iltimos, yangi admin qilmoqchi bo'lgan foydalanuvchi ID sini kiriting:")
+        await state.set_state(AddAdminStates.waiting_for_admin_id)
 
+    async def process_add_admin(message: Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            await state.clear()
+            return await message.answer("❌ Bu buyruq faqat admin uchun")
         try:
-            new_admin_id = int(message.text.split()[1])
+            new_admin_id = int(message.text.strip())
             async with database_module.pool.acquire() as conn:
                 await conn.execute('''
                     INSERT INTO admins (user_id)
@@ -237,14 +293,68 @@ def register_admin_handlers(dp, bot: Bot, ADMIN_ID: int, database_module):
                     ON CONFLICT DO NOTHING
                 ''', new_admin_id)
             await message.answer(f"✅ {new_admin_id} admin qilindi")
-        except:
-            await message.answer("❗ /add_admin 1234567")
+        except ValueError:
+            await message.answer("❗ Iltimos faqat sonli ID kiriting. Masalan: 123456789")
+        except Exception as e:
+            logger.exception("process_add_admin error")
+            await message.answer("❗ Xatolik yuz berdi: " + str(e))
+        finally:
+            await state.clear()
 
-    dp.message.register(handle_send, Command("send"))
-    dp.message.register(cmd_pm, Command("pm"))
+
+    dp.message.register(show_admin_keyboard, Command("buyruqlar"))
+    dp.message.register(show_admin_keyboard, Command("admin")) 
+
+  
+    dp.message.register(start_broadcast, lambda message: message.text == '📢 Barchaga xabar yuborish')
+    dp.message.register(cmd_pm, lambda message: message.text == '📨 Userga xabar yuborish')
+    dp.message.register(handle_top, lambda message: message.text == '🏆 Faol foydalanuvchilar')
+    dp.message.register(handle_users_command, lambda message: message.text == '📊 Statistika')
+    dp.message.register(handle_dump_users, lambda message: message.text == "📄 Userlar ro'yxati")
+    dp.message.register(start_add_admin, lambda message: message.text == "➕ Admin qo'shish")
+
+
+    dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
-    dp.message.register(handle_top, Command("top"))
-    dp.message.register(handle_users_command, Command("users"))
-    dp.message.register(handle_dump_users, Command("dump_users"))
-    dp.message.register(handle_add_admin, Command("add_admin"))
+    dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
+
+
+    dp.message.register(show_admin_keyboard, Command("start"))  
+
+
+    async def legacy_send_command(message: Message):
+
+        if message.from_user.id != ADMIN_ID:
+            return
+        text_to_send = message.text.replace("/send", "", 1).strip()
+        if not text_to_send:
+            return await message.answer("✍️ Iltimos, yuboriladigan xabarni yozing: /send Xabar matni")
+
+        user_ids = await database_module.get_all_users()
+        success, fail = 0, 0
+        progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
+        for i, record in enumerate(user_ids, 1):
+            user_id = record['user_id']
+            try:
+                await bot.send_message(user_id, text_to_send)
+                success += 1
+            except (TelegramForbiddenError, TelegramNotFound):
+                await database_module.deactivate_user(user_id)
+                fail += 1
+            except Exception as e:
+                logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
+                fail += 1
+            percent = int(i / len(user_ids) * 100) if user_ids else 100
+            try:
+                await progress_message.edit_text(f"📤 Xabar yuborilmoqda: {percent}%")
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+        await progress_message.edit_text(
+            f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
+            f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
+        )
+
+    dp.message.register(legacy_send_command, Command("send"))
+
