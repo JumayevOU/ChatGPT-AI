@@ -50,8 +50,8 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-def add_emoji_instruction_to_prompt(text: str) -> str:
-    return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
+# def add_emoji_instruction_to_prompt(text: str) -> str:
+#     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 ADMIN_BUTTON_TEXTS = [
     '📢 Barchaga xabar yuborish',
