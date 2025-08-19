@@ -50,9 +50,6 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-# def add_emoji_instruction_to_prompt(text: str) -> str:
-#     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
-
 ADMIN_BUTTON_TEXTS = [
     '📢 Barchaga xabar yuborish',
     '📨 Userga xabar yuborish',
@@ -136,8 +133,7 @@ async def handle_text(message: Message, state: FSMContext):
             await asyncio.sleep(0.2)
 
         update_chat_history(chat_id, message.text)
-        prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
-        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
+        reply = await get_mistral_reply(chat_id, message.text)
         update_chat_history(chat_id, reply, role="assistant")
 
         await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
@@ -218,8 +214,7 @@ async def handle_photo(message: Message, state: FSMContext):
             await asyncio.sleep(0.3)
 
         update_chat_history(chat_id, text)
-        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
-        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
+        reply = await get_mistral_reply(chat_id, text)
         update_chat_history(chat_id, reply, role="assistant")
 
         await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
