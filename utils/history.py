@@ -1,29 +1,42 @@
-from datetime import datetime
-from collections import defaultdict, deque
+from typing import Dict, List, Any
+from threading import Lock
 
-chat_history = defaultdict(lambda: deque([{"role": "system", "content": "Siz foydali yordamchisiz."}], maxlen=10))
+chat_history: Dict[int, List[Dict[str, Any]]] = {}
+_lock = Lock()
 
-user_last_activity = {}
+def add_message(chat_id: int, role: str, content: str) -> None:
+    """
+    chat_id ga role/content shaklida xabar qo'shadi.
+    role misoli: "user" yoki "assistant"
+    """
+    if chat_id is None:
+        return
+    with _lock:
+        chat_history.setdefault(chat_id, []).append({"role": role, "content": content})
 
-def update_chat_history(chat_id: int, content: str, role: str = "user"):
-    """Chat tarixiga yangi xabar qo'shadi va oxirgi faol vaqtni yangilaydi."""
-    history = chat_history[chat_id]
+def get_history(chat_id: int) -> List[Dict[str, Any]]:
+    """chat_id uchun xabarlar ro'yxatini (kopiyasini) qaytaradi."""
+    with _lock:
+        hist = chat_history.get(chat_id)
+        return list(hist) if hist is not None else []
 
-    if len(history) == 0 or history[0]["role"] != "system":
-        history.appendleft({"role": "system", "content": "Siz foydali yordamchisiz."})
+def clear_history(chat_id: int) -> None:
+    """chat_id tarixi o'chiradi."""
+    with _lock:
+        chat_history.pop(chat_id, None)
 
-    history.append({"role": role, "content": content})
+def update_chat_history(chat_id: int, content: str, role: str = "user") -> None:
+    """Eskri nom bilan moslashuv — default role user."""
+    add_message(chat_id, role, content)
 
-    user_last_activity[chat_id] = datetime.utcnow()
+def clear_user_history(chat_id: int) -> None:
+    clear_history(chat_id)
 
-def get_chat_history(chat_id: int):
-    """Chat tarixini list ko‘rinishida qaytaradi (deque emas)."""
-    return list(chat_history[chat_id])
-
-def clear_user_history(chat_id: int):
-    """Foydalanuvchi tarixini faqat system xabarigacha tozalaydi."""
-    chat_history[chat_id] = deque([{"role": "system", "content": "Siz foydali yordamchisiz."}], maxlen=10)
-
-def get_last_activity(chat_id: int):
-    """Foydalanuvchining oxirgi faol vaqtini qaytaradi (datetime yoki None)."""
-    return user_last_activity.get(chat_id)
+__all__ = [
+    "chat_history",
+    "add_message",
+    "get_history",
+    "clear_history",
+    "update_chat_history",
+    "clear_user_history",
+]
