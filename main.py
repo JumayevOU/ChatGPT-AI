@@ -1,25 +1,23 @@
-# main.py
 import asyncio
 import logging
 import random
 import os
-from typing import Optional
-
-import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
+from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
-
+import aiohttp
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
 
-# database helpers (must exist in your database.py)
+load_dotenv()
+
 from database import (
     create_db_pool,
     create_users_table,
@@ -28,24 +26,15 @@ from database import (
     is_admin,
 )
 import database
-
 import admin as admin_module
 from keyboards import admin_keyboard
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OCR_API_KEY = os.getenv("OCR_API_KEY")
 
-# Timeouts (seconds)
-MISTRAL_TIMEOUT = int(os.getenv("MISTRAL_TIMEOUT", "40"))
-OCR_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "15"))
-NOTIFY_INACTIVE_INTERVAL_SECONDS = 3600 * 24 * 7  # 1 week
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# aiogram session & bot
 session = AiohttpSession()
 bot = Bot(
     token=BOT_TOKEN,
@@ -53,9 +42,6 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
-
-# Shared OCR aiohttp session (lazy created)
-ocr_session: Optional[aiohttp.ClientSession] = None
 
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
@@ -67,32 +53,19 @@ error_messages = [
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
-# Progress editor (background)
-async def _progress_editor(msg, stop_event: asyncio.Event, base_text: str):
-    try:
-        percent = 0
-        while not stop_event.is_set():
-            percent = (percent + 10) % 100
-            filled = percent // 10
-            progress_bar = "▰" * filled + "▱" * (10 - filled)
-            try:
-                await msg.edit_text(f"{base_text} {progress_bar} {percent}%", parse_mode="HTML")
-            except Exception:
-                # may fail due to rate limits or message already deleted; ignore and continue
-                pass
-            await asyncio.sleep(0.4)
-    except asyncio.CancelledError:
-        pass
+ADMIN_BUTTON_TEXTS = [
+    '📢 Barchaga xabar yuborish',
+    '📨 Userga xabar yuborish',
+    '🏆 Faol foydalanuvchilar',
+    '📊 Statistika',
+    "📄 Userlar ro'yxati",
+    "➕ Admin qo'shish",
+]
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    # Fire-and-forget DB logging for speed
-    try:
-        asyncio.create_task(save_user(message.from_user.id, message.from_user.username))
-        asyncio.create_task(log_user_activity(message.from_user.id, message.from_user.username, "start"))
-    except Exception:
-        logger.exception("DB task yaratishda xato (start)")
-
+    await save_user(message.from_user.id, message.from_user.username)
+    await log_user_activity(message.from_user.id, message.from_user.username, "start")
     try:
         if await is_admin(message.from_user.id):
             await message.answer(
@@ -102,7 +75,6 @@ async def handle_start(message: Message):
             return
     except Exception:
         logger.exception("is_admin tekshiruvida xato")
-
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
@@ -116,54 +88,17 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-# OCR helper - reuses ocr_session, has timeout
-async def extract_text_from_image(image_bytes: bytes) -> str:
-    global ocr_session
-    if ocr_session is None:
-        ocr_session = aiohttp.ClientSession()
-
-    url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": OCR_API_KEY or ""}
-    data = {"language": "eng", "isOverlayRequired": False}
-
-    try:
-        form = aiohttp.FormData()
-        form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-        for key, val in data.items():
-            form.add_field(key, str(val))
-
-        # Use asyncio.wait_for for compatibility with older Python versions
-        async def _post():
-            async with ocr_session.post(url, data=form, headers=headers) as resp:
-                return await resp.json()
-
-        resp_json = await asyncio.wait_for(_post(), timeout=OCR_TIMEOUT)
-        return resp_json.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-    except asyncio.TimeoutError:
-        logger.error("OCR so'rovi timeout berdi")
-        return ""
-    except Exception as e:
-        logger.exception(f"OCR xatosi: {e}")
-        return ""
-
-# Handle plain text messages (non-admin)
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
-
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
 
     user_id = message.from_user.id
     chat_id = message.chat.id
-
-    # Fire-and-forget DB writes to avoid blocking user response
-    try:
-        asyncio.create_task(save_user(user_id, message.from_user.username))
-        asyncio.create_task(log_user_activity(user_id, message.from_user.username, "text_message"))
-    except Exception:
-        logger.exception("DB task yaratishda xato (text)")
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "text_message")
 
     try:
         current_state = await state.get_state()
@@ -173,70 +108,57 @@ async def handle_text(message: Message, state: FSMContext):
     if current_state:
         return
 
-    # Start progress message and background progress editor
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
-    stop_evt = asyncio.Event()
-    progress_task = asyncio.create_task(_progress_editor(loading, stop_evt, "🧠 <b>Savolingiz tahlil qilinmoqda</b>"))
-
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
     try:
-        # Update history and call Mistral with timeout
+        for percent in range(10, 91, 10):
+            filled = percent // 10
+            progress_bar = "▰" * filled + "▱" * (10 - filled)
+            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%")
+            await asyncio.sleep(0.2)
+
         update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
-
-        reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
         update_chat_history(chat_id, reply, role="assistant")
 
-        stop_evt.set()
-        try:
-            await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-        except Exception:
-            pass
-        await asyncio.sleep(0.25)
-        try:
-            await loading.delete()
-        except Exception:
-            pass
-
-        # Use default parse_mode (HTML) from bot; avoid overriding inconsistently
-        await message.answer(reply)
-    except asyncio.TimeoutError:
-        stop_evt.set()
-        if not progress_task.done():
-            progress_task.cancel()
-        logger.error("Mistral so'rovi timeout")
-        try:
-            await loading.edit_text("❌ So'rovimiz juda uzoq davom etdi — keyinroq qayta urinib ko'ring.", parse_mode="HTML")
-            await asyncio.sleep(1.0)
-            await loading.delete()
-        except Exception:
-            pass
-        await message.answer(random.choice(error_messages))
+        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.3)
+        await bot.delete_message(chat_id, loading.message_id)
+        await message.answer(reply, parse_mode="Markdown")
     except Exception as e:
-        stop_evt.set()
-        if not progress_task.done():
-            progress_task.cancel()
-        logger.exception(f"[Xatolik] {e}")
+        logger.error(f"[Xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!", parse_mode="HTML")
-            await asyncio.sleep(0.6)
-            await loading.delete()
-        except Exception:
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await asyncio.sleep(2)
+            await bot.delete_message(chat_id, loading.message_id)
+        except:
             pass
-        await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
-    finally:
-        if not progress_task.done():
-            progress_task.cancel()
+        await message.answer(
+            random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
+        )
 
-# Handle photo messages (non-admin)
+async def extract_text_from_image(image_bytes: bytes) -> str:
+    url = "https://api.ocr.space/parse/image"
+    headers = {"apikey": os.getenv("OCR_API_KEY")}
+    data = {"language": "eng", "isOverlayRequired": False}
+    try:
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+            for key, val in data.items():
+                form.add_field(key, str(val))
+            async with session.post(url, data=form, headers=headers) as resp:
+                result = await resp.json()
+                return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
+    except Exception as e:
+        logger.error(f"OCR xatosi: {str(e)}")
+        return ""
+
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
-
-    try:
-        asyncio.create_task(save_user(user_id, message.from_user.username))
-        asyncio.create_task(log_user_activity(user_id, message.from_user.username, "photo_message"))
-    except Exception:
-        logger.exception("DB task yaratishda xato (photo)")
+    await save_user(user_id, message.from_user.username)
+    await log_user_activity(user_id, message.from_user.username, "photo_message")
 
     try:
         current_state = await state.get_state()
@@ -247,142 +169,98 @@ async def handle_photo(message: Message, state: FSMContext):
         return
 
     loading = await message.answer("🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
-    stop_evt = asyncio.Event()
-    progress_task = asyncio.create_task(_progress_editor(loading, stop_evt, "🖼️ <b>Rasm tahlil qilinmoqda...</b>"))
-
     try:
+        for percent in range(10, 51, 10):
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(
+                f"🖼️ <b>Rasm tahlil qilinmoqda...</b>\n{bar} {percent}%",
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.3)
+
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
-        file_bytes = await bot.download_file(file.file_path)
-        raw_bytes = file_bytes.read() if hasattr(file_bytes, "read") else file_bytes
-
-        # OCR with timeout (wrap extract_text_from_image)
-        try:
-            text = await asyncio.wait_for(extract_text_from_image(raw_bytes), timeout=OCR_TIMEOUT)
-        except asyncio.TimeoutError:
-            text = ""
+        image_bytes = await bot.download_file(file.file_path)
+        text = await extract_text_from_image(image_bytes.read())
 
         if not text or len(text.strip()) < 3:
-            stop_evt.set()
-            try:
-                await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-            try:
-                await loading.delete()
-            except Exception:
-                pass
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
+            await asyncio.sleep(0.5)
+            await loading.delete()
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
-        # Call Mistral for extracted text
-        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
-        try:
-            reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
-            update_chat_history(chat_id, text)
-            update_chat_history(chat_id, reply, role="assistant")
-
-            stop_evt.set()
-            try:
-                await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-            except Exception:
-                pass
+        for percent in range(60, 91, 10):
+            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
+            await loading.edit_text(
+                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%",
+                parse_mode="HTML"
+            )
             await asyncio.sleep(0.3)
-            try:
-                await loading.delete()
-            except Exception:
-                pass
-            await message.answer(reply)
-        except asyncio.TimeoutError:
-            stop_evt.set()
-            if not progress_task.done():
-                progress_task.cancel()
-            logger.error("Mistral so'rovi timeout (photo)")
-            try:
-                await loading.edit_text("❌ AI so'rovi juda uzoq davom etdi.", parse_mode="HTML")
-                await asyncio.sleep(0.3)
-                await loading.delete()
-            except Exception:
-                pass
-            await message.answer(random.choice(error_messages))
-    except Exception as e:
-        stop_evt.set()
-        if not progress_task.done():
-            progress_task.cancel()
-        logger.exception(f"Rasm tahlili xatosi: {e}")
-        try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!", parse_mode="HTML")
-            await asyncio.sleep(0.6)
-            await loading.delete()
-        except Exception:
-            pass
-        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
-    finally:
-        if not progress_task.done():
-            progress_task.cancel()
 
-# Notify inactive users (background)
-async def notify_inactive_users(stop_event: asyncio.Event):
-    try:
-        while not stop_event.is_set():
-            try:
-                async with database.pool.acquire() as conn:
-                    inactive_users = await conn.fetch('''
-                        SELECT user_id 
-                        FROM users 
-                        WHERE last_seen < NOW() - INTERVAL '7 days' 
-                        AND is_active = TRUE
-                    ''')
-                    for record in inactive_users:
-                        user_id = record['user_id']
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
-                            )
-                            await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
-                            await asyncio.sleep(0.1)
-                        except (TelegramForbiddenError, TelegramNotFound):
-                            await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
-                        except Exception as e:
-                            logger.error(f"Xatolik yuborishda {user_id}: {e}")
-            except Exception:
-                logger.exception("notify_inactive_users DB error")
-            # wait for interval or until stop_event set
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=NOTIFY_INACTIVE_INTERVAL_SECONDS)
-            except asyncio.TimeoutError:
-                continue
-    except asyncio.CancelledError:
-        pass
+        update_chat_history(chat_id, text)
+        prompt_with_emoji = add_emoji_instruction_to_prompt(text)
+        reply = await get_mistral_reply(chat_id, prompt_with_emoji)
+        update_chat_history(chat_id, reply, role="assistant")
+
+        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.5)
+        await loading.delete()
+        await message.answer(reply, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Rasm tahlili xatosi: {str(e)}")
+        try:
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await asyncio.sleep(2)
+            await loading.delete()
+        except Exception as e:
+            logger.error(f"Xabarni o'chirishda xato: {str(e)}")
+        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
+
+async def notify_inactive_users():
+    while True:
+        await asyncio.sleep(3600 * 24 * 7)
+        async with database.pool.acquire() as conn:
+            inactive_users = await conn.fetch('''
+                SELECT user_id FROM users
+                WHERE last_seen < NOW() - INTERVAL '7 days'
+                AND is_active = TRUE
+            ''')
+            for record in inactive_users:
+                user_id = record['user_id']
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
+                    )
+                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
+                    await asyncio.sleep(0.1)
+                except (TelegramForbiddenError, TelegramNotFound):
+                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+                except Exception as e:
+                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
 async def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is not set in environment")
-
-    # create DB pool & tables
     await create_db_pool()
     await create_users_table()
-
-    # register admin handlers (no need to hold a DB connection here)
+    async with database.pool.acquire() as conn:
+        await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
     admin_module.register_admin_handlers(dp, bot, database)
 
-    # Predicates: only non-admins should hit the public handlers
     async def non_admin_text_predicate(message: Message):
         if not message.text:
             return False
         if message.text.startswith("/"):
             return False
         try:
-            return not await is_admin(message.from_user.id)
+            return not await database.is_admin(message.from_user.id)
         except Exception:
             logger.exception("DB error in non_admin_text_predicate")
             return False
 
     async def non_admin_photo_predicate(message: Message):
         try:
-            return not await is_admin(message.from_user.id)
+            return not await database.is_admin(message.from_user.id)
         except Exception:
             logger.exception("DB error in non_admin_photo_predicate")
             return False
@@ -390,66 +268,9 @@ async def main():
     dp.message.register(handle_text, non_admin_text_predicate)
     dp.message.register(handle_photo, non_admin_photo_predicate)
 
-    # Background notify task with controlled shutdown via Event
-    notify_stop_event = asyncio.Event()
-    notify_task = asyncio.create_task(notify_inactive_users(notify_stop_event))
-
-    # Pre-create OCR session (optional - extract_text_from_image also lazy-creates)
-    global ocr_session
-    if ocr_session is None:
-        ocr_session = aiohttp.ClientSession()
-
-    try:
-        # Ensure webhook cleared
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-        except Exception:
-            logger.exception("delete_webhook error")
-
-        # Start polling (blocking)
-        await dp.start_polling(bot)
-    finally:
-        # shutdown: cancel background tasks and close sessions & db
-        try:
-            notify_stop_event.set()
-            notify_task.cancel()
-            try:
-                await notify_task
-            except asyncio.CancelledError:
-                pass
-        except Exception:
-            logger.exception("Error stopping notify task")
-
-        # close OCR session
-        try:
-            if ocr_session:
-                await ocr_session.close()
-        except Exception:
-            logger.exception("Error closing OCR session")
-
-        # close aiogram session
-        try:
-            await session.close()
-        except Exception:
-            logger.exception("Error closing aiogram session")
-
-        # close database pool if function exists
-        try:
-            close_fn = getattr(database, "close_db_pool", None)
-            if callable(close_fn):
-                await close_fn()
-            else:
-                # best-effort: if pool exists, close it
-                if getattr(database, "pool", None) is not None:
-                    try:
-                        await database.pool.close()
-                    except Exception:
-                        pass
-        except Exception:
-            logger.exception("Error closing DB pool")
+    asyncio.create_task(notify_inactive_users())
+    await bot(DeleteWebhook(drop_pending_updates=True))
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        logger.exception("Fatal error in main")
+    asyncio.run(main())
