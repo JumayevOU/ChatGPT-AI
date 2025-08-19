@@ -35,6 +35,8 @@ async def create_users_table():
     """
     Create required tables if they do not exist.
     Uses TIMESTAMPTZ for timezone-aware timestamps.
+    Also creates a NEW table `superadmins` (BIGINT user_id) so code doesn't rely
+    on any pre-existing `super_admin` table.
     """
     global pool
     if pool is None:
@@ -50,6 +52,7 @@ async def create_users_table():
             );
         ''')
 
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY,
@@ -58,17 +61,6 @@ async def create_users_table():
             );
         ''')
 
-        try:
-            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS username VARCHAR(100);")
-            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();")
-        except Exception:
-            pass
-
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS super_admin (
-                user_id BIGINT PRIMARY KEY
-            );
-        ''')
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admin_audit (
@@ -91,6 +83,11 @@ async def create_users_table():
             );
         ''')
 
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS superadmins (
+                user_id BIGINT PRIMARY KEY
+            );
+        ''')
 
         try:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);")
@@ -103,10 +100,6 @@ async def create_users_table():
 
 
 async def save_user(user_id: int, username: Optional[str] = None) -> None:
-    """
-    Insert or update user record (sets last_seen and is_active=True).
-    Uses COALESCE to avoid overwriting existing username with NULL.
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -122,7 +115,6 @@ async def save_user(user_id: int, username: Optional[str] = None) -> None:
         ''', user_id, username)
 
 async def log_user_activity(user_id: int, username: Optional[str], activity_type: str) -> None:
-    """Log a row into user_activity."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -133,10 +125,6 @@ async def log_user_activity(user_id: int, username: Optional[str], activity_type
         ''', user_id, username, activity_type)
 
 async def get_all_users() -> List[Dict[str, Any]]:
-    """
-    Return list of active users as list of dicts:
-    [{'user_id': 12345}, ...]
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -145,7 +133,6 @@ async def get_all_users() -> List[Dict[str, Any]]:
         return [{'user_id': r['user_id']} for r in rows]
 
 async def get_user_by_username(username: str) -> Optional[int]:
-    """Return user_id for a given username (without @), or None."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -153,7 +140,6 @@ async def get_user_by_username(username: str) -> Optional[int]:
         return await conn.fetchval('SELECT user_id FROM users WHERE username = $1', username)
 
 async def deactivate_user(user_id: int) -> None:
-    """Mark user as inactive."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -161,7 +147,6 @@ async def deactivate_user(user_id: int) -> None:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
 async def get_users_count() -> int:
-    """Return count of active users."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -169,8 +154,8 @@ async def get_users_count() -> int:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
 
+
 async def is_admin(user_id: int) -> bool:
-    """Return True if user_id exists in admins table."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -179,11 +164,6 @@ async def is_admin(user_id: int) -> bool:
         return bool(val)
 
 async def get_admins() -> List[Dict[str, Any]]:
-    """
-    Return list of admins as dicts:
-    [{'user_id': int, 'username': str|None, 'created_at': datetime}, ...]
-    Note: superadmin is NOT stored in this table and thus won't appear here.
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -199,10 +179,6 @@ async def get_admins() -> List[Dict[str, Any]]:
         return result
 
 async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
-    """
-    Return a dict with admin metadata or None:
-    {'user_id': ..., 'username': ..., 'created_at': ...}
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -213,10 +189,6 @@ async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
         return {'user_id': row['user_id'], 'username': row.get('username'), 'created_at': row.get('created_at')}
 
 async def add_admin(user_id: int, username: Optional[str] = None) -> None:
-    """
-    Insert a new admin (idempotent). Sets created_at = NOW() on first insert.
-    If admin exists, update username if provided.
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -229,7 +201,6 @@ async def add_admin(user_id: int, username: Optional[str] = None) -> None:
         ''', user_id, username)
 
 async def remove_admin(user_id: int) -> None:
-    """Remove admin by user_id."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -238,7 +209,6 @@ async def remove_admin(user_id: int) -> None:
 
 
 async def log_admin_action(admin_id: int, action: str, target_user_id: Optional[int] = None, details: Optional[str] = None) -> None:
-    """Record admin action into admin_audit."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -249,19 +219,38 @@ async def log_admin_action(admin_id: int, action: str, target_user_id: Optional[
         ''', admin_id, action, target_user_id, details)
 
 
+
 async def is_superadmin(user_id: int) -> bool:
-    """Return True if user_id exists in super_admin table."""
+    """
+    Return True if user_id exists in the new superadmins table.
+    The user_id column is BIGINT, so large Telegram IDs work fine.
+    """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        val = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
+        val = await conn.fetchval('SELECT 1 FROM superadmins WHERE user_id = $1', user_id)
         return bool(val)
 
 async def get_superadmin_id() -> Optional[int]:
-    """Return the single superadmin user_id or None if not set."""
+    """Return one superadmin user_id or None if none set."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        return await conn.fetchval('SELECT user_id FROM super_admin LIMIT 1')
+        return await conn.fetchval('SELECT user_id FROM superadmins LIMIT 1')
+
+async def add_superadmin(user_id: int) -> None:
+    """Convenience function to add a superadmin (your code can call it or you can insert manually)."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('INSERT INTO superadmins (user_id) VALUES ($1) ON CONFLICT DO NOTHING', user_id)
+
+async def remove_superadmin(user_id: int) -> None:
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('DELETE FROM superadmins WHERE user_id = $1', user_id)

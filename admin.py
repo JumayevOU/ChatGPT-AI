@@ -194,7 +194,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         await state.clear()
 
- 
     async def handle_top(message: Message):
         if not await require_admin_or_deny(message):
             return
@@ -205,7 +204,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     SELECT user_id, username, COUNT(*) as activity_count
                     FROM user_activity
                     WHERE activity_time >= NOW() - INTERVAL '14 days'
-                    AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 5
@@ -215,7 +215,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     SELECT user_id, username, COUNT(*) as activity_count
                     FROM user_activity
                     WHERE activity_time >= NOW() - INTERVAL '30 days'
-                    AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 10
@@ -246,18 +247,25 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         )
         await message.answer(response, parse_mode="HTML")
 
-    async def handle_users_command(message: Message):
+        async def handle_users_command(message: Message):
         if not await require_admin_or_deny(message):
             return
 
         try:
             async with database_module.pool.acquire() as conn:
-                total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+                total_users = await conn.fetchval('''
+                    SELECT COUNT(*) FROM users
+                    WHERE is_active = TRUE
+                      AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
+                ''')
 
                 most_active_30days = await conn.fetchrow('''
                     SELECT user_id, username, COUNT(*) AS activity_count
                     FROM user_activity
                     WHERE activity_time >= NOW() - INTERVAL '30 days'
+                      AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 1
@@ -267,6 +275,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     SELECT user_id, username, COUNT(*) AS activity_count
                     FROM user_activity
                     WHERE activity_time >= CURRENT_DATE
+                      AND user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
                     GROUP BY user_id, username
                     ORDER BY activity_count DESC
                     LIMIT 1
@@ -275,6 +285,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 last_user = await conn.fetchrow('''
                     SELECT user_id, username, created_at
                     FROM users
+                    WHERE user_id NOT IN (SELECT user_id FROM admins)
+                      AND user_id NOT IN (SELECT user_id FROM superadmins)
                     ORDER BY created_at DESC
                     LIMIT 1
                 ''')
@@ -305,6 +317,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
         )
         await message.answer(text, parse_mode="HTML")
+
 
     async def handle_dump_users(message: Message):
         if not await require_admin_or_deny(message):
@@ -367,7 +380,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             return
 
         try:
-            admins = await database_module.get_admins()  
+            admins = await database_module.get_admins()
         except Exception:
             logger.exception("DB error in start_remove_admin")
             await message.answer("❌ DB xatosi.")
@@ -402,17 +415,21 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     async def remove_admin_callback(query: CallbackQuery):
         try:
             requester_id = query.from_user.id
+
+            try:
+                is_super = await database_module.is_superadmin(requester_id)
+            except Exception:
+                logger.exception("DB error checking is_superadmin")
+                is_super = False
+
+            requester_meta = None
             try:
                 requester_meta = await database_module.get_admin_meta(requester_id)
-                is_super = False
-                if not requester_meta:
-                    is_super = await database_module.is_superadmin(requester_id)
-                    if not is_super:
-                        await query.answer("❌ Bu amal faqat adminlar uchun.", show_alert=True)
-                        return
             except Exception:
-                logger.exception("DB error in remove_admin_callback auth")
-                await query.answer("❌ Server xatosi.", show_alert=True)
+                logger.exception("DB error fetching admin_meta")
+
+            if not is_super and not requester_meta:
+                await query.answer("❌ Bu amal faqat adminlar uchun.", show_alert=True)
                 return
 
             data = query.data or ""
@@ -428,11 +445,21 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             if target_id == requester_id:
                 await query.answer("❗ O'zingizni o'chira olmaysiz.", show_alert=True)
                 return
-            if await database_module.is_superadmin(target_id):
-                await query.answer("❗ Bu foydalanuvchi superadmin. Uni o'chirish faqat DB orqali amalga oshiriladi.", show_alert=True)
+
+            try:
+                if await database_module.is_superadmin(target_id):
+                    await query.answer("❗ Bu foydalanuvchi superadmin. Uni o'chirish faqat DB orqali amalga oshiriladi.", show_alert=True)
+                    return
+            except Exception:
+                logger.exception("DB error checking is_superadmin for target")
+                await query.answer("❗ Server xatosi. Amal bajarilmadi.", show_alert=True)
                 return
 
             if not is_super:
+                if not requester_meta:
+                    await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
+                    return
+
                 created_at = requester_meta.get('created_at')
                 if created_at is None:
                     await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
@@ -452,6 +479,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                         show_alert=True
                     )
                     return
+
             target_meta = await database_module.get_admin_meta(target_id)
             if not target_meta:
                 await query.answer("ℹ️ Bu foydalanuvchi admin emas yoki allaqachon o'chirilgan.", show_alert=True)
@@ -493,14 +521,17 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         requester = message.from_user.id
 
         try:
-            requester_meta = await database_module.get_admin_meta(requester)
-            is_super = False
-            if not requester_meta:
-                is_super = await database_module.is_superadmin(requester)
-                if not is_super:
-                    await message.answer("❌ Bu amal faqat adminlar uchun.")
-                    await state.clear()
-                    return
+            is_super = await database_module.is_superadmin(requester)
+            requester_meta = None
+            try:
+                requester_meta = await database_module.get_admin_meta(requester)
+            except Exception:
+                logger.exception("DB error fetching admin_meta")
+
+            if not is_super and not requester_meta:
+                await message.answer("❌ Bu amal faqat adminlar uchun.")
+                await state.clear()
+                return
 
             if target_id == requester:
                 await message.answer("❗ O'zingizni o'chira olmaysiz. Boshqa admin ID kiriting yoki superadmin bilan bog'laning.")
