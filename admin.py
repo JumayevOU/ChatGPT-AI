@@ -22,6 +22,7 @@ from keyboards import admin_keyboard
 
 logger = logging.getLogger(__name__)
 
+# States
 class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
@@ -36,6 +37,7 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
+# How many days a newly-added admin must wait before they can remove other admins
 REMOVE_BLOCK_DAYS = 3
 
 
@@ -69,6 +71,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
 
+    # --- Broadcast ---
     async def start_broadcast(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -119,6 +122,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         )
         await state.clear()
 
+    # --- PM to single user ---
     async def cmd_pm(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -184,6 +188,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         await state.clear()
 
+    # --- TOP / Users stats ---
     async def handle_top(message: Message):
         if not await require_admin_or_deny(message):
             return
@@ -311,7 +316,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             logger.exception("handle_dump_users error")
             await message.answer(f"❌ Xatolik yuz berdi: server yoki fayl tizimi")
 
-
+    # --- ADD admin ---
     async def start_add_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -330,6 +335,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await state.clear()
             return
 
+        # Try to get username from users table; may be None
         username = None
         try:
             async with database_module.pool.acquire() as conn:
@@ -351,12 +357,14 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
+    # --- REMOVE admin: show inline list and remove on click ---
     async def start_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
 
+        # Fetch admins with usernames
         try:
-            admins = await database_module.get_admins()  
+            admins = await database_module.get_admins()  # list of dicts with user_id, username, created_at
         except Exception:
             logger.exception("DB error in start_remove_admin")
             await message.answer("❌ DB xatosi.")
@@ -366,6 +374,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("ℹ️ Hech qanday admin mavjud emas.")
             return
 
+        # Build inline keyboard rows (each row is a list with one InlineKeyboardButton)
         rows = []
         for a in admins:
             uid = a.get('user_id')
@@ -380,8 +389,10 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         await message.answer("➖ Qaysi adminni o'chirmoqchisiz? Quyidagilardan birini bosing:", reply_markup=kb)
 
     async def remove_admin_callback(query: CallbackQuery):
+        # callback data format: remove_admin:{user_id}
         try:
             requester_id = query.from_user.id
+            # Ensure requester is admin and fetch meta
             try:
                 requester_meta = await database_module.get_admin_meta(requester_id)
             except Exception:
@@ -404,15 +415,18 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await query.answer("❌ Noto'g'ri ID.", show_alert=True)
                 return
 
+            # cannot remove self
             if target_id == requester_id:
                 await query.answer("❗ O'zingizni o'chira olmaysiz.", show_alert=True)
                 return
 
+            # check if requester is allowed to remove others (age restriction)
             created_at = requester_meta.get('created_at')
             if created_at is None:
                 await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
                 return
 
+            # normalize datetimes: compare in UTC naive
             if isinstance(created_at, datetime) and created_at.tzinfo is not None:
                 created_utc = created_at.astimezone(timezone.utc).replace(tzinfo=None)
             else:
@@ -428,6 +442,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 )
                 return
 
+            # target must exist and not be last admin
             target_meta = await database_module.get_admin_meta(target_id)
             if not target_meta:
                 await query.answer("ℹ️ Bu foydalanuvchi admin emas yoki allaqachon o'chirilgan.", show_alert=True)
@@ -451,6 +466,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             except Exception:
                 pass
 
+    # Fallback: allow typing id to remove (state-based)
     async def process_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             await state.clear()
@@ -478,6 +494,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await state.clear()
                 return
 
+            # age restriction
             created_at = requester_meta.get('created_at')
             if created_at is None:
                 await message.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.")
@@ -515,37 +532,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Xatolik yuz berdi: DB yoki server xatosi")
         finally:
             await state.clear()
-            
-async def show_admins_list(message: Message):
-    if not await require_admin_or_deny(message):
-        return
 
-    try:
-        admins = await database_module.get_admins(include_super=False)
-    except Exception:
-        logger.exception("DB error in show_admins_list")
-        await message.answer("❌ DB xatosi.")
-        return
-
-    if not admins:
-        await message.answer("ℹ️ Hech qanday admin mavjud emas (superadmindan tashqari).")
-        return
-
-    rows = []
-    for a in admins:
-        uid = a.get('user_id')
-        uname = a.get('username')
-        label = f"{uid}"
-        if uname:
-            label += f" — @{uname}"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"view_admin:{uid}")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await message.answer("👥 Adminlar ro'yxati (ustiga bosing — profilni ko'rsatadi):", reply_markup=kb)
-
-            
-            
-            
+    # --- Register handlers (reply-keyboard buttons) ---
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
@@ -553,13 +541,13 @@ async def show_admins_list(message: Message):
     dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
     dp.message.register(start_remove_admin, F.text == "➖ Admin o'chirish")
-    dp.message.register(show_admins_list, F.text == "👥 Adminlar ro'yxati")
+
+    # State handlers
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
+
+    # CallbackQuery handler for inline removal buttons
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-
-
-
