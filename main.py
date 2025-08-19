@@ -63,40 +63,49 @@ def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
 
 def _format_progress_bar(percent: int, length: int = 10) -> str:
-    filled = max(0, min(length, percent * length // 100))
+    """Return progress bar for 0..100 percent in `length` blocks."""
+    p = max(0, min(100, int(percent)))
+    filled = (p * length) // 100
     return "▰" * filled + "▱" * (length - filled)
 
-
-async def _progress_updater(msg: Message, stop_event: asyncio.Event, base_text: str, update_interval: float = 0.5):
-    """Update the loading message percent smoothly until stop_event is set.
-
-    The updater will slowly advance percent toward 95% (so it never reaches 100% by itself)
-    and will only call edit_text when percent changes to reduce API calls.
+async def _progress_updater(msg: Message, stop_event: asyncio.Event, base_text: str, update_interval: float = 0.6):
+    """
+    Smooth progress updater:
+    - Immediately shows 10%
+    - Then steps by about 10% (randomized a bit) up to 95%
+    - Stops when stop_event is set (caller will set 100% and delete the message)
     """
     try:
-        percent = 0
+        percent = 10  # start from 10% so user doesn't see stuck 0%
         last_sent = -1
-        # Use a lightweight RNG to vary increments a little
         while not stop_event.is_set():
-            # Easing towards 95
-            if percent < 95:
-                # small random increment, faster at the beginning, slower near cap
-                step = random.randint(3, 8)
-                percent = min(95, percent + step)
-            # Only edit if percent changed (prevents unnecessary API calls)
-            if percent != last_sent:
-                last_sent = percent
-                text = f"{base_text} {_format_progress_bar(percent)} {percent}%"
+            # Cap at 95 so it does not reach 100 by itself
+            display = min(95, percent)
+            # Round display to nearest lower multiple of 10 for consistent blocks (10,20,...,90)
+            rounded = (display // 10) * 10
+            if rounded == 0:
+                rounded = 10
+
+            if rounded != last_sent:
+                last_sent = rounded
+                text = f"{base_text} {_format_progress_bar(rounded)} {rounded}%"
                 try:
                     await msg.edit_text(text, parse_mode="HTML")
-                except Exception:
+                except Exception as e:
                     # Ignore edit errors (message deleted, flood control, etc.)
-                    pass
+                    logger.debug(f"Progress edit_text failed: {e}")
+
+            # increase percent by a randomized jump, smaller near the cap
+            if percent < 60:
+                step = random.randint(8, 14)
+            elif percent < 85:
+                step = random.randint(4, 9)
+            else:
+                step = random.randint(1, 4)
+            percent = min(95, percent + step)
             await asyncio.sleep(update_interval)
     except asyncio.CancelledError:
-        # When cancelled we'll just exit; caller is responsible for finalizing the UI
         return
-
 
 async def _run_with_progress(
     reply_coro: asyncio.Future,
@@ -104,7 +113,8 @@ async def _run_with_progress(
     base_text: str,
     timeout: Optional[float] = None,
 ) -> Any:
-    """Run reply_coro while displaying/updating a progress message.
+    """
+    Run reply_coro while displaying/updating a progress message.
 
     - reply_coro: coroutine or Task that produces the reply text.
     - loading_message: the message object returned by bot.send_message / message.answer
@@ -114,11 +124,9 @@ async def _run_with_progress(
     Returns reply result or raises the exception from reply_coro (including asyncio.TimeoutError).
     """
     stop_event = asyncio.Event()
-
     progress_task = asyncio.create_task(_progress_updater(loading_message, stop_event, base_text))
 
     try:
-        # Wait for the reply task, with provided timeout.
         result = await asyncio.wait_for(reply_coro, timeout=timeout)
         # Signal progress to finish
         stop_event.set()
@@ -127,7 +135,6 @@ async def _run_with_progress(
             await loading_message.edit_text(f"{base_text} {_format_progress_bar(100)} 100%", parse_mode="HTML")
         except Exception:
             pass
-        # small pause to let user see 100%
         await asyncio.sleep(0.25)
         try:
             await loading_message.delete()
@@ -137,19 +144,16 @@ async def _run_with_progress(
     except Exception:
         # ensure progress stops and caller handles the exception
         stop_event.set()
-        # attempt to set an error state on the loading message
         try:
             await loading_message.edit_text("❌ " + f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
         except Exception:
             pass
-        # ensure we cancel the progress task
         if not progress_task.done():
             progress_task.cancel()
         raise
     finally:
         if not progress_task.done():
             progress_task.cancel()
-
 
 # ---------------------------
 # Handlers (no decorators)
@@ -191,7 +195,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -219,7 +222,8 @@ async def handle_text(message: Message, state: FSMContext):
         return
 
     base_text = "🧠 <b>Savolingiz tahlil qilinmoqda</b>"
-    loading = await message.answer(f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
+    # start UI already at 10% so user won't see 0%
+    loading = await message.answer(f"{base_text} {_format_progress_bar(10)} 10%", parse_mode="HTML")
 
     # record user message to history before sending to model (optional)
     update_chat_history(chat_id, message.text)
@@ -238,7 +242,6 @@ async def handle_text(message: Message, state: FSMContext):
         await message.answer(cleaned)
     except asyncio.TimeoutError:
         logger.error("Mistral so'rovi timeout")
-        # reply_task may still be running; cancel to free resources
         if not reply_task.done():
             reply_task.cancel()
         try:
@@ -260,7 +263,6 @@ async def handle_text(message: Message, state: FSMContext):
             pass
         await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
 
-
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -279,7 +281,7 @@ async def handle_photo(message: Message, state: FSMContext):
         return
 
     base_text = "🖼️ <b>Rasm tahlil qilinmoqda...</b>"
-    loading = await message.answer(f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
+    loading = await message.answer(f"{base_text} {_format_progress_bar(10)} 10%", parse_mode="HTML")
 
     # Download highest-res photo
     try:
@@ -351,7 +353,6 @@ async def handle_photo(message: Message, state: FSMContext):
             pass
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
-
 async def notify_inactive_users(stop_event: asyncio.Event):
     try:
         while not stop_event.is_set():
@@ -384,7 +385,6 @@ async def notify_inactive_users(stop_event: asyncio.Event):
                 continue
     except asyncio.CancelledError:
         pass
-
 
 async def main():
     if not BOT_TOKEN:
@@ -460,7 +460,6 @@ async def main():
                         pass
         except Exception:
             logger.exception("Error closing DB pool")
-
 
 if __name__ == "__main__":
     try:
