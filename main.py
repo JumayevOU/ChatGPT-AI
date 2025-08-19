@@ -448,7 +448,7 @@ async def _startup_tasks() -> None:
     else:
         try:
             async with database.pool.acquire() as conn:
-                await conn.execute(\"\"\"UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;\"\"\")
+                await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
         except Exception:
             logger.exception("Failed to patch admins table on startup")
     # register admin handlers (pass dp and bot; adjust signature if needed)
