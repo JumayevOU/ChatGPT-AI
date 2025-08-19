@@ -9,7 +9,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 pool: Optional[asyncpg.pool.Pool] = None
 
 async def create_db_pool():
-    """Create and return a global asyncpg pool (if not created yet)."""
     global pool
     if pool is None:
         if not DATABASE_URL:
@@ -20,7 +19,7 @@ async def create_db_pool():
 async def create_users_table():
     """
     Create required tables if they do not exist.
-    admins table will contain: user_id (PK), username, created_at
+    admins table will contain: user_id (PK), username, created_at, is_super
     """
     global pool
     if pool is None:
@@ -41,7 +40,8 @@ async def create_users_table():
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY,
                 username VARCHAR(100),
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW(),
+                is_super BOOLEAN DEFAULT FALSE
             );
         ''')
 
@@ -49,9 +49,9 @@ async def create_users_table():
         try:
             await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS username VARCHAR(100);")
             await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();")
+            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS is_super BOOLEAN DEFAULT FALSE;")
         except Exception:
             pass
-
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
@@ -65,7 +65,6 @@ async def create_users_table():
 
 
 async def save_user(user_id: int, username: str | None = None) -> None:
-    """Insert or update user record (sets last_seen and is_active=True)."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -81,7 +80,6 @@ async def save_user(user_id: int, username: str | None = None) -> None:
         ''', user_id, username)
 
 async def log_user_activity(user_id: int, username: str | None, activity_type: str) -> None:
-    """Log a row into user_activity."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -92,7 +90,6 @@ async def log_user_activity(user_id: int, username: str | None, activity_type: s
         ''', user_id, username, activity_type)
 
 async def get_all_users():
-    """Return list of active users (records with field user_id)."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -100,7 +97,6 @@ async def get_all_users():
         return await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
 
 async def deactivate_user(user_id: int) -> None:
-    """Mark user as inactive."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -108,7 +104,6 @@ async def deactivate_user(user_id: int) -> None:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
 
 async def get_users_count() -> int:
-    """Return count of active users."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -117,7 +112,6 @@ async def get_users_count() -> int:
 
 
 async def is_admin(user_id: int) -> bool:
-    """Return True if user_id exists in admins table."""
     global pool
     if pool is None:
         await create_db_pool()
@@ -125,57 +119,92 @@ async def is_admin(user_id: int) -> bool:
         val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
         return bool(val)
 
-async def get_admins() -> List[Dict]:
+async def is_superadmin(user_id: int) -> bool:
+    """Return True if user_id is marked as superadmin."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval('SELECT is_super FROM admins WHERE user_id = $1', user_id)
+        return bool(val)
+
+async def get_admins(include_super: bool = False) -> List[Dict]:
     """
     Return list of admins as dicts:
-    [{'user_id': int, 'username': str|None, 'created_at': datetime}, ...]
+    [{'user_id': int, 'username': str|None, 'created_at': datetime, 'is_super': bool}, ...]
+    By default excludes superadmin (include_super=False).
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT user_id, username, created_at FROM admins ORDER BY user_id')
+        if include_super:
+            rows = await conn.fetch('SELECT user_id, username, created_at, is_super FROM admins ORDER BY user_id')
+        else:
+            rows = await conn.fetch('SELECT user_id, username, created_at, is_super FROM admins WHERE NOT is_super ORDER BY user_id')
         result = []
         for r in rows:
             result.append({
                 'user_id': r['user_id'],
                 'username': r.get('username'),
-                'created_at': r.get('created_at')
+                'created_at': r.get('created_at'),
+                'is_super': bool(r.get('is_super'))
             })
         return result
 
 async def get_admin_meta(user_id: int) -> Optional[Dict]:
     """
     Return a dict with admin metadata or None:
-    {'user_id': ..., 'username': ..., 'created_at': ...}
+    {'user_id': ..., 'username': ..., 'created_at': ..., 'is_super': bool}
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow('SELECT user_id, username, created_at FROM admins WHERE user_id = $1', user_id)
+        row = await conn.fetchrow('SELECT user_id, username, created_at, is_super FROM admins WHERE user_id = $1', user_id)
         if not row:
             return None
-        return {'user_id': row['user_id'], 'username': row.get('username'), 'created_at': row.get('created_at')}
+        return {
+            'user_id': row['user_id'],
+            'username': row.get('username'),
+            'created_at': row.get('created_at'),
+            'is_super': bool(row.get('is_super'))
+        }
 
 async def add_admin(user_id: int, username: str | None = None) -> None:
     """
-    Insert a new admin (idempotent). Sets created_at = NOW() on first insert.
-    If admin exists, update username if provided.
+    Insert or update admin. By default is_super remains False (unless already set).
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO admins (user_id, username, created_at)
-            VALUES ($1, $2, NOW())
+            INSERT INTO admins (user_id, username, created_at, is_super)
+            VALUES ($1, $2, NOW(), FALSE)
             ON CONFLICT (user_id)
             DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
         ''', user_id, username)
 
+async def add_superadmin(user_id: int, username: str | None = None) -> None:
+    """
+    Make given user the sole superadmin.
+    Sets is_super = TRUE for this user and FALSE for all others.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO admins (user_id, username, created_at, is_super)
+            VALUES ($1, $2, NOW(), TRUE)
+            ON CONFLICT (user_id)
+            DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username), is_super = TRUE
+        ''', user_id, username)
+        await conn.execute('UPDATE admins SET is_super = FALSE WHERE user_id <> $1', user_id)
+
 async def remove_admin(user_id: int) -> None:
-    """Remove admin by user_id."""
+    """Remove admin by user_id. Note: calling code should ensure not removing superadmin."""
     global pool
     if pool is None:
         await create_db_pool()
