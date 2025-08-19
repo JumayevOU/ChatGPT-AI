@@ -1,20 +1,7 @@
-"""
-Optimized main.py
-- Consolidates streaming logic into `stream_and_finalize` to avoid duplication
-- Uses a shared aiohttp session with retry/backoff for OCR
-- Safer edit/send cadence to avoid flood limits
-- Graceful startup/shutdown and signal handling
-- Clear typing hints and structured logging
-- Improved, professional & creative assistant reply formatting
-
-Make sure to adapt imports for your environment (aiogram v3+ assumed) and to provide
-`services.mistral_service.get_mistral_reply` and optionally
-`services.mistral_service.get_mistral_reply_stream`.
-"""
-
 import asyncio
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -34,20 +21,13 @@ from dotenv import load_dotenv
 # Local services/helpers (adapt as needed)
 from services.mistral_service import get_mistral_reply
 try:
-    # optional streaming provider
     from services.mistral_service import get_mistral_reply_stream as external_mistral_stream
-except Exception:  # pragma: no cover - optional
+except Exception:  # optional
     external_mistral_stream = None
 
 from utils.history import update_chat_history
-from database import (
-    create_db_pool,
-    create_users_table,
-    save_user,
-    log_user_activity,
-    is_admin,
-    pool as db_pool,
-)
+import database  # use database.pool AFTER create_db_pool()
+from database import create_db_pool, create_users_table, save_user, log_user_activity, is_admin
 import admin as admin_module
 from keyboards import admin_keyboard
 
@@ -72,28 +52,26 @@ EDIT_MIN_INTERVAL = 0.8  # seconds between edits
 EDIT_MIN_CHARS = 120
 LOADING_CURSOR = " ▮"
 
+# Mistral (rate limit) settings
+MISTRAL_MAX_RETRIES = 3
+MISTRAL_BACKOFF_BASE = 1.0
+MISTRAL_MAX_CONCURRENT = 4  # tune to your model capacity
+
 error_messages = [
     "⚙️ Uzr — tizimda kichik nosozlik yuz berdi. Qayta urinib ko'ring yoki /start bilan qayta boshlang.",
     "🔧 Hozir biroz texnik ishlar bor. Savolingizni saqlab qo'ying — tez orada yordam beraman.",
     "🧠 Men hozir biroz bandman — lekin yaqin orada aniq va ijodiy javob beraman.",
 ]
 
-ADMIN_BUTTON_TEXTS = [
-    '📢 Barchaga xabar yuborish',
-    '📨 Userga xabar yuborish',
-    '🏆 Faol foydalanuvchilar',
-    '📊 Statistika',
-    "📄 Userlar ro'yxati",
-    "➕ Admin qo'shish",
-]
-
 # ---------- Globals ----------
 shared_http_session: Optional[aiohttp.ClientSession] = None
+mistral_semaphore: Optional[asyncio.Semaphore] = None
 
 # aiogram setup
 session = AiohttpSession()
 bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
 
 # ---------- Utilities ----------
 async def create_shared_session() -> None:
@@ -114,15 +92,28 @@ async def close_shared_session() -> None:
         shared_http_session = None
 
 
-async def backoff_sleep(attempt: int) -> None:
-    await asyncio.sleep(OCR_BACKOFF_BASE * (2 ** attempt))
+async def backoff_sleep(attempt: int, base: float = OCR_BACKOFF_BASE) -> None:
+    await asyncio.sleep(base * (2 ** attempt))
 
 
-# ---------- Streaming adapter ----------
+# ---------- Streaming adapter with rate-limit handling ----------
+try:
+    from mistralai.models.sdkerror import SDKError as MistralSDKError  # if available
+except Exception:  # fallback generic exception class
+    class MistralSDKError(Exception):
+        pass
+
+
 async def get_mistral_reply_stream(chat_id: int, prompt: str) -> AsyncGenerator[str, None]:
-    """Unified streaming adapter. Prefer external streaming if available, otherwise chunk final reply."""
+    """
+    Unified streaming adapter. Prefer external streaming if available, otherwise chunk final reply.
+    Adds semaphore and retries for throttling (429) resiliency.
+    """
+    global mistral_semaphore
+    if mistral_semaphore is None:
+        mistral_semaphore = asyncio.Semaphore(MISTRAL_MAX_CONCURRENT)
+
     if external_mistral_stream:
-        # assume external_mistral_stream is an async generator
         try:
             async for chunk in external_mistral_stream(chat_id, prompt):
                 yield chunk
@@ -132,11 +123,40 @@ async def get_mistral_reply_stream(chat_id: int, prompt: str) -> AsyncGenerator[
         except Exception:
             logger.exception("external_mistral_stream failed, falling back to non-streaming")
 
-    # fallback: get full reply and yield sized chunks
-    full = await asyncio.wait_for(get_mistral_reply(chat_id, prompt), timeout=60)
-    for i in range(0, len(full), STREAM_CHUNK_SIZE):
-        yield full[i : i + STREAM_CHUNK_SIZE]
-        await asyncio.sleep(0)  # cooperative
+    attempt = 0
+    while attempt < MISTRAL_MAX_RETRIES:
+        attempt += 1
+        try:
+            async with mistral_semaphore:
+                full = await asyncio.wait_for(get_mistral_reply(chat_id, prompt), timeout=60)
+            # success: chunk it
+            for i in range(0, len(full), STREAM_CHUNK_SIZE):
+                yield full[i : i + STREAM_CHUNK_SIZE]
+                await asyncio.sleep(0)  # cooperative scheduling
+            return
+        except MistralSDKError as e:
+            msg = str(e).lower()
+            logger.warning("Mistral SDKError (attempt %s): %s", attempt, e)
+            # detect 429-like messages
+            if "429" in msg or "too many requests" in msg or getattr(e, "status_code", None) == 429:
+                if attempt >= MISTRAL_MAX_RETRIES:
+                    raise
+                backoff = MISTRAL_BACKOFF_BASE * (2 ** (attempt - 1)) + random.random()
+                await asyncio.sleep(backoff)
+                continue
+            else:
+                raise
+        except asyncio.TimeoutError:
+            logger.warning("Mistral request timed out on attempt %s", attempt)
+            if attempt >= MISTRAL_MAX_RETRIES:
+                raise
+            await asyncio.sleep(MISTRAL_BACKOFF_BASE * attempt)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected error when calling get_mistral_reply")
+            # raise to be handled by caller
+            raise
 
 
 # ---------- Shared streaming-and-finalize helper ----------
@@ -152,7 +172,8 @@ async def stream_and_finalize(
     loading_message: Message,
     final_parse_mode: Optional[ParseMode] = None,
 ) -> str:
-    """Streams from `get_mistral_reply_stream`, edits a loading message intermittently,
+    """
+    Streams from `get_mistral_reply_stream`, edits a loading message intermittently,
     returns final assistant text (also responsible for history update).
     """
     state = StreamState()
@@ -205,14 +226,28 @@ async def stream_and_finalize(
         except Exception:
             pass
         raise
-    except Exception:
-        logger.exception("Error while streaming reply")
-        try:
-            await loading_message.edit_text("❌ Javob olishda xatolik yuz berdi.")
-        except Exception:
-            pass
-        # send a friendly randomized error message
-        await bot.send_message(chat_id, error_messages[int(time.time()) % len(error_messages)])
+    except Exception as e:
+        # handle 429-like responses gracefully
+        text = str(e).lower()
+        if "429" in text or "too many requests" in text:
+            try:
+                await loading_message.edit_text("❌ Xizmat vaqtincha band. Iltimos bir necha soniyadan keyin qayta urinib ko'ring.")
+            except Exception:
+                pass
+            try:
+                await bot.send_message(chat_id, "🔁 Xizmat band — hozir boshqa so'rovlar ko'p. Iltimos 10-30 soniya ichida qayta urinib ko'ring.")
+            except Exception:
+                pass
+        else:
+            logger.exception("Error while streaming reply: %s", e)
+            try:
+                await loading_message.edit_text("❌ Javob olishda xato yuz berdi.")
+            except Exception:
+                pass
+            try:
+                await bot.send_message(chat_id, random.choice(error_messages))
+            except Exception:
+                pass
         return ""
 
 
@@ -227,13 +262,12 @@ async def handle_start(message: Message):
     except Exception:
         logger.exception("Failed to schedule DB tasks for /start")
 
-    # admin check
+    # admin check (safe)
     try:
-        if await is_admin(user.id) or await db_pool.execute("SELECT 1") is not None:
+        if await is_admin(user.id):
             await message.answer("👋 <b>Admin panelga xush kelibsiz!</b>", reply_markup=admin_keyboard)
             return
     except Exception:
-        # swallow admin check errors — fall back to normal greeting
         logger.exception("Admin check failed on /start")
 
     await message.answer(
@@ -278,7 +312,7 @@ async def handle_text(message: Message, state):
     prompt = (
         "Siz bilan professional & ijodiy tarzda muloqot qiladigan yordamchi sifatida javob bering. "
         "Javobni iloji boricha aniq, ramziy va to`liq tushunarli qiling.\n\n"
-        f"Foydalanuvchi: {message.text}\n\n"  # keep original content
+        f"Foydalanuvchi: {message.text}\n\n"
     )
 
     await stream_and_finalize(chat_id, prompt, loading, final_parse_mode=ParseMode.MARKDOWN)
@@ -382,7 +416,10 @@ async def notify_inactive_users() -> None:
     while True:
         try:
             await asyncio.sleep(3600 * 24 * 7)
-            async with db_pool.acquire() as conn:
+            if not getattr(database, "pool", None):
+                logger.warning("Database pool not available for notify_inactive_users")
+                continue
+            async with database.pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT user_id FROM users WHERE last_seen < NOW() - INTERVAL '7 days' AND is_active = TRUE"
                 )
@@ -400,21 +437,25 @@ async def notify_inactive_users() -> None:
             logger.exception("notify_inactive_users error")
 
 
-# ---------- Predicates registration ----------
-# Using register with lambdas above; keep explicit registration to ensure ordering
-
 # ---------- Startup / Shutdown ----------
 async def _startup_tasks() -> None:
     await create_db_pool()
     await create_users_table()
     await create_shared_session()
-    # patch admin rows if necessary
+    # now database.pool should be initialized by create_db_pool()
+    if not getattr(database, "pool", None):
+        logger.error("database.pool not initialized after create_db_pool()")
+    else:
+        try:
+            async with database.pool.acquire() as conn:
+                await conn.execute(\"\"\"UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;\"\"\")
+        except Exception:
+            logger.exception("Failed to patch admins table on startup")
+    # register admin handlers (pass dp and bot; adjust signature if needed)
     try:
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
+        admin_module.register_admin_handlers(dp, bot, database)
     except Exception:
-        logger.exception("Failed to patch admins table on startup")
-    admin_module.register_admin_handlers(dp, bot, globals())
+        logger.exception("Failed to register admin handlers")
 
 
 async def _shutdown_tasks() -> None:
@@ -424,7 +465,8 @@ async def _shutdown_tasks() -> None:
     except Exception:
         pass
     try:
-        await db_pool.close()  # depends on your pool implementation
+        if getattr(database, "pool", None):
+            await database.pool.close()
     except Exception:
         pass
 
@@ -442,16 +484,17 @@ async def main():
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _handle_signal, sig)
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig)
+        except Exception:
+            # add_signal_handler may not be available on some platforms (Windows/UVLoop setup)
+            pass
 
     # start polling
     await bot(DeleteWebhook(drop_pending_updates=True))
     polling = asyncio.create_task(dp.start_polling(bot))
-
-    # wait for stop_event
     await stop_event.wait()
 
-    # cancel tasks and shutdown
     polling.cancel()
     notifier.cancel()
     await _shutdown_tasks()
