@@ -255,8 +255,9 @@ async def notify_inactive_users():
 async def main():
     await create_db_pool()
     await create_users_table()
-
-    admin_module.register_admin_handlers(dp, bot, database)
+    async with database.pool.acquire() as conn:
+        await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
+        admin_module.register_admin_handlers(dp, bot, database)
 
     async def non_admin_text_predicate(message: Message):
         if not message.text:

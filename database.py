@@ -20,12 +20,13 @@ async def create_db_pool():
 async def create_users_table():
     """
     Create required tables if they do not exist.
-    Note: super admin ids are kept in a separate table `super_admin`.
+    admins table will contain: user_id (PK), username, created_at
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
+        # users table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -36,6 +37,7 @@ async def create_users_table():
             );
         ''')
 
+        # admins table (with username and created_at)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY,
@@ -44,13 +46,16 @@ async def create_users_table():
             );
         ''')
 
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS super_admin (
-                user_id BIGINT PRIMARY KEY,
-                set_at TIMESTAMP DEFAULT NOW()
-            );
-        ''')
+        # Ensure column exists if table pre-existed without username/created_at
+        # Some Postgres versions may not support IF NOT EXISTS for ALTER; wrap in try/except.
+        try:
+            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS username VARCHAR(100);")
+            await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();")
+        except Exception:
+            # ignore if not supported; table was created above or already consistent
+            pass
 
+        # user_activity
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -61,6 +66,7 @@ async def create_users_table():
             );
         ''')
 
+# --- user functions ---
 
 async def save_user(user_id: int, username: str | None = None) -> None:
     """Insert or update user record (sets last_seen and is_active=True)."""
@@ -113,6 +119,7 @@ async def get_users_count() -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
+# --- admin functions ---
 
 async def is_admin(user_id: int) -> bool:
     """Return True if user_id exists in admins table."""
@@ -123,59 +130,29 @@ async def is_admin(user_id: int) -> bool:
         val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
         return bool(val)
 
-async def is_superadmin(user_id: int) -> bool:
-    """Return True if user_id exists in super_admin table."""
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        val = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
-        return bool(val)
-
-async def get_superadmins() -> List[int]:
-    """Return list of superadmin user_ids (usually one)."""
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT user_id FROM super_admin')
-        return [r['user_id'] for r in rows]
-
-async def get_admins(include_super: bool = False) -> List[Dict]:
+async def get_admins() -> List[Dict]:
     """
     Return list of admins as dicts:
-    [{'user_id': int, 'username': str|None, 'created_at': datetime, 'is_super': bool}, ...]
-    By default excludes superadmin(s) (include_super=False).
+    [{'user_id': int, 'username': str|None, 'created_at': datetime}, ...]
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        if include_super:
-            rows = await conn.fetch('SELECT user_id, username, created_at FROM admins ORDER BY user_id')
-        else:
-            rows = await conn.fetch('''
-                SELECT a.user_id, a.username, a.created_at
-                FROM admins a
-                WHERE a.user_id NOT IN (SELECT user_id FROM super_admin)
-                ORDER BY a.user_id
-            ''')
+        rows = await conn.fetch('SELECT user_id, username, created_at FROM admins ORDER BY user_id')
         result = []
-        srows = await conn.fetch('SELECT user_id FROM super_admin')
-        super_ids = set(r['user_id'] for r in srows)
         for r in rows:
             result.append({
                 'user_id': r['user_id'],
                 'username': r.get('username'),
-                'created_at': r.get('created_at'),
-                'is_super': (r['user_id'] in super_ids)
+                'created_at': r.get('created_at')
             })
         return result
 
 async def get_admin_meta(user_id: int) -> Optional[Dict]:
     """
     Return a dict with admin metadata or None:
-    {'user_id': ..., 'username': ..., 'created_at': ..., 'is_super': bool}
+    {'user_id': ..., 'username': ..., 'created_at': ...}
     """
     global pool
     if pool is None:
@@ -183,26 +160,19 @@ async def get_admin_meta(user_id: int) -> Optional[Dict]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow('SELECT user_id, username, created_at FROM admins WHERE user_id = $1', user_id)
         if not row:
-            s = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
-            if s:
-                return {'user_id': user_id, 'username': None, 'created_at': None, 'is_super': True}
             return None
-        is_super_flag = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
-        return {
-            'user_id': row['user_id'],
-            'username': row.get('username'),
-            'created_at': row.get('created_at'),
-            'is_super': bool(is_super_flag)
-        }
+        return {'user_id': row['user_id'], 'username': row.get('username'), 'created_at': row.get('created_at')}
 
 async def add_admin(user_id: int, username: str | None = None) -> None:
     """
-    Insert or update admin (non-super).
+    Insert a new admin (idempotent). Sets created_at = NOW() on first insert.
+    If admin exists, update username if provided.
     """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
+        # Insert new admin with created_at NOW(); on conflict keep existing created_at but update username if provided.
         await conn.execute('''
             INSERT INTO admins (user_id, username, created_at)
             VALUES ($1, $2, NOW())
@@ -210,38 +180,8 @@ async def add_admin(user_id: int, username: str | None = None) -> None:
             DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
         ''', user_id, username)
 
-async def add_superadmin(user_id: int) -> None:
-    """
-    Make given user the sole superadmin (insert into super_admin).
-    Also ensure they exist in admins table (insert if not).
-    """
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO admins (user_id, created_at)
-            VALUES ($1, NOW())
-            ON CONFLICT (user_id) DO NOTHING
-        ''', user_id)
-        await conn.execute('''
-            INSERT INTO super_admin (user_id, set_at)
-            VALUES ($1, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET set_at = NOW()
-        ''', user_id)
-        # keep only this user as the superadmin (if you want multiple superadmins, remove this line)
-        await conn.execute('DELETE FROM super_admin WHERE user_id <> $1', user_id)
-
-async def remove_superadmin(user_id: int) -> None:
-    """Remove superadmin flag (delete from super_admin)."""
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute('DELETE FROM super_admin WHERE user_id = $1', user_id)
-
 async def remove_admin(user_id: int) -> None:
-    """Remove admin by user_id (doesn't touch super_admin)."""
+    """Remove admin by user_id."""
     global pool
     if pool is None:
         await create_db_pool()
