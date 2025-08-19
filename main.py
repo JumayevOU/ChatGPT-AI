@@ -5,7 +5,7 @@ import os
 from typing import Optional
 
 import aiohttp
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
 from aiogram.filters import CommandStart
@@ -15,8 +15,10 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 
+from utils.cleaning import clean_response
 from services.mistral_service import get_mistral_reply
-from utils.history import update_chat_history, clear_user_history
+from utils.history import add_message, get_history, clear_history
+from utils.ocr_utils import extract_text_from_image
 from database import (
     create_db_pool,
     create_users_table,
@@ -36,7 +38,7 @@ OCR_API_KEY = os.getenv("OCR_API_KEY")
 
 MISTRAL_TIMEOUT = int(os.getenv("MISTRAL_TIMEOUT", "40"))
 OCR_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "15"))
-NOTIFY_INACTIVE_INTERVAL_SECONDS = 3600 * 24 * 7  
+NOTIFY_INACTIVE_INTERVAL_SECONDS = 3600 * 24 * 7
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,20 +51,12 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-ocr_session: Optional[aiohttp.ClientSession] = None
-
 error_messages = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
     "🔧 Biror vintim bo'shab qolgan shekilli... Yaqinda yig'ishtirib olaman 🤖",
     "🧠 Men hozirda biroz charchab qoldim, keyinroq urinib ko'ring 😴",
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
-
-def clean_response(text: str) -> str:
-    lines = text.strip().splitlines()
-    if lines and lines[0].lstrip().startswith("###"):
-        lines = lines[1:]
-    return "\n".join(line.rstrip() for line in lines).strip()
 
 
 def add_emoji_instruction_to_prompt(text: str) -> str:
@@ -130,34 +124,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-async def extract_text_from_image(image_bytes: bytes) -> str:
-    global ocr_session
-    if ocr_session is None:
-        ocr_session = aiohttp.ClientSession()
-
-    url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": OCR_API_KEY or ""}
-    data = {"language": "eng", "isOverlayRequired": False}
-
-    try:
-        form = aiohttp.FormData()
-        form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-        for key, val in data.items():
-            form.add_field(key, str(val))
-
-        async def _post():
-            async with ocr_session.post(url, data=form, headers=headers) as resp:
-                return await resp.json()
-
-        resp_json = await asyncio.wait_for(_post(), timeout=OCR_TIMEOUT)
-        return resp_json.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-    except asyncio.TimeoutError:
-        logger.error("OCR so'rovi timeout berdi")
-        return ""
-    except Exception as e:
-        logger.exception(f"OCR xatosi: {e}")
-        return ""
-
 
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
@@ -189,11 +155,11 @@ async def handle_text(message: Message, state: FSMContext):
     progress_task = asyncio.create_task(_progress_editor(loading, stop_evt, "🧠 <b>Savolingiz tahlil qilinmoqda</b>"))
 
     try:
-        update_chat_history(chat_id, message.text)
+        add_message(chat_id, "user", message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
 
         reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
-        update_chat_history(chat_id, reply, role="assistant")
+        add_message(chat_id, "assistant", reply)
 
         stop_evt.set()
         try:
@@ -205,7 +171,9 @@ async def handle_text(message: Message, state: FSMContext):
             await loading.delete()
         except Exception:
             pass
-        await message.answer(reply)
+
+        cleaned = clean_response(reply)
+        await message.answer(cleaned)
     except asyncio.TimeoutError:
         stop_evt.set()
         if not progress_task.done():
@@ -233,6 +201,7 @@ async def handle_text(message: Message, state: FSMContext):
     finally:
         if not progress_task.done():
             progress_task.cancel()
+
 
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -280,11 +249,11 @@ async def handle_photo(message: Message, state: FSMContext):
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
+        add_message(chat_id, "user", text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(text)
         try:
             reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
-            update_chat_history(chat_id, text)
-            update_chat_history(chat_id, reply, role="assistant")
+            add_message(chat_id, "assistant", reply)
 
             stop_evt.set()
             try:
@@ -296,7 +265,9 @@ async def handle_photo(message: Message, state: FSMContext):
                 await loading.delete()
             except Exception:
                 pass
-            await message.answer(reply)
+
+            cleaned = clean_response(reply)
+            await message.answer(cleaned)
         except asyncio.TimeoutError:
             stop_evt.set()
             if not progress_task.done():
@@ -324,6 +295,7 @@ async def handle_photo(message: Message, state: FSMContext):
     finally:
         if not progress_task.done():
             progress_task.cancel()
+
 
 async def notify_inactive_users(stop_event: asyncio.Event):
     try:
@@ -357,6 +329,7 @@ async def notify_inactive_users(stop_event: asyncio.Event):
                 continue
     except asyncio.CancelledError:
         pass
+
 
 async def main():
     if not BOT_TOKEN:
@@ -396,10 +369,6 @@ async def main():
     notify_stop_event = asyncio.Event()
     notify_task = asyncio.create_task(notify_inactive_users(notify_stop_event))
 
-    global ocr_session
-    if ocr_session is None:
-        ocr_session = aiohttp.ClientSession()
-
     try:
         try:
             await bot.delete_webhook(drop_pending_updates=True)
@@ -418,12 +387,6 @@ async def main():
             logger.exception("Error stopping notify task")
 
         try:
-            if ocr_session:
-                await ocr_session.close()
-        except Exception:
-            logger.exception("Error closing OCR session")
-
-        try:
             await session.close()
         except Exception:
             logger.exception("Error closing aiogram session")
@@ -439,6 +402,7 @@ async def main():
                         pass
         except Exception:
             logger.exception("Error closing DB pool")
+
 
 if __name__ == "__main__":
     try:
