@@ -1,6 +1,7 @@
 from mistralai import Mistral
 from config import MISTRAL_API_KEY
 from utils.history import chat_history
+from utils.cleaning import clean_response
 import re
 
 client = Mistral(api_key=MISTRAL_API_KEY)
