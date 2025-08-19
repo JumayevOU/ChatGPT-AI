@@ -1,8 +1,8 @@
-# main.py
 import asyncio
 import logging
 import random
 import os
+import html
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
@@ -170,6 +170,23 @@ def _normalize_stream_chunk(chunk) -> str:
 # -------------------------
 # Handlers
 # -------------------------
+async def send_long_message(message: Message, text: str, parse_mode: str | None = None):
+    """
+    Telegram xabar cheklovini hisobga oladi (4096). Default parse_mode=None (plain text) - xavfsiz.
+    """
+    MAX_LENGTH = 4096
+    if text is None:
+        text = ""
+
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)
+
+
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -225,8 +242,10 @@ async def handle_text(message: Message, state: FSMContext):
                         preview = buffer
                         if len(preview) > 3800:
                             preview = preview[-3800:]
+                        # escape preview for HTML to avoid parse errors
+                        escaped = html.escape(preview)
                         try:
-                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n{preview}", parse_mode="HTML")
+                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
                         except Exception:
                             pass
                         last_edit_time = now
@@ -253,8 +272,9 @@ async def handle_text(message: Message, state: FSMContext):
                 preview = display_buf
                 if len(preview) > 3800:
                     preview = preview[-3800:]
+                escaped = html.escape(preview)
                 try:
-                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n{preview}", parse_mode="HTML")
+                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
                 except Exception:
                     pass
                 await asyncio.sleep(0.45)
@@ -267,34 +287,19 @@ async def handle_text(message: Message, state: FSMContext):
         except Exception:
             pass
 
-        await send_long_message(message, final_reply, parse_mode="Markdown")
+        # plain text yuboramiz — parse_mode=None xavfsiz
+        await send_long_message(message, final_reply, parse_mode=None)
 
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!", parse_mode="HTML")
             await asyncio.sleep(1.5)
             await loading.delete()
         except Exception:
             pass
         await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
 
-async def extract_text_from_image(image_bytes: bytes) -> str:
-    url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": os.getenv("OCR_API_KEY")}
-    data = {"language": "eng", "isOverlayRequired": False}
-    try:
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-            for key, val in data.items():
-                form.add_field(key, str(val))
-            async with session.post(url, data=form, headers=headers) as resp:
-                result = await resp.json()
-                return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-    except Exception as e:
-        logger.error(f"OCR xatosi: {str(e)}")
-        return ""
 
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -365,8 +370,9 @@ async def handle_photo(message: Message, state: FSMContext):
                         preview = buffer
                         if len(preview) > 3800:
                             preview = preview[-3800:]
+                        escaped = html.escape(preview)
                         try:
-                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n{preview}", parse_mode="HTML")
+                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
                         except Exception:
                             pass
                         last_edit_time = now
@@ -391,8 +397,9 @@ async def handle_photo(message: Message, state: FSMContext):
                 preview = display_buf
                 if len(preview) > 3800:
                     preview = preview[-3800:]
+                escaped = html.escape(preview)
                 try:
-                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n{preview}", parse_mode="HTML")
+                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
                 except Exception:
                     pass
                 await asyncio.sleep(0.45)
@@ -405,7 +412,7 @@ async def handle_photo(message: Message, state: FSMContext):
         except Exception:
             pass
 
-        await send_long_message(message, final_reply, parse_mode="Markdown")
+        await send_long_message(message, final_reply, parse_mode=None)
 
     except Exception as e:
         logger.error(f"Rasm tahlili xatosi: {str(e)}")
