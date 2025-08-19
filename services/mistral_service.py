@@ -150,5 +150,6 @@ async def get_mistral_reply_stream(chat_id: int, prompt: str, model: Optional[st
             try:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status >= 400:
-                        text = await resp.text()
-                        logger.error("Mistral stream error %s: %s", resp.
+                    text = await resp.text()
+                    logger.error("Mistral stream error %s: %s", resp.status, text[:400])
+                    continue
