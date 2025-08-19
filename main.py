@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import logging
 import random
@@ -86,14 +85,28 @@ async def handle_start(message: Message):
         logger.exception("DB task yaratishda xato (start)")
 
     try:
-        if await is_admin(message.from_user.id):
+        is_admin_flag = False
+        is_super = False
+        try:
+            is_admin_flag = await is_admin(message.from_user.id)
+        except Exception:
+            logger.exception("is_admin tekshiruvida xato")
+            is_admin_flag = False
+
+        try:
+            is_super = await database.is_superadmin(message.from_user.id)
+        except Exception:
+            logger.exception("is_superadmin tekshiruvida xato")
+            is_super = False
+
+        if is_admin_flag or is_super:
             await message.answer(
                 "👋 <b>Admin panelga xush kelibsiz!</b>",
                 reply_markup=admin_keyboard
             )
             return
     except Exception:
-        logger.exception("is_admin tekshiruvida xato")
+        logger.exception("admin tekshiruvi mobaynida kutilmagan xato")
 
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
@@ -351,14 +364,20 @@ async def main():
         if message.text.startswith("/"):
             return False
         try:
-            return not await is_admin(message.from_user.id)
+            admin_flag = await is_admin(message.from_user.id)
+            if not admin_flag:
+                admin_flag = await database.is_superadmin(message.from_user.id)
+            return not admin_flag
         except Exception:
             logger.exception("DB error in non_admin_text_predicate")
             return False
 
     async def non_admin_photo_predicate(message: Message):
         try:
-            return not await is_admin(message.from_user.id)
+            admin_flag = await is_admin(message.from_user.id)
+            if not admin_flag:
+                admin_flag = await database.is_superadmin(message.from_user.id)
+            return not admin_flag
         except Exception:
             logger.exception("DB error in non_admin_photo_predicate")
             return False
