@@ -94,9 +94,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-
-
-
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -148,10 +145,9 @@ async def handle_text(message: Message, state: FSMContext):
             random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
         )
 
-
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": OCR_API_KEY}
+    headers = {"apikey": os.getenv("OCR_API_KEY")}
     data = {"language": "eng", "isOverlayRequired": False}
 
     try:
@@ -167,7 +163,6 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
     except Exception as e:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
-
 
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -233,7 +228,6 @@ async def handle_photo(message: Message, state: FSMContext):
             logger.error(f"Xabarni o'chirishda xato: {str(e)}")
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
-
 async def notify_inactive_users():
     while True:
         await asyncio.sleep(3600 * 24 * 7)
@@ -258,17 +252,13 @@ async def notify_inactive_users():
                 except Exception as e:
                     logger.error(f"Xatolik yuborishda {user_id}: {e}")
 
-
 async def main():
     await create_db_pool()
     await create_users_table()
 
-
     admin_module.register_admin_handlers(dp, bot, database)
 
-
     async def non_admin_text_predicate(message: Message):
-
         if not message.text:
             return False
         if message.text.startswith("/"):
@@ -286,17 +276,13 @@ async def main():
             logger.exception("DB error in non_admin_photo_predicate")
             return False
 
-
     dp.message.register(handle_text, non_admin_text_predicate)
     dp.message.register(handle_photo, non_admin_photo_predicate)
 
-
     asyncio.create_task(notify_inactive_users())
-
 
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -20,7 +20,7 @@ async def create_db_pool():
 async def create_users_table():
     """
     Create required tables if they do not exist.
-    Note: super admin ids are kept in a separate table `super_admin` as requested.
+    Note: super admin ids are kept in a separate table `super_admin`.
     """
     global pool
     if pool is None:
@@ -229,6 +229,7 @@ async def add_superadmin(user_id: int) -> None:
             VALUES ($1, NOW())
             ON CONFLICT (user_id) DO UPDATE SET set_at = NOW()
         ''', user_id)
+        # keep only this user as the superadmin (if you want multiple superadmins, remove this line)
         await conn.execute('DELETE FROM super_admin WHERE user_id <> $1', user_id)
 
 async def remove_superadmin(user_id: int) -> None:

@@ -45,6 +45,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
       - is_admin(user_id) -> bool
       - is_superadmin(user_id) -> bool
       - get_admins(include_super=False) -> list[dict(...)]
+
       - get_admin_meta(user_id) -> dict or None
       - add_admin(user_id, username=None)
       - add_superadmin(user_id)
