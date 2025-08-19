@@ -3,6 +3,7 @@ import json
 import os
 import asyncio
 from datetime import datetime, timezone, timedelta
+
 from aiogram import Bot, F
 from aiogram.types import (
     Message,
@@ -12,6 +13,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
@@ -20,7 +22,7 @@ from keyboards import admin_keyboard
 
 logger = logging.getLogger(__name__)
 
-
+# States
 class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
@@ -35,13 +37,21 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
-REMOVE_BLOCK_DAYS = 3  
+REMOVE_BLOCK_DAYS = 3
 
 
 def register_admin_handlers(dp, bot: Bot, database_module):
     """
     Register admin handlers.
-    database_module should implement: is_admin, get_admins, get_admin_meta, add_admin, remove_admin, get_all_users, deactivate_user
+    database_module should implement:
+      - is_admin(user_id) -> bool
+      - get_admins() -> list[dict(user_id, username, created_at)]
+      - get_admin_meta(user_id) -> dict or None
+      - add_admin(user_id, username=None)
+      - remove_admin(user_id)
+      - get_all_users()
+      - deactivate_user(user_id)
+      - pool (asyncpg pool) for direct queries when needed
     """
 
     async def require_admin_or_deny(message: Message) -> bool:
@@ -59,6 +69,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not await require_admin_or_deny(message):
             return
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
+
+
     async def start_broadcast(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -303,6 +315,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             logger.exception("handle_dump_users error")
             await message.answer(f"❌ Xatolik yuz berdi: server yoki fayl tizimi")
 
+
     async def start_add_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -320,6 +333,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Iltimos faqat sonli ID kiriting. Masalan: 123456789")
             await state.clear()
             return
+
 
         username = None
         try:
@@ -346,8 +360,10 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     async def start_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
+
+
         try:
-            admins = await database_module.get_admins() 
+            admins = await database_module.get_admins()  
         except Exception:
             logger.exception("DB error in start_remove_admin")
             await message.answer("❌ DB xatosi.")
@@ -358,20 +374,24 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             return
 
 
-        kb = InlineKeyboardMarkup(row_width=1)
+        rows = []
         for a in admins:
             uid = a.get('user_id')
             uname = a.get('username')
             label = f"{uid}"
             if uname:
                 label += f" — @{uname}"
-            kb.add(InlineKeyboardButton(text=label, callback_data=f"remove_admin:{uid}"))
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"remove_admin:{uid}")])
+
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
         await message.answer("➖ Qaysi adminni o'chirmoqchisiz? Quyidagilardan birini bosing:", reply_markup=kb)
 
     async def remove_admin_callback(query: CallbackQuery):
+
         try:
             requester_id = query.from_user.id
+
             try:
                 requester_meta = await database_module.get_admin_meta(requester_id)
             except Exception:
@@ -421,7 +441,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 )
                 return
 
-
             target_meta = await database_module.get_admin_meta(target_id)
             if not target_meta:
                 await query.answer("ℹ️ Bu foydalanuvchi admin emas yoki allaqachon o'chirilgan.", show_alert=True)
@@ -444,6 +463,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await query.answer("❗ Xatolik yuz berdi.", show_alert=True)
             except Exception:
                 pass
+
 
     async def process_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
