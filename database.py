@@ -157,6 +157,23 @@ async def add_admin(user_id: int, username: str | None = None) -> None:
             DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
         ''', user_id, username)
 
+async def get_admins(include_super: bool = True):
+    """
+    Return list of admins.
+    If include_super=False, superadmin (masalan user_id=1) ni tashlab ketadi.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        if include_super:
+            rows = await conn.fetch('SELECT user_id, username, created_at FROM admins')
+        else:
+            rows = await conn.fetch('SELECT user_id, username, created_at FROM admins WHERE user_id != 1')
+        
+        return [dict(r) for r in rows]
+
+
 async def remove_admin(user_id: int) -> None:
     """Remove admin by user_id."""
     global pool
@@ -164,4 +181,5 @@ async def remove_admin(user_id: int) -> None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('DELETE FROM admins WHERE user_id = $1', user_id)
+
 
