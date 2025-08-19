@@ -84,50 +84,71 @@ async def get_mistral_reply(prompt: str, model: Optional[str] = None) -> str:
 # ---------------------------
 # STREAMING REPLY
 # ---------------------------
-async def get_mistral_reply_stream(prompt: str, model: Optional[str] = None) -> AsyncGenerator[str, None]:
-    """Streaming javob qaytaradi, chunklarga bo‘lib."""
+async def get_mistral_reply_stream(chat_id: int, prompt: str, model: Optional[str] = None) -> AsyncGenerator[str, None]:
+    """
+    Async generator. Har bir `yield` string bo'lak (chunk) qaytaradi.
+    Avvalo SDK streaming metodlarini sinab ko'radi; agar ishlamasa,
+    aiohttp bilan SSE (text/event-stream) orqali fallback qiladi.
+    """
     model = model or DEFAULT_MODEL
 
-    url = "https://api.mistral.ai/v1/chat/completions"
+    # 1) SDK bilan streaming (agar mavjud bo'lsa)
+    try:
+        import mistralai
+        if hasattr(mistralai, "Mistral"):
+            async with mistralai.Mistral(api_key=MISTRAL_API_KEY) as client:
+                chat_obj = getattr(client, "chat", None)
+                if chat_obj:
+                    if hasattr(chat_obj, "stream"):
+                        try:
+                            # ✅ Faqat prompt yuboramiz, chat_id emas
+                            stream_iter = chat_obj.stream(
+                                model=model,
+                                messages=[{"role": "user", "content": str(prompt)}],
+                            )
+                            async for chunk in stream_iter:
+                                yield _extract_text_from_sdk_response(chunk)
+                            return
+                        except Exception as e:
+                            logger.exception("SDK chat.stream error: %s", e)
+
+                    try:
+                        maybe_stream = chat_obj.complete(
+                            model=model,
+                            messages=[{"role": "user", "content": str(prompt)}],
+                            stream=True,
+                        )
+                        if hasattr(maybe_stream, "__aiter__"):
+                            async for ev in maybe_stream:
+                                yield _extract_text_from_sdk_response(ev)
+                            return
+                    except Exception as e:
+                        logger.debug("chat.complete(stream=True) failed: %s", e)
+    except Exception as e:
+        logger.debug("SDK streaming not available: %s", e)
+
+    # 2) HTTP SSE fallback
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
         "Accept": "text/event-stream",
         "Content-Type": "application/json",
     }
+
     payload = {
+        "inputs": str(prompt),   # ✅ faqat prompt yuborilyapti
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
         "stream": True,
     }
 
+    url_candidates = [
+        "https://api.mistral.ai/v1/conversations",
+        "https://api.mistral.ai/v1/chat/completions",
+    ]
+
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status >= 400:
-                text = await resp.text()
-                logger.error("Mistral stream error %s: %s", resp.status, text)
-                yield f"[error {resp.status}] {text}"
-                return
-
-            async for raw_chunk in resp.content:
-                if not raw_chunk:
-                    continue
-                try:
-                    part = raw_chunk.decode("utf-8")
-                except Exception:
-                    part = str(raw_chunk)
-
-                for line in part.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("data:"):
-                        payload_str = line[len("data:"):].strip()
-                        if payload_str in ("[DONE]", "[done]"):
-                            return
-                        try:
-                            j = json.loads(payload_str)
-                            text_part = _normalize_stream_chunk(j)
-                            if text_part:
-                                yield text_part
-                        except Exception:
-                            yield payload_str
+        for url in url_candidates:
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        logger.error("Mistral stream error %s: %s", resp.
