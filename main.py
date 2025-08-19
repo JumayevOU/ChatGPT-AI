@@ -58,8 +58,16 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
+def clean_response(text: str) -> str:
+    lines = text.strip().splitlines()
+    if lines and lines[0].lstrip().startswith("###"):
+        lines = lines[1:]
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
+
 
 async def _progress_editor(msg, stop_event: asyncio.Event, base_text: str):
     try:
@@ -75,6 +83,7 @@ async def _progress_editor(msg, stop_event: asyncio.Event, base_text: str):
             await asyncio.sleep(0.4)
     except asyncio.CancelledError:
         pass
+
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
