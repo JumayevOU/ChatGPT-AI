@@ -20,7 +20,7 @@ async def create_db_pool():
 async def create_users_table():
     """
     Create required tables if they do not exist.
-    Note: is_super is kept in a separate table `is_super` as requested.
+    Note: super admin ids are kept in a separate table `super_admin` as requested.
     """
     global pool
     if pool is None:
@@ -45,7 +45,7 @@ async def create_users_table():
         ''')
 
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS is_super (
+            CREATE TABLE IF NOT EXISTS super_admin (
                 user_id BIGINT PRIMARY KEY,
                 set_at TIMESTAMP DEFAULT NOW()
             );
@@ -124,12 +124,12 @@ async def is_admin(user_id: int) -> bool:
         return bool(val)
 
 async def is_superadmin(user_id: int) -> bool:
-    """Return True if user_id exists in is_super table."""
+    """Return True if user_id exists in super_admin table."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        val = await conn.fetchval('SELECT 1 FROM is_super WHERE user_id = $1', user_id)
+        val = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
         return bool(val)
 
 async def get_superadmins() -> List[int]:
@@ -138,7 +138,7 @@ async def get_superadmins() -> List[int]:
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT user_id FROM is_super')
+        rows = await conn.fetch('SELECT user_id FROM super_admin')
         return [r['user_id'] for r in rows]
 
 async def get_admins(include_super: bool = False) -> List[Dict]:
@@ -157,12 +157,11 @@ async def get_admins(include_super: bool = False) -> List[Dict]:
             rows = await conn.fetch('''
                 SELECT a.user_id, a.username, a.created_at
                 FROM admins a
-                WHERE a.user_id NOT IN (SELECT user_id FROM is_super)
+                WHERE a.user_id NOT IN (SELECT user_id FROM super_admin)
                 ORDER BY a.user_id
             ''')
         result = []
-        super_ids = set(await conn.fetchrow('SELECT 1') and [] ) 
-        srows = await conn.fetch('SELECT user_id FROM is_super')
+        srows = await conn.fetch('SELECT user_id FROM super_admin')
         super_ids = set(r['user_id'] for r in srows)
         for r in rows:
             result.append({
@@ -184,11 +183,11 @@ async def get_admin_meta(user_id: int) -> Optional[Dict]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow('SELECT user_id, username, created_at FROM admins WHERE user_id = $1', user_id)
         if not row:
-            s = await conn.fetchval('SELECT 1 FROM is_super WHERE user_id = $1', user_id)
+            s = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
             if s:
                 return {'user_id': user_id, 'username': None, 'created_at': None, 'is_super': True}
             return None
-        is_super_flag = await conn.fetchval('SELECT 1 FROM is_super WHERE user_id = $1', user_id)
+        is_super_flag = await conn.fetchval('SELECT 1 FROM super_admin WHERE user_id = $1', user_id)
         return {
             'user_id': row['user_id'],
             'username': row.get('username'),
@@ -213,7 +212,7 @@ async def add_admin(user_id: int, username: str | None = None) -> None:
 
 async def add_superadmin(user_id: int) -> None:
     """
-    Make given user the sole superadmin (insert into is_super).
+    Make given user the sole superadmin (insert into super_admin).
     Also ensure they exist in admins table (insert if not).
     """
     global pool
@@ -226,22 +225,22 @@ async def add_superadmin(user_id: int) -> None:
             ON CONFLICT (user_id) DO NOTHING
         ''', user_id)
         await conn.execute('''
-            INSERT INTO is_super (user_id, set_at)
+            INSERT INTO super_admin (user_id, set_at)
             VALUES ($1, NOW())
             ON CONFLICT (user_id) DO UPDATE SET set_at = NOW()
         ''', user_id)
-        await conn.execute('DELETE FROM is_super WHERE user_id <> $1', user_id)
+        await conn.execute('DELETE FROM super_admin WHERE user_id <> $1', user_id)
 
 async def remove_superadmin(user_id: int) -> None:
-    """Remove superadmin flag (delete from is_super)."""
+    """Remove superadmin flag (delete from super_admin)."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        await conn.execute('DELETE FROM is_super WHERE user_id = $1', user_id)
+        await conn.execute('DELETE FROM super_admin WHERE user_id = $1', user_id)
 
 async def remove_admin(user_id: int) -> None:
-    """Remove admin by user_id (doesn't touch is_super)."""
+    """Remove admin by user_id (doesn't touch super_admin)."""
     global pool
     if pool is None:
         await create_db_pool()
