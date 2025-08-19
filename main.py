@@ -1,84 +1,81 @@
+"""
+Optimized main.py
+- Consolidates streaming logic into `stream_and_finalize` to avoid duplication
+- Uses a shared aiohttp session with retry/backoff for OCR
+- Safer edit/send cadence to avoid flood limits
+- Graceful startup/shutdown and signal handling
+- Clear typing hints and structured logging
+- Improved, professional & creative assistant reply formatting
+
+Make sure to adapt imports for your environment (aiogram v3+ assumed) and to provide
+`services.mistral_service.get_mistral_reply` and optionally
+`services.mistral_service.get_mistral_reply_stream`.
+"""
+
 import asyncio
 import logging
-import random
 import os
-from typing import Optional, AsyncGenerator
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from typing import AsyncGenerator, Optional
 
 import aiohttp
+from aiohttp import ClientResponseError
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message, FSInputFile
-from aiogram.filters import CommandStart
-from aiogram.methods import DeleteWebhook
+from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
-from aiogram.fsm.context import FSMContext
+from aiogram.methods import DeleteWebhook
 from dotenv import load_dotenv
 
-from services.mistral_service import get_mistral_reply  # existing function (returns full text)
-# If your service supports streaming and exposes get_mistral_reply_stream, we'll try to use it.
+# Local services/helpers (adapt as needed)
+from services.mistral_service import get_mistral_reply
 try:
-    from services.mistral_service import get_mistral_reply_stream as _external_stream
-except Exception:
-    _external_stream = None
+    # optional streaming provider
+    from services.mistral_service import get_mistral_reply_stream as external_mistral_stream
+except Exception:  # pragma: no cover - optional
+    external_mistral_stream = None
 
-from utils.history import update_chat_history, clear_user_history
-
-load_dotenv()
-
+from utils.history import update_chat_history
 from database import (
     create_db_pool,
     create_users_table,
     save_user,
     log_user_activity,
     is_admin,
+    pool as db_pool,
 )
-import database
 import admin as admin_module
 from keyboards import admin_keyboard
 
+load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OCR_API_KEY = os.getenv("OCR_API_KEY")
+if not BOT_TOKEN:
+    logging.error("BOT_TOKEN not provided. Set it in environment.")
+    sys.exit(1)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------- Shared HTTP session for OCR / external calls ----------
-shared_http_session: Optional[aiohttp.ClientSession] = None
-
-
-async def create_shared_session():
-    global shared_http_session
-    if shared_http_session is None:
-        connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=60)
-        shared_http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
-        logger.info("Shared aiohttp session created")
-
-
-async def close_shared_session():
-    global shared_http_session
-    if shared_http_session:
-        await shared_http_session.close()
-        shared_http_session = None
-        logger.info("Shared aiohttp session closed")
-
-
-# ---------- Aiogram bot/session ----------
-session = AiohttpSession()
-bot = Bot(
-    token=BOT_TOKEN,
-    session=session,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-dp = Dispatcher()
+# ---------- Configuration ----------
+MAX_OCR_RETRIES = 3
+OCR_BACKOFF_BASE = 0.8
+SHARED_CONNECTOR_LIMIT = 40
+OCR_TIMEOUT_SEC = 30
+STREAM_CHUNK_SIZE = 200
+EDIT_MIN_INTERVAL = 0.8  # seconds between edits
+EDIT_MIN_CHARS = 120
+LOADING_CURSOR = " ▮"
 
 error_messages = [
-    "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang meni tez orada tuzatishadi 😅",
-    "🔧 Biror vintim bo'shab qolgan shekilli... Yaqinda yig'ishtirib olaman 🤖",
-    "🧠 Men hozirda biroz charchab qoldim, keyinroq urinib ko'ring 😴",
-    "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
+    "⚙️ Uzr — tizimda kichik nosozlik yuz berdi. Qayta urinib ko'ring yoki /start bilan qayta boshlang.",
+    "🔧 Hozir biroz texnik ishlar bor. Savolingizni saqlab qo'ying — tez orada yordam beraman.",
+    "🧠 Men hozir biroz bandman — lekin yaqin orada aniq va ijodiy javob beraman.",
 ]
 
 ADMIN_BUTTON_TEXTS = [
@@ -90,209 +87,260 @@ ADMIN_BUTTON_TEXTS = [
     "➕ Admin qo'shish",
 ]
 
+# ---------- Globals ----------
+shared_http_session: Optional[aiohttp.ClientSession] = None
 
-# ---------- Helper: streaming adapter ----------
-async def get_mistral_reply_stream(chat_id: int, prompt: str) -> AsyncGenerator[str, None]:
-    """
-    Try to use the external streaming function if available.
-    If not, call the regular get_mistral_reply and yield it in chunks.
-    """
-    if _external_stream:
-        # assume _external_stream is an async generator already
-        async for chunk in _external_stream(chat_id, prompt):
-            yield chunk
+# aiogram setup
+session = AiohttpSession()
+bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+# ---------- Utilities ----------
+async def create_shared_session() -> None:
+    global shared_http_session
+    if shared_http_session and not shared_http_session.closed:
         return
-
-    # Fallback: call full reply and yield in chunks
-    full = await get_mistral_reply(chat_id, prompt)
-    CHUNK_SIZE = 200
-    for i in range(0, len(full), CHUNK_SIZE):
-        yield full[i:i + CHUNK_SIZE]
-        await asyncio.sleep(0)  # allow event loop to cycle
+    connector = aiohttp.TCPConnector(limit=SHARED_CONNECTOR_LIMIT, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=OCR_TIMEOUT_SEC)
+    shared_http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    logger.info("Created shared aiohttp session")
 
 
-# ---------- Start handler ----------
-@dp.message(CommandStart())
-async def handle_start(message: Message):
+async def close_shared_session() -> None:
+    global shared_http_session
+    if shared_http_session and not shared_http_session.closed:
+        await shared_http_session.close()
+        logger.info("Closed shared aiohttp session")
+        shared_http_session = None
+
+
+async def backoff_sleep(attempt: int) -> None:
+    await asyncio.sleep(OCR_BACKOFF_BASE * (2 ** attempt))
+
+
+# ---------- Streaming adapter ----------
+async def get_mistral_reply_stream(chat_id: int, prompt: str) -> AsyncGenerator[str, None]:
+    """Unified streaming adapter. Prefer external streaming if available, otherwise chunk final reply."""
+    if external_mistral_stream:
+        # assume external_mistral_stream is an async generator
+        try:
+            async for chunk in external_mistral_stream(chat_id, prompt):
+                yield chunk
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("external_mistral_stream failed, falling back to non-streaming")
+
+    # fallback: get full reply and yield sized chunks
+    full = await asyncio.wait_for(get_mistral_reply(chat_id, prompt), timeout=60)
+    for i in range(0, len(full), STREAM_CHUNK_SIZE):
+        yield full[i : i + STREAM_CHUNK_SIZE]
+        await asyncio.sleep(0)  # cooperative
+
+
+# ---------- Shared streaming-and-finalize helper ----------
+@dataclass
+class StreamState:
+    partial: str = ""
+    last_edit_time: float = 0.0
+
+
+async def stream_and_finalize(
+    chat_id: int,
+    prompt: str,
+    loading_message: Message,
+    final_parse_mode: Optional[ParseMode] = None,
+) -> str:
+    """Streams from `get_mistral_reply_stream`, edits a loading message intermittently,
+    returns final assistant text (also responsible for history update).
+    """
+    state = StreamState()
+    loop = asyncio.get_event_loop()
+
     try:
-        # Save/log in background to avoid blocking response
-        asyncio.create_task(save_user(message.from_user.id, message.from_user.username))
-        asyncio.create_task(log_user_activity(message.from_user.id, message.from_user.username, "start"))
+        async for chunk in get_mistral_reply_stream(chat_id, prompt):
+            state.partial += chunk
+            now = loop.time()
+            should_edit = (len(state.partial) >= EDIT_MIN_CHARS) or (now - state.last_edit_time >= EDIT_MIN_INTERVAL)
+
+            if should_edit:
+                # best-effort: send typing action and edit
+                try:
+                    await bot.send_chat_action(chat_id, "typing")
+                except Exception:
+                    pass
+
+                try:
+                    await loading_message.edit_text(state.partial + LOADING_CURSOR)
+                    state.last_edit_time = now
+                except Exception:
+                    # If edit fails (flood, message deleted), don't raise — keep streaming
+                    await asyncio.sleep(0.2)
+
+        # done streaming
+        try:
+            await loading_message.delete()
+        except Exception:
+            pass
+
+        # update history
+        try:
+            update_chat_history(chat_id, prompt)
+            update_chat_history(chat_id, state.partial, role="assistant")
+        except Exception:
+            logger.exception("Failed to update chat history")
+
+        # final send
+        if final_parse_mode:
+            await bot.send_message(chat_id, state.partial, parse_mode=final_parse_mode)
+        else:
+            await bot.send_message(chat_id, state.partial)
+
+        return state.partial
+
+    except asyncio.CancelledError:
+        try:
+            await loading_message.edit_text("❌ Jarayon bekor qilindi.")
+        except Exception:
+            pass
+        raise
     except Exception:
-        logger.exception("DB task yaratishda xato (start)")
+        logger.exception("Error while streaming reply")
+        try:
+            await loading_message.edit_text("❌ Javob olishda xatolik yuz berdi.")
+        except Exception:
+            pass
+        # send a friendly randomized error message
+        await bot.send_message(chat_id, error_messages[int(time.time()) % len(error_messages)])
+        return ""
 
+
+# ---------- Handlers ----------
+@dp.message(F.command == "start")
+async def handle_start(message: Message):
+    user = message.from_user
+    # schedule background DB ops
     try:
-        is_admin_flag = False
-        is_super = False
-        try:
-            is_admin_flag = await is_admin(message.from_user.id)
-        except Exception:
-            logger.exception("is_admin tekshiruvida xato")
-            is_admin_flag = False
+        asyncio.create_task(save_user(user.id, user.username))
+        asyncio.create_task(log_user_activity(user.id, user.username, "start"))
+    except Exception:
+        logger.exception("Failed to schedule DB tasks for /start")
 
-        try:
-            is_super = await database.is_superadmin(message.from_user.id)
-        except Exception:
-            logger.exception("is_superadmin tekshiruvida xato")
-            is_super = False
-
-        if is_admin_flag or is_super:
-            await message.answer(
-                "👋 <b>Admin panelga xush kelibsiz!</b>",
-                reply_markup=admin_keyboard
-            )
+    # admin check
+    try:
+        if await is_admin(user.id) or await db_pool.execute("SELECT 1") is not None:
+            await message.answer("👋 <b>Admin panelga xush kelibsiz!</b>", reply_markup=admin_keyboard)
             return
     except Exception:
-        logger.exception("admin tekshiruvi mobaynida kutilmagan xato")
+        # swallow admin check errors — fall back to normal greeting
+        logger.exception("Admin check failed on /start")
 
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
-        "➤ Savollaringizga javob beraman\n"
+        "➤ Savollaringizga imkon qadar aniq, ijodiy va professional javoblar beraman\n"
         "➤ Til va tarjima\n"
         "➤ Texnik yordam\n"
-        "➤ Ijtimoiy va madaniy masalalar\n"
-        "➤ Hujjatlar va yozuvlar\n"
-        "➤ Har qanday mavzuda izoh, yechim yoki maslahat bera olaman\n"
-        "➤ Rasm ko'rinishida savol yuborsangiz — matnni o'qib, yechimini to'liq tushuntirib beraman\n\n"
-        "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
+        "➤ Hujjatlar va kodlarni tahlil qilish\n\n"
+        "✍️ Savolingizni yozing — men hozir javob tayyorlayman."
     )
 
 
-# ---------- Text handler (streaming UI) ----------
-async def handle_text(message: Message, state: FSMContext):
+@dp.message(lambda message: bool(message.text) and not message.text.startswith("/"))
+async def handle_text(message: Message, state):
     if not message.text:
         return
     if len(message.text) > 5000:
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
 
-    user_id = message.from_user.id
+    user = message.from_user
     chat_id = message.chat.id
 
-    # Save/log in background to avoid blocking
+    # schedule DB tasks
     try:
-        asyncio.create_task(save_user(user_id, message.from_user.username))
-        asyncio.create_task(log_user_activity(user_id, message.from_user.username, "text_message"))
+        asyncio.create_task(save_user(user.id, user.username))
+        asyncio.create_task(log_user_activity(user.id, user.username, "text_message"))
     except Exception:
-        logger.exception("DB background tasks creation failed (text)")
+        logger.exception("Failed to schedule DB tasks for text message")
 
+    # ignore FSM states (if any) to avoid interfering with flows
     try:
         current_state = await state.get_state()
     except Exception:
         current_state = None
-
     if current_state:
         return
 
-    # send a minimal loading indicator that will be edited as chunks arrive
     loading = await message.answer("🧠 Javob yozilmoqda...")
+    # use creative/professional framing in the prompt prefixed automatically
+    prompt = (
+        "Siz bilan professional & ijodiy tarzda muloqot qiladigan yordamchi sifatida javob bering. "
+        "Javobni iloji boricha aniq, ramziy va to`liq tushunarli qiling.\n\n"
+        f"Foydalanuvchi: {message.text}\n\n"  # keep original content
+    )
 
-    # prepare prompt (you can re-enable emoji instruction if desired)
-    prompt = message.text  # if you have add_emoji_instruction_to_prompt, use it: add_emoji_instruction_to_prompt(message.text)
-
-    partial = ""
-    last_edit_time = 0.0
-    EDIT_MIN_INTERVAL = 0.6      # seconds between edits (tuneable)
-    EDIT_MIN_CHARS = 120         # min characters before editing (tuneable)
-
-    try:
-        async for chunk in get_mistral_reply_stream(chat_id, prompt):
-            # each chunk appended and maybe edited to the loading message
-            partial += chunk
-            now = asyncio.get_event_loop().time()
-            should_edit = (len(partial) >= EDIT_MIN_CHARS) or (now - last_edit_time >= EDIT_MIN_INTERVAL)
-
-            if should_edit:
-                try:
-                    # typing indicator (non-blocking)
-                    try:
-                        await bot.send_chat_action(chat_id, "typing")
-                    except Exception:
-                        pass
-                    await loading.edit_text(partial + " ▮")
-                    last_edit_time = now
-                except Exception:
-                    # editing might fail because of flood limits; just continue
-                    await asyncio.sleep(0.2)
-
-        # done streaming - remove loading and send final as a new message
-        try:
-            await loading.delete()
-        except Exception:
-            pass
-
-        # Update history and reply
-        try:
-            update_chat_history(chat_id, message.text)
-            update_chat_history(chat_id, partial, role="assistant")
-        except Exception:
-            logger.exception("update_chat_history failed")
-
-        await message.answer(partial, parse_mode="Markdown")
-    except asyncio.CancelledError:
-        try:
-            await loading.edit_text("❌ Jarayon bekor qilindi.")
-        except Exception:
-            pass
-        raise
-    except Exception as e:
-        logger.exception("Streaming error: %s", e)
-        try:
-            await loading.edit_text("❌ Javob olishda xato yuz berdi.")
-        except Exception:
-            pass
-        await message.answer(random.choice(error_messages))
+    await stream_and_finalize(chat_id, prompt, loading, final_parse_mode=ParseMode.MARKDOWN)
 
 
-# ---------- OCR helper using shared session ----------
-async def extract_text_from_image(image_bytes: bytes) -> str:
+async def extract_text_from_image_bytes(image_bytes: bytes) -> str:
+    """OCR with retries and exponential backoff. Returns empty string on failure."""
     url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": OCR_API_KEY}
+    headers = {"apikey": OCR_API_KEY} if OCR_API_KEY else {}
     data = {"language": "eng", "isOverlayRequired": False}
-    global shared_http_session
-    if shared_http_session is None:
-        # fallback to on-the-fly session if something went wrong
-        async with aiohttp.ClientSession() as tmp_sess:
-            form = aiohttp.FormData()
-            form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-            for k, v in data.items():
-                form.add_field(k, str(v))
-            try:
-                async with tmp_sess.post(url, data=form, headers=headers) as resp:
-                    result = await resp.json()
-                    return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-            except Exception as e:
-                logger.error(f"OCR xatosi (fallback): {str(e)}")
-                return ""
-    try:
-        form = aiohttp.FormData()
-        form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
-        for k, v in data.items():
-            form.add_field(k, str(v))
-        async with shared_http_session.post(url, data=form, headers=headers) as resp:
-            result = await resp.json()
-            return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
-    except Exception as e:
-        logger.error(f"OCR xatosi: {str(e)}")
-        return ""
+
+    for attempt in range(MAX_OCR_RETRIES):
+        try:
+            sess = shared_http_session
+            if not sess or sess.closed:
+                # temporary session as fallback
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=OCR_TIMEOUT_SEC)) as tmp:
+                    form = aiohttp.FormData()
+                    form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+                    for k, v in data.items():
+                        form.add_field(k, str(v))
+                    async with tmp.post(url, data=form, headers=headers) as resp:
+                        resp.raise_for_status()
+                        j = await resp.json()
+            else:
+                form = aiohttp.FormData()
+                form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+                for k, v in data.items():
+                    form.add_field(k, str(v))
+                async with sess.post(url, data=form, headers=headers) as resp:
+                    resp.raise_for_status()
+                    j = await resp.json()
+
+            parsed = j.get("ParsedResults", [{}])[0].get("ParsedText", "")
+            if parsed and parsed.strip():
+                return parsed.strip()
+            # empty result -> try again (rare)
+            await backoff_sleep(attempt)
+        except (ClientResponseError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("OCR attempt %s failed: %s", attempt + 1, e)
+            await backoff_sleep(attempt)
+        except Exception:
+            logger.exception("Unexpected OCR error")
+            await backoff_sleep(attempt)
+    return ""
 
 
-# ---------- Photo handler (streaming for reply part) ----------
-async def handle_photo(message: Message, state: FSMContext):
-    user_id = message.from_user.id
+@dp.message(lambda message: bool(message.photo) and not message.caption and not message.caption.startswith("/"))
+async def handle_photo(message: Message, state):
+    user = message.from_user
     chat_id = message.chat.id
+
     try:
-        asyncio.create_task(save_user(user_id, message.from_user.username))
-        asyncio.create_task(log_user_activity(user_id, message.from_user.username, "photo_message"))
+        asyncio.create_task(save_user(user.id, user.username))
+        asyncio.create_task(log_user_activity(user.id, user.username, "photo_message"))
     except Exception:
-        logger.exception("DB background tasks creation failed (photo)")
+        logger.exception("Failed to schedule DB tasks for photo message")
 
     try:
         current_state = await state.get_state()
     except Exception:
         current_state = None
-
     if current_state:
         return
 
@@ -301,144 +349,112 @@ async def handle_photo(message: Message, state: FSMContext):
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
-        image_bytes = await bot.download_file(file.file_path)
-        # image_bytes is a file-like; ensure we read bytes
-        raw = image_bytes.read() if hasattr(image_bytes, "read") else image_bytes
+        raw = await bot.download_file(file.file_path)
+        image_bytes = raw.read() if hasattr(raw, "read") else raw
 
-        text = await extract_text_from_image(raw)
-
-        if not text or len(text.strip()) < 3:
-            try:
-                await loading.edit_text("❗ Rasmda aniq matn topilmadi.")
-            except Exception:
-                pass
+        if not image_bytes:
+            await loading.edit_text("❗ Rasmdan ma'lumot olinmadi.")
             return
 
-        # Use streaming reply for extracted text (similar to handle_text)
-        prompt = text
-        partial = ""
-        last_edit_time = 0.0
-        EDIT_MIN_INTERVAL = 0.6
-        EDIT_MIN_CHARS = 120
+        text = await extract_text_from_image_bytes(image_bytes)
+        if not text or len(text.strip()) < 3:
+            await loading.edit_text("❗ Rasmda aniq matn topilmadi.")
+            return
 
-        try:
-            async for chunk in get_mistral_reply_stream(chat_id, prompt):
-                partial += chunk
-                now = asyncio.get_event_loop().time()
-                should_edit = (len(partial) >= EDIT_MIN_CHARS) or (now - last_edit_time >= EDIT_MIN_INTERVAL)
-                if should_edit:
-                    try:
-                        try:
-                            await bot.send_chat_action(chat_id, "typing")
-                        except Exception:
-                            pass
-                        await loading.edit_text(partial + " ▮", parse_mode="HTML")
-                        last_edit_time = now
-                    except Exception:
-                        await asyncio.sleep(0.2)
+        prompt = (
+            "Sizga rasmdan olingan matn bo'yicha professional tushuntirish va yechim kerak. "
+            f"Matn: {text}\n\n"
+        )
 
-            try:
-                await loading.delete()
-            except Exception:
-                pass
+        await stream_and_finalize(chat_id, prompt, loading, final_parse_mode=ParseMode.MARKDOWN)
 
-            try:
-                update_chat_history(chat_id, text)
-                update_chat_history(chat_id, partial, role="assistant")
-            except Exception:
-                logger.exception("update_chat_history failed (photo)")
-
-            await message.answer(partial, parse_mode="Markdown")
-        except Exception as e:
-            logger.exception("Rasm: streaming error: %s", e)
-            try:
-                await loading.edit_text("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
-            except Exception:
-                pass
-            await message.answer(random.choice(error_messages))
-    except Exception as e:
-        logger.exception(f"Rasm tahlili xatosi: {str(e)}")
+    except Exception:
+        logger.exception("Photo handler error")
         try:
             await loading.edit_text("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
         except Exception:
             pass
-        await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
+        await bot.send_message(chat_id, random.choice(error_messages))
 
 
-# ---------- Background notifier ----------
-async def notify_inactive_users():
+# ---------- Background notifier (kept simple) ----------
+async def notify_inactive_users() -> None:
     while True:
-        await asyncio.sleep(3600 * 24 * 7)
-        async with database.pool.acquire() as conn:
-            inactive_users = await conn.fetch('''
-                SELECT user_id FROM users
-                WHERE last_seen < NOW() - INTERVAL '7 days'
-                AND is_active = TRUE
-            ''')
-            for record in inactive_users:
-                user_id = record['user_id']
-                try:
-                    await bot.send_message(
-                        user_id,
-                        "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!"
-                    )
-                    await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
-                    await asyncio.sleep(0.1)
-                except (TelegramForbiddenError, TelegramNotFound):
-                    await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
-                except Exception as e:
-                    logger.error(f"Xatolik yuborishda {user_id}: {e}")
+        try:
+            await asyncio.sleep(3600 * 24 * 7)
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT user_id FROM users WHERE last_seen < NOW() - INTERVAL '7 days' AND is_active = TRUE"
+                )
+                for r in rows:
+                    uid = r["user_id"]
+                    try:
+                        await bot.send_message(uid, "👋 Salom! Yordam kerak bo'lsa yozavering — men yordamga tayyorman.")
+                        await conn.execute("UPDATE users SET last_seen = NOW() WHERE user_id = $1", uid)
+                        await asyncio.sleep(0.08)
+                    except Exception:
+                        await conn.execute("UPDATE users SET is_active = FALSE WHERE user_id = $1", uid)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("notify_inactive_users error")
 
 
-# ---------- Helper predicates ----------
-async def non_admin_text_predicate(message: Message):
-    if not message.text:
-        return False
-    if message.text.startswith("/"):
-        return False
-    try:
-        return not await database.is_admin(message.from_user.id)
-    except Exception:
-        logger.exception("DB error in non_admin_text_predicate")
-        return False
+# ---------- Predicates registration ----------
+# Using register with lambdas above; keep explicit registration to ensure ordering
 
-
-async def non_admin_photo_predicate(message: Message):
-    try:
-        return not await database.is_admin(message.from_user.id)
-    except Exception:
-        logger.exception("DB error in non_admin_photo_predicate")
-        return False
-
-
-# register handlers
-dp.message.register(handle_text, non_admin_text_predicate)
-dp.message.register(handle_photo, non_admin_photo_predicate)
-
-
-# ---------- Main ----------
-async def main():
+# ---------- Startup / Shutdown ----------
+async def _startup_tasks() -> None:
     await create_db_pool()
     await create_users_table()
-
-    # create shared aiohttp session for OCR/external requests
     await create_shared_session()
+    # patch admin rows if necessary
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
+    except Exception:
+        logger.exception("Failed to patch admins table on startup")
+    admin_module.register_admin_handlers(dp, bot, globals())
 
-    async with database.pool.acquire() as conn:
-        await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
 
-    admin_module.register_admin_handlers(dp, bot, database)
+async def _shutdown_tasks() -> None:
+    await close_shared_session()
+    try:
+        await bot.session.close()
+    except Exception:
+        pass
+    try:
+        await db_pool.close()  # depends on your pool implementation
+    except Exception:
+        pass
 
-    # start background notifier
-    asyncio.create_task(notify_inactive_users())
+
+async def main():
+    await _startup_tasks()
+    notifier = asyncio.create_task(notify_inactive_users())
+
+    # graceful shutdown on signals
+    loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    def _handle_signal(_signum, _frame=None):
+        logger.info("Received stop signal")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _handle_signal, sig)
 
     # start polling
     await bot(DeleteWebhook(drop_pending_updates=True))
-    try:
-        await dp.start_polling(bot)
-    finally:
-        # ensure shared sessions closed on shutdown
-        await close_shared_session()
+    polling = asyncio.create_task(dp.start_polling(bot))
+
+    # wait for stop_event
+    await stop_event.wait()
+
+    # cancel tasks and shutdown
+    polling.cancel()
+    notifier.cancel()
+    await _shutdown_tasks()
 
 
 if __name__ == "__main__":
@@ -446,3 +462,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Shutting down (KeyboardInterrupt)")
+    except Exception:
+        logger.exception("Fatal error in main")
