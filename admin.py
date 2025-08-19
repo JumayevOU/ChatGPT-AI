@@ -21,7 +21,6 @@ from keyboards import admin_keyboard
 
 logger = logging.getLogger(__name__)
 
-
 class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
@@ -35,6 +34,7 @@ class AddAdminStates(StatesGroup):
 class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
+
 REMOVE_BLOCK_DAYS = 3
 
 
@@ -47,7 +47,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
       - get_admins(include_super=False) -> list[dict(...)]
       - get_admin_meta(user_id) -> dict or None
       - add_admin(user_id, username=None)
-      - add_superadmin(user_id, username=None)
+      - add_superadmin(user_id)
       - remove_admin(user_id)
       - get_all_users()
       - deactivate_user(user_id)
@@ -350,6 +350,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Xatolik yuz berdi: DB yoki server xatosi")
         finally:
             await state.clear()
+
     async def show_admins_list(message: Message):
         if not await require_admin_or_deny(message):
             return
@@ -422,6 +423,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await query.answer(f"ID: {meta['user_id']}\nUsername: @{username if username else '—'}", show_alert=True)
             except Exception:
                 pass
+
     async def start_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
@@ -527,7 +529,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             except Exception:
                 pass
 
-
     async def process_remove_admin(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             await state.clear()
@@ -566,7 +567,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await state.clear()
                 return
 
-
             if not requester_meta.get('is_super'):
                 created_at = requester_meta.get('created_at')
                 if created_at is None:
@@ -600,6 +600,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Xatolik yuz berdi: DB yoki server xatosi")
         finally:
             await state.clear()
+
 
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
