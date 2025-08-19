@@ -104,6 +104,17 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)  
+
+
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -129,7 +140,9 @@ async def handle_text(message: Message, state: FSMContext):
         for percent in range(10, 91, 10):
             filled = percent // 10
             progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%")
+            await loading.edit_text(
+                f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%"
+            )
             await asyncio.sleep(0.2)
 
         update_chat_history(chat_id, message.text)
@@ -139,16 +152,7 @@ async def handle_text(message: Message, state: FSMContext):
         await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.3)
         await bot.delete_message(chat_id, loading.message_id)
-async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
-    MAX_LENGTH = 4096
-    if len(text) <= MAX_LENGTH:
-        await message.answer(text, parse_mode=parse_mode)
-    else:
-        for i in range(0, len(text), MAX_LENGTH):
-            part = text[i:i+MAX_LENGTH]
-            await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)  
-
+        await send_long_message(message, reply, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
@@ -178,6 +182,17 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
 
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)
+
+
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -192,7 +207,10 @@ async def handle_photo(message: Message, state: FSMContext):
     if current_state:
         return
 
-    loading = await message.answer("🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
+    loading = await message.answer(
+        "🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%",
+        parse_mode="HTML"
+    )
     try:
         for percent in range(10, 51, 10):
             bar = "▰"*(percent//10) + "▱"*(10-percent//10)
@@ -229,15 +247,8 @@ async def handle_photo(message: Message, state: FSMContext):
         await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.5)
         await loading.delete()
-async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
-    MAX_LENGTH = 4096
-    if len(text) <= MAX_LENGTH:
-        await message.answer(text, parse_mode=parse_mode)
-    else:
-        for i in range(0, len(text), MAX_LENGTH):
-            part = text[i:i+MAX_LENGTH]
-            await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)  
+
+        await send_long_message(message, reply, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Rasm tahlili xatosi: {str(e)}")
@@ -247,7 +258,9 @@ async def send_long_message(message: Message, text: str, parse_mode: str = "Mark
             await loading.delete()
         except Exception as e:
             logger.error(f"Xabarni o'chirishda xato: {str(e)}")
+
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
+
 
 async def notify_inactive_users():
     while True:
