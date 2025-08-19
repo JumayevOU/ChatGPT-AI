@@ -16,7 +16,7 @@ admin_keyboard = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="➖ Admin o'chirish"),
-            KeyboardButton(text="👥 Adminlar ro'yxati")
         ],
     ], resize_keyboard=True, one_time_keyboard=False
 )
+
