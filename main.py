@@ -64,17 +64,36 @@ ADMIN_BUTTON_TEXTS = [
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    await save_user(message.from_user.id, message.from_user.username)
-    await log_user_activity(message.from_user.id, message.from_user.username, "start")
     try:
-        if await is_admin(message.from_user.id):
+        asyncio.create_task(save_user(message.from_user.id, message.from_user.username))
+        asyncio.create_task(log_user_activity(message.from_user.id, message.from_user.username, "start"))
+    except Exception:
+        logger.exception("DB task yaratishda xato (start)")
+
+    try:
+        is_admin_flag = False
+        is_super = False
+        try:
+            is_admin_flag = await is_admin(message.from_user.id)
+        except Exception:
+            logger.exception("is_admin tekshiruvida xato")
+            is_admin_flag = False
+
+        try:
+            is_super = await database.is_superadmin(message.from_user.id)
+        except Exception:
+            logger.exception("is_superadmin tekshiruvida xato")
+            is_super = False
+
+        if is_admin_flag or is_super:
             await message.answer(
                 "👋 <b>Admin panelga xush kelibsiz!</b>",
                 reply_markup=admin_keyboard
             )
             return
     except Exception:
-        logger.exception("is_admin tekshiruvida xato")
+        logger.exception("admin tekshiruvi mobaynida kutilmagan xato")
+
     await message.answer(
         "👋 <b>Keling tanishib olaylik!</b>\n\n"
         "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
