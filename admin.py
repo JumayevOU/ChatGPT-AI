@@ -516,32 +516,26 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
     
-    async def show_admins_list(message: Message):
-        if not await require_admin_or_deny(message):
-            return
+   @dp.callback_query_handler(lambda c: c.data.startswith("view_admin:"))
+async def process_view_admin(callback_query: CallbackQuery):
+    uid = int(callback_query.data.split(":")[1])
 
-        try:
-            admins = await database_module.get_admins(include_super=False)
-        except Exception:
-            logger.exception("DB error in show_admins_list")
-            await message.answer("❌ DB xatosi.")
-            return
+ 
+    admin = await database_module.get_admin_meta(uid)
+    if not admin:
+        await callback_query.answer("❌ Bunday admin topilmadi.", show_alert=True)
+        return
 
-        if not admins:
-            await message.answer("ℹ️ Hech qanday admin mavjud emas (superadmindan tashqari).")
-            return
+    text = (
+        f"👤 Admin profili\n\n"
+        f"🆔 ID: {admin['user_id']}\n"
+        f"👥 Username: @{admin['username'] or '—'}\n"
+        f"📅 Qo'shilgan: {admin['created_at']}"
+    )
 
-        rows = []
-        for a in admins:
-            uid = a.get('user_id')
-            uname = a.get('username')
-            label = f"{uid}"
-            if uname:
-                label += f" — @{uname}"
-            rows.append([InlineKeyboardButton(text=label, callback_data=f"view_admin:{uid}")])
 
-        kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        await message.answer("👥 Adminlar ro'yxati (ustiga bosing — profilni ko'rsatadi):", reply_markup=kb)
+    await callback_query.message.answer(text)
+    await callback_query.answer()  
             
             
             
@@ -559,3 +553,4 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
+
