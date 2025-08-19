@@ -46,12 +46,16 @@ async def create_users_table():
             );
         ''')
 
+        # Ensure column exists if table pre-existed without username/created_at
+        # Some Postgres versions may not support IF NOT EXISTS for ALTER; wrap in try/except.
         try:
             await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS username VARCHAR(100);")
             await conn.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();")
         except Exception:
+            # ignore if not supported; table was created above or already consistent
             pass
-    
+
+        # user_activity
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -62,6 +66,7 @@ async def create_users_table():
             );
         ''')
 
+# --- user functions ---
 
 async def save_user(user_id: int, username: str | None = None) -> None:
     """Insert or update user record (sets last_seen and is_active=True)."""
@@ -114,6 +119,7 @@ async def get_users_count() -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
+# --- admin functions ---
 
 async def is_admin(user_id: int) -> bool:
     """Return True if user_id exists in admins table."""
@@ -124,7 +130,24 @@ async def is_admin(user_id: int) -> bool:
         val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
         return bool(val)
 
-
+async def get_admins() -> List[Dict]:
+    """
+    Return list of admins as dicts:
+    [{'user_id': int, 'username': str|None, 'created_at': datetime}, ...]
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT user_id, username, created_at FROM admins ORDER BY user_id')
+        result = []
+        for r in rows:
+            result.append({
+                'user_id': r['user_id'],
+                'username': r.get('username'),
+                'created_at': r.get('created_at')
+            })
+        return result
 
 async def get_admin_meta(user_id: int) -> Optional[Dict]:
     """
@@ -157,23 +180,6 @@ async def add_admin(user_id: int, username: str | None = None) -> None:
             DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
         ''', user_id, username)
 
-async def get_admins(include_super: bool = True):
-    """
-    Return list of admins.
-    If include_super=False, superadmin (masalan user_id=1) ni tashlab ketadi.
-    """
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        if include_super:
-            rows = await conn.fetch('SELECT user_id, username, created_at FROM admins')
-        else:
-            rows = await conn.fetch('SELECT user_id, username, created_at FROM admins WHERE user_id != 1')
-        
-        return [dict(r) for r in rows]
-
-
 async def remove_admin(user_id: int) -> None:
     """Remove admin by user_id."""
     global pool
@@ -181,5 +187,3 @@ async def remove_admin(user_id: int) -> None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('DELETE FROM admins WHERE user_id = $1', user_id)
-
-
