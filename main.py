@@ -2,10 +2,9 @@ import asyncio
 import logging
 import random
 import os
-import html
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
 from aiogram.methods import DeleteWebhook
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -14,14 +13,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 import aiohttp
-
-# Mistral service: get_mistral_reply (blokli) va opsional get_mistral_reply_stream (async generator)
 from services.mistral_service import get_mistral_reply
-try:
-    from services.mistral_service import get_mistral_reply_stream
-except Exception:
-    get_mistral_reply_stream = None  # agar streaming funksiyasi yo'q bo'lsa fallback ishlaydi
-
 from utils.history import update_chat_history, clear_user_history
 
 load_dotenv()
@@ -112,79 +104,15 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-# -------------------------
-# Assistants / helpers
-# -------------------------
 async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
-    """
-    Agar javob uzun bo'lsa bo'lib yuboradi (Telegram limit: 4096).
-    """
     MAX_LENGTH = 4096
-    if not text:
-        await message.answer("", parse_mode=parse_mode)
-        return
-
     if len(text) <= MAX_LENGTH:
         await message.answer(text, parse_mode=parse_mode)
     else:
         for i in range(0, len(text), MAX_LENGTH):
             part = text[i:i+MAX_LENGTH]
             await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)  # flood limitdan saqlanish uchun
-
-def chunk_text_for_editing(text: str, chunk_size: int = 400):
-    import re
-    if not text:
-        return []
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    parts = []
-    cur = ""
-    for s in sentences:
-        if len(cur) + len(s) + 1 <= chunk_size:
-            cur = (cur + " " + s).strip()
-        else:
-            if cur:
-                parts.append(cur)
-            if len(s) > chunk_size:
-                for i in range(0, len(s), chunk_size):
-                    parts.append(s[i:i+chunk_size])
-                cur = ""
-            else:
-                cur = s
-    if cur:
-        parts.append(cur)
-    return parts
-
-def _normalize_stream_chunk(chunk) -> str:
-    if chunk is None:
-        return ""
-    if isinstance(chunk, str):
-        return chunk
-    if isinstance(chunk, dict):
-        for key in ("delta", "text", "content", "message", "chunk"):
-            if key in chunk and chunk[key]:
-                return str(chunk[key])
-        return " ".join(str(v) for v in chunk.values())
-    return str(chunk)
-
-# -------------------------
-# Handlers
-# -------------------------
-async def send_long_message(message: Message, text: str, parse_mode: str | None = None):
-    """
-    Telegram xabar cheklovini hisobga oladi (4096). Default parse_mode=None (plain text) - xavfsiz.
-    """
-    MAX_LENGTH = 4096
-    if text is None:
-        text = ""
-
-    if len(text) <= MAX_LENGTH:
-        await message.answer(text, parse_mode=parse_mode)
-    else:
-        for i in range(0, len(text), MAX_LENGTH):
-            part = text[i:i+MAX_LENGTH]
-            await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2)  
 
 
 async def handle_text(message: Message, state: FSMContext):
@@ -207,98 +135,62 @@ async def handle_text(message: Message, state: FSMContext):
     if current_state:
         return
 
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%", parse_mode="HTML")
+    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
     try:
         for percent in range(10, 91, 10):
             filled = percent // 10
             progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%", parse_mode="HTML")
-            await asyncio.sleep(0.15)
+            await loading.edit_text(
+                f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%"
+            )
+            await asyncio.sleep(0.2)
 
         update_chat_history(chat_id, message.text)
+        reply = await get_mistral_reply(chat_id, message.text)
+        update_chat_history(chat_id, reply, role="assistant")
 
-        final_reply = ""
-        if get_mistral_reply_stream:
-            buffer = ""
-            last_edit_time = 0.0
-            EDIT_INTERVAL = 0.55
-            try:
-                async for chunk in get_mistral_reply_stream(chat_id, message.text):
-                    text_part = _normalize_stream_chunk(chunk)
-                    if not text_part:
-                        continue
-                    buffer += text_part
-
-                    now = asyncio.get_event_loop().time()
-                    should_edit = False
-                    if buffer and buffer[-1].isspace():
-                        should_edit = True
-                    if any(buffer.endswith(p) for p in (".", "!", "?", "\n")):
-                        should_edit = True
-                    if now - last_edit_time > EDIT_INTERVAL:
-                        should_edit = True
-
-                    if should_edit:
-                        preview = buffer
-                        if len(preview) > 3800:
-                            preview = preview[-3800:]
-                        # escape preview for HTML to avoid parse errors
-                        escaped = html.escape(preview)
-                        try:
-                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
-                        except Exception:
-                            pass
-                        last_edit_time = now
-
-                final_reply = buffer
-            except Exception as e:
-                logger.exception("Streaming dan o'qishda xato: %s", e)
-                try:
-                    final_reply = await get_mistral_reply(chat_id, message.text)
-                except Exception as ee:
-                    logger.exception("Fallback get_mistral_reply xatolik: %s", ee)
-                    final_reply = ""
-        else:
-            try:
-                final_reply = await get_mistral_reply(chat_id, message.text)
-            except Exception as e:
-                logger.exception("get_mistral_reply xatosi: %s", e)
-                final_reply = ""
-
-            parts = chunk_text_for_editing(final_reply, chunk_size=600)
-            display_buf = ""
-            for part in parts:
-                display_buf = (display_buf + " " + part).strip()
-                preview = display_buf
-                if len(preview) > 3800:
-                    preview = preview[-3800:]
-                escaped = html.escape(preview)
-                try:
-                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
-                except Exception:
-                    pass
-                await asyncio.sleep(0.45)
-
-        update_chat_history(chat_id, final_reply, role="assistant")
-        try:
-            await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-            await asyncio.sleep(0.25)
-            await loading.delete()
-        except Exception:
-            pass
-
-        # plain text yuboramiz — parse_mode=None xavfsiz
-        await send_long_message(message, final_reply, parse_mode=None)
-
+        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.3)
+        await bot.delete_message(chat_id, loading.message_id)
+        await send_long_message(message, reply, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!", parse_mode="HTML")
-            await asyncio.sleep(1.5)
-            await loading.delete()
-        except Exception:
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
+            await asyncio.sleep(2)
+            await bot.delete_message(chat_id, loading.message_id)
+        except:
             pass
-        await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
+        await message.answer(
+            random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
+        )
+
+async def extract_text_from_image(image_bytes: bytes) -> str:
+    url = "https://api.ocr.space/parse/image"
+    headers = {"apikey": os.getenv("OCR_API_KEY")}
+    data = {"language": "eng", "isOverlayRequired": False}
+    try:
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+            for key, val in data.items():
+                form.add_field(key, str(val))
+            async with session.post(url, data=form, headers=headers) as resp:
+                result = await resp.json()
+                return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
+    except Exception as e:
+        logger.error(f"OCR xatosi: {str(e)}")
+        return ""
+
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)
 
 
 async def handle_photo(message: Message, state: FSMContext):
@@ -322,8 +214,11 @@ async def handle_photo(message: Message, state: FSMContext):
     try:
         for percent in range(10, 51, 10):
             bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(f"🖼️ <b>Rasm tahlil qilinmoqda...</b>\n{bar} {percent}%", parse_mode="HTML")
-            await asyncio.sleep(0.18)
+            await loading.edit_text(
+                f"🖼️ <b>Rasm tahlil qilinmoqda...</b>\n{bar} {percent}%",
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.3)
 
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -331,98 +226,41 @@ async def handle_photo(message: Message, state: FSMContext):
         text = await extract_text_from_image(image_bytes.read())
 
         if not text or len(text.strip()) < 3:
-            try:
-                await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-                await asyncio.sleep(0.5)
-                await loading.delete()
-            except Exception:
-                pass
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
+            await asyncio.sleep(0.5)
+            await loading.delete()
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
         for percent in range(60, 91, 10):
             bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%", parse_mode="HTML")
-            await asyncio.sleep(0.18)
+            await loading.edit_text(
+                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%",
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(0.3)
 
         update_chat_history(chat_id, text)
+        reply = await get_mistral_reply(chat_id, text)
+        update_chat_history(chat_id, reply, role="assistant")
 
-        final_reply = ""
-        if get_mistral_reply_stream:
-            buffer = ""
-            last_edit_time = 0.0
-            EDIT_INTERVAL = 0.55
-            try:
-                async for chunk in get_mistral_reply_stream(chat_id, text):
-                    text_part = _normalize_stream_chunk(chunk)
-                    if not text_part:
-                        continue
-                    buffer += text_part
-                    now = asyncio.get_event_loop().time()
-                    should_edit = False
-                    if buffer and buffer[-1].isspace():
-                        should_edit = True
-                    if any(buffer.endswith(p) for p in (".", "!", "?", "\n")):
-                        should_edit = True
-                    if now - last_edit_time > EDIT_INTERVAL:
-                        should_edit = True
-                    if should_edit:
-                        preview = buffer
-                        if len(preview) > 3800:
-                            preview = preview[-3800:]
-                        escaped = html.escape(preview)
-                        try:
-                            await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
-                        except Exception:
-                            pass
-                        last_edit_time = now
-                final_reply = buffer
-            except Exception as e:
-                logger.exception("Streaming xatosi (photo): %s", e)
-                try:
-                    final_reply = await get_mistral_reply(chat_id, text)
-                except Exception as ee:
-                    logger.exception("Fallback get_mistral_reply (photo) xatosi: %s", ee)
-                    final_reply = ""
-        else:
-            try:
-                final_reply = await get_mistral_reply(chat_id, text)
-            except Exception as e:
-                logger.exception("get_mistral_reply (photo) xatosi: %s", e)
-                final_reply = ""
-            parts = chunk_text_for_editing(final_reply, chunk_size=600)
-            display_buf = ""
-            for part in parts:
-                display_buf = (display_buf + " " + part).strip()
-                preview = display_buf
-                if len(preview) > 3800:
-                    preview = preview[-3800:]
-                escaped = html.escape(preview)
-                try:
-                    await loading.edit_text(f"🧠 <b>Javob:</b>\n\n<pre>{escaped}</pre>", parse_mode="HTML")
-                except Exception:
-                    pass
-                await asyncio.sleep(0.45)
+        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
+        await asyncio.sleep(0.5)
+        await loading.delete()
 
-        update_chat_history(chat_id, final_reply, role="assistant")
-        try:
-            await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%", parse_mode="HTML")
-            await asyncio.sleep(0.25)
-            await loading.delete()
-        except Exception:
-            pass
-
-        await send_long_message(message, final_reply, parse_mode=None)
+        await send_long_message(message, reply, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Rasm tahlili xatosi: {str(e)}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!", parse_mode="HTML")
+            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
             await asyncio.sleep(2)
             await loading.delete()
         except Exception as e:
             logger.error(f"Xabarni o'chirishda xato: {str(e)}")
+
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
+
 
 async def notify_inactive_users():
     while True:
