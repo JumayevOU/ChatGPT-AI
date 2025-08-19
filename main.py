@@ -15,10 +15,11 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 
-from utils.cleaning import clean_response
 from services.mistral_service import get_mistral_reply
-from utils.history import add_message, get_history, clear_history
+from utils.cleaning import clean_response
 from utils.ocr_utils import extract_text_from_image
+from utils.history import update_chat_history, clear_user_history
+
 from database import (
     create_db_pool,
     create_users_table,
@@ -58,10 +59,8 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
-
 
 async def _progress_editor(msg, stop_event: asyncio.Event, base_text: str):
     try:
@@ -77,7 +76,6 @@ async def _progress_editor(msg, stop_event: asyncio.Event, base_text: str):
             await asyncio.sleep(0.4)
     except asyncio.CancelledError:
         pass
-
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
@@ -124,7 +122,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -155,11 +152,11 @@ async def handle_text(message: Message, state: FSMContext):
     progress_task = asyncio.create_task(_progress_editor(loading, stop_evt, "🧠 <b>Savolingiz tahlil qilinmoqda</b>"))
 
     try:
-        add_message(chat_id, "user", message.text)
+        update_chat_history(chat_id, message.text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
 
         reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
-        add_message(chat_id, "assistant", reply)
+        update_chat_history(chat_id, reply, role="assistant")
 
         stop_evt.set()
         try:
@@ -202,7 +199,6 @@ async def handle_text(message: Message, state: FSMContext):
         if not progress_task.done():
             progress_task.cancel()
 
-
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -231,7 +227,7 @@ async def handle_photo(message: Message, state: FSMContext):
         file_bytes = await bot.download_file(file.file_path)
         raw_bytes = file_bytes.read() if hasattr(file_bytes, "read") else file_bytes
         try:
-            text = await asyncio.wait_for(extract_text_from_image(raw_bytes), timeout=OCR_TIMEOUT)
+            text = await asyncio.wait_for(extract_text_from_image(raw_bytes, timeout=OCR_TIMEOUT), timeout=OCR_TIMEOUT)
         except asyncio.TimeoutError:
             text = ""
 
@@ -249,11 +245,11 @@ async def handle_photo(message: Message, state: FSMContext):
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
-        add_message(chat_id, "user", text)
+        update_chat_history(chat_id, text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(text)
         try:
             reply = await asyncio.wait_for(get_mistral_reply(chat_id, prompt_with_emoji), timeout=MISTRAL_TIMEOUT)
-            add_message(chat_id, "assistant", reply)
+            update_chat_history(chat_id, reply, role="assistant")
 
             stop_evt.set()
             try:
@@ -296,7 +292,6 @@ async def handle_photo(message: Message, state: FSMContext):
         if not progress_task.done():
             progress_task.cancel()
 
-
 async def notify_inactive_users(stop_event: asyncio.Event):
     try:
         while not stop_event.is_set():
@@ -329,7 +324,6 @@ async def notify_inactive_users(stop_event: asyncio.Event):
                 continue
     except asyncio.CancelledError:
         pass
-
 
 async def main():
     if not BOT_TOKEN:
@@ -402,7 +396,6 @@ async def main():
                         pass
         except Exception:
             logger.exception("Error closing DB pool")
-
 
 if __name__ == "__main__":
     try:
