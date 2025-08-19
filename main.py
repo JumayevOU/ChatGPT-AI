@@ -139,7 +139,16 @@ async def handle_text(message: Message, state: FSMContext):
         await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.3)
         await bot.delete_message(chat_id, loading.message_id)
-        await message.answer(reply, parse_mode="Markdown")
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)  
+
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
@@ -220,7 +229,16 @@ async def handle_photo(message: Message, state: FSMContext):
         await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
         await asyncio.sleep(0.5)
         await loading.delete()
-        await message.answer(reply, parse_mode="Markdown")
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)  
+
     except Exception as e:
         logger.error(f"Rasm tahlili xatosi: {str(e)}")
         try:
