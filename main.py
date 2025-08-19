@@ -2,10 +2,8 @@ import asyncio
 import logging
 import random
 import os
-import time
-from typing import Optional, Any
+from typing import Any, Optional
 
-import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
@@ -45,6 +43,7 @@ NOTIFY_INACTIVE_INTERVAL_SECONDS = 3600 * 24 * 7
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Reuse one session object (AiohttpSession wraps an aiohttp.ClientSession)
 session = AiohttpSession()
 bot = Bot(
     token=BOT_TOKEN,
@@ -60,10 +59,8 @@ error_messages = [
     "🙃 Hmm... Nimadir noto'g'ri ketdi, lekin o'zimni yaxshi his qilyapman!",
 ]
 
-
 def add_emoji_instruction_to_prompt(text: str) -> str:
     return f"{text}\n\nIltimos, javobni har doim mavzuga mos emojilar bilan yoz."
-
 
 def _format_progress_bar(percent: int, length: int = 10) -> str:
     filled = max(0, min(length, percent * length // 100))
@@ -79,19 +76,25 @@ async def _progress_updater(msg: Message, stop_event: asyncio.Event, base_text: 
     try:
         percent = 0
         last_sent = -1
+        # Use a lightweight RNG to vary increments a little
         while not stop_event.is_set():
+            # Easing towards 95
             if percent < 95:
+                # small random increment, faster at the beginning, slower near cap
                 step = random.randint(3, 8)
                 percent = min(95, percent + step)
+            # Only edit if percent changed (prevents unnecessary API calls)
             if percent != last_sent:
                 last_sent = percent
                 text = f"{base_text} {_format_progress_bar(percent)} {percent}%"
                 try:
                     await msg.edit_text(text, parse_mode="HTML")
                 except Exception:
+                    # Ignore edit errors (message deleted, flood control, etc.)
                     pass
             await asyncio.sleep(update_interval)
     except asyncio.CancelledError:
+        # When cancelled we'll just exit; caller is responsible for finalizing the UI
         return
 
 
@@ -115,12 +118,16 @@ async def _run_with_progress(
     progress_task = asyncio.create_task(_progress_updater(loading_message, stop_event, base_text))
 
     try:
+        # Wait for the reply task, with provided timeout.
         result = await asyncio.wait_for(reply_coro, timeout=timeout)
+        # Signal progress to finish
         stop_event.set()
+        # show final 100% before removing
         try:
             await loading_message.edit_text(f"{base_text} {_format_progress_bar(100)} 100%", parse_mode="HTML")
         except Exception:
             pass
+        # small pause to let user see 100%
         await asyncio.sleep(0.25)
         try:
             await loading_message.delete()
@@ -128,11 +135,14 @@ async def _run_with_progress(
             pass
         return result
     except Exception:
+        # ensure progress stops and caller handles the exception
         stop_event.set()
+        # attempt to set an error state on the loading message
         try:
             await loading_message.edit_text("❌ " + f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
         except Exception:
             pass
+        # ensure we cancel the progress task
         if not progress_task.done():
             progress_task.cancel()
         raise
@@ -141,7 +151,10 @@ async def _run_with_progress(
             progress_task.cancel()
 
 
-@dp.message(CommandStart())
+# ---------------------------
+# Handlers (no decorators)
+# ---------------------------
+
 async def handle_start(message: Message):
     try:
         asyncio.create_task(save_user(message.from_user.id, message.from_user.username))
@@ -149,6 +162,7 @@ async def handle_start(message: Message):
     except Exception:
         logger.exception("DB task yaratishda xato (start)")
 
+    # Check admin quickly (best-effort)
     is_admin_flag = False
     is_super = False
     try:
@@ -178,7 +192,6 @@ async def handle_start(message: Message):
     )
 
 
-@dp.message()
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -190,12 +203,14 @@ async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
+    # Non-blocking DB logging
     try:
         asyncio.create_task(save_user(user_id, message.from_user.username))
         asyncio.create_task(log_user_activity(user_id, message.from_user.username, "text_message"))
     except Exception:
         logger.exception("DB task yaratishda xato (text)")
 
+    # Avoid interfering with FSM states
     try:
         current_state = await state.get_state()
     except Exception:
@@ -206,18 +221,24 @@ async def handle_text(message: Message, state: FSMContext):
     base_text = "🧠 <b>Savolingiz tahlil qilinmoqda</b>"
     loading = await message.answer(f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
 
+    # record user message to history before sending to model (optional)
+    update_chat_history(chat_id, message.text)
+
     prompt_with_emoji = add_emoji_instruction_to_prompt(message.text)
+    # Start reply task without awaiting so we can show progress
     reply_task = asyncio.create_task(get_mistral_reply(chat_id, prompt_with_emoji))
 
     try:
+        # Use helper to show progress while waiting for reply
         reply = await _run_with_progress(reply_task, loading, base_text, timeout=MISTRAL_TIMEOUT)
-        update_chat_history(chat_id, message.text)
+        # update history after successful reply
         update_chat_history(chat_id, reply, role="assistant")
 
         cleaned = clean_response(reply)
         await message.answer(cleaned)
     except asyncio.TimeoutError:
         logger.error("Mistral so'rovi timeout")
+        # reply_task may still be running; cancel to free resources
         if not reply_task.done():
             reply_task.cancel()
         try:
@@ -240,7 +261,6 @@ async def handle_text(message: Message, state: FSMContext):
         await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
 
 
-@dp.message(content_types=["photo"])
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -261,21 +281,30 @@ async def handle_photo(message: Message, state: FSMContext):
     base_text = "🖼️ <b>Rasm tahlil qilinmoqda...</b>"
     loading = await message.answer(f"{base_text} {_format_progress_bar(0)} 0%", parse_mode="HTML")
 
+    # Download highest-res photo
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         file_bytes = await bot.download_file(file.file_path)
         raw_bytes = file_bytes.read() if hasattr(file_bytes, "read") else file_bytes
 
+        # OCR with timeout, run concurrently with progress UI
         ocr_task = asyncio.create_task(extract_text_from_image(raw_bytes, timeout=OCR_TIMEOUT))
         try:
             text = await _run_with_progress(ocr_task, loading, base_text, timeout=OCR_TIMEOUT)
         except asyncio.TimeoutError:
+            # OCR timed out
             if not ocr_task.done():
                 ocr_task.cancel()
-            await loading.edit_text("❌ OCR juda uzoq davom etdi.", parse_mode="HTML")
+            try:
+                await loading.edit_text("❌ OCR juda uzoq davom etdi.", parse_mode="HTML")
+            except Exception:
+                pass
             await asyncio.sleep(0.3)
-            await loading.delete()
+            try:
+                await loading.delete()
+            except Exception:
+                pass
             await message.answer("❗ Rasmni o'qib bo'lmadi — iltimos, boshqa rasm yuboring.")
             return
 
@@ -292,6 +321,7 @@ async def handle_photo(message: Message, state: FSMContext):
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
+        # Now call Mistral for reply
         update_chat_history(chat_id, text)
         prompt_with_emoji = add_emoji_instruction_to_prompt(text)
         reply_task = asyncio.create_task(get_mistral_reply(chat_id, prompt_with_emoji))
@@ -389,6 +419,8 @@ async def main():
             logger.exception("DB error in non_admin_photo_predicate")
             return False
 
+    # Register handlers with predicates
+    dp.message.register(handle_start, CommandStart())
     dp.message.register(handle_text, non_admin_text_predicate)
     dp.message.register(handle_photo, non_admin_photo_predicate)
 
