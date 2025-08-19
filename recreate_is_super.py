@@ -12,7 +12,7 @@ async def recreate():
 
     # yangi jadval yaratish
     await conn.execute("""
-        CREATE TABLE is_super (
+        CREATE TABLE super_admin (
             id BIGINT PRIMARY KEY
         )
     """)
