@@ -516,8 +516,8 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
     
-   @dp.callback_query_handler(lambda c: c.data.startswith("view_admin:"))
-async def process_view_admin(callback_query: CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith("show_admins_list:"))
+async def show_admins_list(callback_query: CallbackQuery):
     uid = int(callback_query.data.split(":")[1])
 
  
@@ -553,4 +553,5 @@ async def process_view_admin(callback_query: CallbackQuery):
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
+
 
