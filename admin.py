@@ -27,16 +27,21 @@ class PMStates(StatesGroup):
     waiting_for_user = State()
     waiting_for_message = State()
 
+
 class BroadcastStates(StatesGroup):
     waiting_for_broadcast_text = State()
+
 
 class AddAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
+
 class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
+
 REMOVE_BLOCK_DAYS = 3
+
 
 def register_admin_handlers(dp, bot: Bot, database_module):
     """
@@ -117,10 +122,13 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 pass
             await asyncio.sleep(0.05)
 
-        await progress_message.edit_text(
-            f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
-            f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
-        )
+        try:
+            await progress_message.edit_text(
+                f"✅ {success} ta foydalanuvchiga xabar yuborildi.\n"
+                f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
+            )
+        except Exception:
+            pass
         await state.clear()
 
     async def cmd_pm(message: Message, state: FSMContext):
@@ -190,7 +198,10 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await progress_message.edit_text("📤 Xabar yuborildi ✅")
         except Exception as e:
             logger.exception("Send PM error")
-            await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
+            try:
+                await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
+            except Exception:
+                pass
 
         await state.clear()
 
@@ -247,7 +258,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         )
         await message.answer(response, parse_mode="HTML")
 
-        async def handle_users_command(message: Message):
+    async def handle_users_command(message: Message):
         if not await require_admin_or_deny(message):
             return
 
@@ -317,7 +328,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
         )
         await message.answer(text, parse_mode="HTML")
-
 
     async def handle_dump_users(message: Message):
         if not await require_admin_or_deny(message):
@@ -397,7 +407,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             else:
                 await message.answer("ℹ️ Hech qanday admin mavjud emas.")
             return
-
 
         rows = []
         for a in admins:
@@ -582,6 +591,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Xatolik yuz berdi: DB yoki server xatosi")
         finally:
             await state.clear()
+
 
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
