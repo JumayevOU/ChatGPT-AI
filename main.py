@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 import aiohttp
+
 from services.mistral_service import get_mistral_reply
 from utils.history import update_chat_history, clear_user_history
 
@@ -59,6 +60,25 @@ ADMIN_BUTTON_TEXTS = [
     "➕ Admin qo'shish",
 ]
 
+# ---------- Qisqa va tez javob instruktsiyasi ----------
+CONCISE_INSTRUCTION = (
+    "Siz faqat QISQA VA TEZ javob bering. "
+    "Javob 1-3 ta jumla bo'lsin; ortiqcha tushuntirishlardan voz keching. "
+    "Kerak bo'lsa, maksimal 2 ta punkt bilan cheklangan ro'yxat bering."
+)
+# -------------------------------------------------------
+
+async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
+    MAX_LENGTH = 4096
+    if len(text) <= MAX_LENGTH:
+        await message.answer(text, parse_mode=parse_mode)
+    else:
+        for i in range(0, len(text), MAX_LENGTH):
+            part = text[i:i+MAX_LENGTH]
+            await message.answer(part, parse_mode=parse_mode)
+            await asyncio.sleep(0.2)
+
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     try:
@@ -104,16 +124,6 @@ async def handle_start(message: Message):
         "✍️ Savolingizni yozing men sizga javob berishga harakat qilaman. Boshladikmi?"
     )
 
-async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
-    MAX_LENGTH = 4096
-    if len(text) <= MAX_LENGTH:
-        await message.answer(text, parse_mode=parse_mode)
-    else:
-        for i in range(0, len(text), MAX_LENGTH):
-            part = text[i:i+MAX_LENGTH]
-            await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)  
-
 
 async def handle_text(message: Message, state: FSMContext):
     if not message.text:
@@ -135,39 +145,41 @@ async def handle_text(message: Message, state: FSMContext):
     if current_state:
         return
 
-    loading = await message.answer("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▱▱▱▱▱▱▱▱▱▱ 0%")
-    try:
-        for percent in range(10, 91, 10):
-            filled = percent // 10
-            progress_bar = "▰" * filled + "▱" * (10 - filled)
-            await loading.edit_text(
-                f"🧠 <b>Savolingiz tahlil qilinmoqda</b> {progress_bar} {percent}%"
-            )
-            await asyncio.sleep(0.2)
+    # Bitta statik loading xabari
+    loading = await message.answer("🧠 Savolingiz tahlil qilinmoqda...")
 
+    try:
         update_chat_history(chat_id, message.text)
-        reply = await get_mistral_reply(chat_id, message.text)
+
+        # AI promptga qisqa instruktsiyani qo'shamiz
+        prompt = CONCISE_INSTRUCTION + "\n\n" + message.text
+
+        # AI chaqiruvini fon task sifatida ishga tushiramiz va natijani kutamiz
+        reply_task = asyncio.create_task(get_mistral_reply(chat_id, prompt))
+        reply = await reply_task
+
         update_chat_history(chat_id, reply, role="assistant")
 
-        await loading.edit_text("🧠 <b>Savolingiz tahlil qilinmoqda</b> ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.3)
-        await bot.delete_message(chat_id, loading.message_id)
+        # loadingni o'chirib, javobni yuboramiz
+        try:
+            await bot.delete_message(chat_id, loading.message_id)
+        except Exception:
+            pass
+
         await send_long_message(message, reply, parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"[Xatolik] {e}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
-            await asyncio.sleep(2)
             await bot.delete_message(chat_id, loading.message_id)
-        except:
+        except Exception:
             pass
-        await message.answer(
-            random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?"
-        )
+        await message.answer(random.choice(error_messages) + "\n\n🤔 Yana boshqa savol berib ko'rasizmi?")
+
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
-    headers = {"apikey": os.getenv("OCR_API_KEY")}
+    headers = {"apikey": OCR_API_KEY}
     data = {"language": "eng", "isOverlayRequired": False}
     try:
         async with aiohttp.ClientSession() as session:
@@ -181,16 +193,6 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
     except Exception as e:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
-
-async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
-    MAX_LENGTH = 4096
-    if len(text) <= MAX_LENGTH:
-        await message.answer(text, parse_mode=parse_mode)
-    else:
-        for i in range(0, len(text), MAX_LENGTH):
-            part = text[i:i+MAX_LENGTH]
-            await message.answer(part, parse_mode=parse_mode)
-            await asyncio.sleep(0.2)
 
 
 async def handle_photo(message: Message, state: FSMContext):
@@ -207,58 +209,44 @@ async def handle_photo(message: Message, state: FSMContext):
     if current_state:
         return
 
-    loading = await message.answer(
-        "🖼️ <b>Rasm tahlil qilinmoqda...</b>\n▱▱▱▱▱▱▱▱▱▱ 0%",
-        parse_mode="HTML"
-    )
-    try:
-        for percent in range(10, 51, 10):
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🖼️ <b>Rasm tahlil qilinmoqda...</b>\n{bar} {percent}%",
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.3)
+    # Bitta statik loading xabari
+    loading = await message.answer("🧠 Savolingiz tahlil qilinmoqda...")
 
+    try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         image_bytes = await bot.download_file(file.file_path)
         text = await extract_text_from_image(image_bytes.read())
 
         if not text or len(text.strip()) < 3:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ 100%")
-            await asyncio.sleep(0.5)
-            await loading.delete()
+            try:
+                await bot.delete_message(chat_id, loading.message_id)
+            except Exception:
+                pass
             await message.answer("❗ Rasmda aniq matn topilmadi.")
             return
 
-        for percent in range(60, 91, 10):
-            bar = "▰"*(percent//10) + "▱"*(10-percent//10)
-            await loading.edit_text(
-                f"🧠 <b>AI javob yozmoqda...</b>\n{bar} {percent}%",
-                parse_mode="HTML"
-            )
-            await asyncio.sleep(0.3)
-
         update_chat_history(chat_id, text)
-        reply = await get_mistral_reply(chat_id, text)
+
+        prompt = CONCISE_INSTRUCTION + "\n\n" + text
+        reply_task = asyncio.create_task(get_mistral_reply(chat_id, prompt))
+        reply = await reply_task
+
         update_chat_history(chat_id, reply, role="assistant")
 
-        await loading.edit_text("✅ ▰▰▰▰▰▰▰▰▰▰ 100%")
-        await asyncio.sleep(0.5)
-        await loading.delete()
+        try:
+            await bot.delete_message(chat_id, loading.message_id)
+        except Exception:
+            pass
 
         await send_long_message(message, reply, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Rasm tahlili xatosi: {str(e)}")
         try:
-            await loading.edit_text("❌ ▰▰▰▰▰▰▰▰▰▰ Xatolik!")
-            await asyncio.sleep(2)
-            await loading.delete()
-        except Exception as e:
-            logger.error(f"Xabarni o'chirishda xato: {str(e)}")
-
+            await bot.delete_message(chat_id, loading.message_id)
+        except Exception:
+            pass
         await message.answer("❌ Rasmni tahlil qilishda xatolik yuz berdi.")
 
 
@@ -284,6 +272,7 @@ async def notify_inactive_users():
                     await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
                 except Exception as e:
                     logger.error(f"Xatolik yuborishda {user_id}: {e}")
+
 
 async def main():
     await create_db_pool()
@@ -316,6 +305,7 @@ async def main():
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
