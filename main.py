@@ -61,11 +61,11 @@ ADMIN_BUTTON_TEXTS = [
 ]
 
 # ---------- Qisqa va tez javob instruktsiyasi ----------
-CONCISE_INSTRUCTION = (
-    "Siz faqat QISQA VA TEZ javob bering. "
-    "Javob 1-3 ta jumla bo'lsin; ortiqcha tushuntirishlardan voz keching. "
-    "Kerak bo'lsa, maksimal 2 ta punkt bilan cheklangan ro'yxat bering."
-)
+#CONCISE_INSTRUCTION = (
+    #"Siz faqat QISQA VA TEZ javob bering. "
+    #"Javob 1-3 ta jumla bo'lsin; ortiqcha tushuntirishlardan voz keching. "
+    #"Kerak bo'lsa, maksimal 2 ta punkt bilan cheklangan ro'yxat bering."
+#)
 # -------------------------------------------------------
 
 async def send_long_message(message: Message, text: str, parse_mode: str = "Markdown"):
