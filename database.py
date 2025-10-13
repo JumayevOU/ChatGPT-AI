@@ -4,7 +4,7 @@ import asyncpg
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo  # Python 3.9+ (standard library)
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -153,7 +153,7 @@ def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
 async def get_all_users() -> List[Dict[str, Any]]:
     """
     Return all active users with basic metadata.
-    Dates are formatted for Asia/Tashkent.
+    Includes both raw datetimes and formatted strings for display.
     """
     global pool
     if pool is None:
@@ -167,12 +167,18 @@ async def get_all_users() -> List[Dict[str, Any]]:
         ''')
         result = []
         for r in rows:
+            created_raw = r.get('created_at')
+            last_raw = r.get('last_seen')
             result.append({
                 'user_id': r['user_id'],
                 'username': r.get('username'),
                 'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
-                'created_at': format_dt_for_tashkent(r.get('created_at')),
-                'last_seen': format_dt_for_tashkent(r.get('last_seen'))
+                # raw datetimes for program logic (may be tz-aware)
+                'created_at_raw': created_raw,
+                'last_seen_raw': last_raw,
+                # formatted strings for display
+                'created_at': format_dt_for_tashkent(created_raw),
+                'last_seen': format_dt_for_tashkent(last_raw)
             })
         return result
 
@@ -190,7 +196,7 @@ async def get_user_by_username(username: str) -> Optional[int]:
 
 async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
     """
-    Return user row by user_id with formatted dates, or None.
+    Return user row by user_id with both raw datetimes and formatted strings, or None.
     """
     global pool
     if pool is None:
@@ -203,12 +209,16 @@ async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
         ''', user_id)
         if not row:
             return None
+        created_raw = row.get('created_at')
+        last_raw = row.get('last_seen')
         return {
             'user_id': row['user_id'],
             'username': row.get('username'),
             'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}",
-            'created_at': format_dt_for_tashkent(row.get('created_at')),
-            'last_seen': format_dt_for_tashkent(row.get('last_seen')),
+            'created_at_raw': created_raw,
+            'last_seen_raw': last_raw,
+            'created_at': format_dt_for_tashkent(created_raw),
+            'last_seen': format_dt_for_tashkent(last_raw),
             'is_active': bool(row.get('is_active'))
         }
 
@@ -254,7 +264,7 @@ async def get_users_count() -> int:
 
 
 # -------------------------
-# Admins / superadmin helpers (kept but improved display)
+# Admins / superadmin helpers
 # -------------------------
 async def is_admin(user_id: int) -> bool:
     global pool
@@ -266,6 +276,9 @@ async def is_admin(user_id: int) -> bool:
 
 
 async def get_admins() -> List[Dict[str, Any]]:
+    """
+    Return admins with created_at formatted (suitable for displaying in lists).
+    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -273,16 +286,21 @@ async def get_admins() -> List[Dict[str, Any]]:
         rows = await conn.fetch('SELECT user_id, username, created_at FROM admins ORDER BY user_id')
         result = []
         for r in rows:
+            created_raw = r.get('created_at')
             result.append({
                 'user_id': r['user_id'],
                 'username': r.get('username'),
                 'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
-                'created_at': format_dt_for_tashkent(r.get('created_at'))
+                'created_at': format_dt_for_tashkent(created_raw)
             })
         return result
 
 
 async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Return admin meta. For program logic 'created_at' is raw datetime (useful for comparisons).
+    Also return 'created_at_str' formatted for display.
+    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -290,11 +308,15 @@ async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
         row = await conn.fetchrow('SELECT user_id, username, created_at FROM admins WHERE user_id = $1', user_id)
         if not row:
             return None
+        created_raw = row.get('created_at')
         return {
             'user_id': row['user_id'],
             'username': row.get('username'),
-            'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}",
-            'created_at': format_dt_for_tashkent(row.get('created_at'))
+            # raw datetime for comparisons (this keeps admin.py logic working)
+            'created_at': created_raw,
+            # human-friendly formatted string
+            'created_at_str': format_dt_for_tashkent(created_raw),
+            'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}"
         }
 
 
