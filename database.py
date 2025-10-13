@@ -132,6 +132,7 @@ def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
     """
     Convert a timezone-aware or naive datetime (assumed UTC if naive)
     to Asia/Tashkent and return formatted string. Return None if dt is None.
+    Always appends explicit 'Asia/Tashkent' label to avoid '+05' only.
     """
     if dt is None:
         return None
@@ -144,7 +145,8 @@ def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
         # fallback: attach UTC then convert
         dt = dt.replace(tzinfo=timezone.utc)
         dt_tashkent = dt.astimezone(TASHKENT_TZ)
-    return dt_tashkent.strftime("%Y-%m-%d %H:%M:%S %Z")
+    # use explicit label to avoid seeing only "+05"
+    return dt_tashkent.strftime("%Y-%m-%d %H:%M:%S") + " Asia/Tashkent"
 
 
 # -------------------------
