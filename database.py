@@ -3,12 +3,17 @@ import asyncio
 import asyncpg
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo  # Python 3.9+ (standard library)
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 pool: Optional[asyncpg.pool.Pool] = None
 _pool_lock = asyncio.Lock()
+
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
+
 
 async def create_db_pool():
     """Create and return a global asyncpg pool (if not created yet)."""
@@ -35,8 +40,6 @@ async def create_users_table():
     """
     Create required tables if they do not exist.
     Uses TIMESTAMPTZ for timezone-aware timestamps.
-    Also creates a NEW table `superadmins` (BIGINT user_id) so code doesn't rely
-    on any pre-existing `super_admin` table.
     """
     global pool
     if pool is None:
@@ -51,8 +54,6 @@ async def create_users_table():
                 is_active BOOLEAN DEFAULT TRUE
             );
         ''')
-
-
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY,
@@ -60,8 +61,6 @@ async def create_users_table():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
-
-
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS admin_audit (
                 id SERIAL PRIMARY KEY,
@@ -72,7 +71,6 @@ async def create_users_table():
                 action_time TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
-
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 id SERIAL PRIMARY KEY,
@@ -82,13 +80,11 @@ async def create_users_table():
                 activity_type VARCHAR(50)
             );
         ''')
-
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS superadmins (
                 user_id BIGINT PRIMARY KEY
             );
         ''')
-
         try:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_time ON user_activity(activity_time);")
@@ -98,8 +94,11 @@ async def create_users_table():
             pass
 
 
-
 async def save_user(user_id: int, username: Optional[str] = None) -> None:
+    """
+    Save or update user. If username is None, keep existing username.
+    Always update last_seen to NOW() and set is_active = TRUE.
+    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -114,6 +113,7 @@ async def save_user(user_id: int, username: Optional[str] = None) -> None:
                 is_active = TRUE
         ''', user_id, username)
 
+
 async def log_user_activity(user_id: int, username: Optional[str], activity_type: str) -> None:
     global pool
     if pool is None:
@@ -124,20 +124,118 @@ async def log_user_activity(user_id: int, username: Optional[str], activity_type
             VALUES ($1, $2, $3)
         ''', user_id, username, activity_type)
 
+
+# -------------------------
+# Timezone / formatting helper
+# -------------------------
+def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
+    """
+    Convert a timezone-aware or naive datetime (assumed UTC if naive)
+    to Asia/Tashkent and return formatted string. Return None if dt is None.
+    """
+    if dt is None:
+        return None
+    # If naive, assume UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        dt_tashkent = dt.astimezone(TASHKENT_TZ)
+    except Exception:
+        # fallback: attach UTC then convert
+        dt = dt.replace(tzinfo=timezone.utc)
+        dt_tashkent = dt.astimezone(TASHKENT_TZ)
+    return dt_tashkent.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+# -------------------------
+# User retrieval helpers
+# -------------------------
 async def get_all_users() -> List[Dict[str, Any]]:
+    """
+    Return all active users with basic metadata.
+    Dates are formatted for Asia/Tashkent.
+    """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT user_id FROM users WHERE is_active = TRUE')
-        return [{'user_id': r['user_id']} for r in rows]
+        rows = await conn.fetch('''
+            SELECT user_id, username, created_at, last_seen
+            FROM users
+            WHERE is_active = TRUE
+            ORDER BY user_id
+        ''')
+        result = []
+        for r in rows:
+            result.append({
+                'user_id': r['user_id'],
+                'username': r.get('username'),
+                'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
+                'created_at': format_dt_for_tashkent(r.get('created_at')),
+                'last_seen': format_dt_for_tashkent(r.get('last_seen'))
+            })
+        return result
+
 
 async def get_user_by_username(username: str) -> Optional[int]:
+    """
+    Return user_id for given username or None.
+    """
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT user_id FROM users WHERE username = $1', username)
+
+
+async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Return user row by user_id with formatted dates, or None.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('''
+            SELECT user_id, username, created_at, last_seen, is_active
+            FROM users
+            WHERE user_id = $1
+        ''', user_id)
+        if not row:
+            return None
+        return {
+            'user_id': row['user_id'],
+            'username': row.get('username'),
+            'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}",
+            'created_at': format_dt_for_tashkent(row.get('created_at')),
+            'last_seen': format_dt_for_tashkent(row.get('last_seen')),
+            'is_active': bool(row.get('is_active'))
+        }
+
+
+async def get_user_by_identifier(identifier: str) -> Optional[int]:
+    """
+    Accept either a numeric string (user_id) or username string.
+    If numeric -> return that user_id if exists.
+    If not numeric -> treat as username and look up user_id.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    identifier = identifier.strip()
+    # numeric -> treat as user_id
+    if identifier.isdigit():
+        uid = int(identifier)
+        async with pool.acquire() as conn:
+            exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', uid)
+            return uid if exists else None
+    # if starts with @, strip it
+    if identifier.startswith("@"):
+        identifier = identifier[1:]
+    # treat as username
+    async with pool.acquire() as conn:
+        return await conn.fetchval('SELECT user_id FROM users WHERE username = $1', identifier)
+
 
 async def deactivate_user(user_id: int) -> None:
     global pool
@@ -145,6 +243,7 @@ async def deactivate_user(user_id: int) -> None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('UPDATE users SET is_active = FALSE WHERE user_id = $1', user_id)
+
 
 async def get_users_count() -> int:
     global pool
@@ -154,7 +253,9 @@ async def get_users_count() -> int:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
 
-
+# -------------------------
+# Admins / superadmin helpers (kept but improved display)
+# -------------------------
 async def is_admin(user_id: int) -> bool:
     global pool
     if pool is None:
@@ -162,6 +263,7 @@ async def is_admin(user_id: int) -> bool:
     async with pool.acquire() as conn:
         val = await conn.fetchval('SELECT 1 FROM admins WHERE user_id = $1', user_id)
         return bool(val)
+
 
 async def get_admins() -> List[Dict[str, Any]]:
     global pool
@@ -174,9 +276,11 @@ async def get_admins() -> List[Dict[str, Any]]:
             result.append({
                 'user_id': r['user_id'],
                 'username': r.get('username'),
-                'created_at': r.get('created_at')
+                'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
+                'created_at': format_dt_for_tashkent(r.get('created_at'))
             })
         return result
+
 
 async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
     global pool
@@ -186,7 +290,13 @@ async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
         row = await conn.fetchrow('SELECT user_id, username, created_at FROM admins WHERE user_id = $1', user_id)
         if not row:
             return None
-        return {'user_id': row['user_id'], 'username': row.get('username'), 'created_at': row.get('created_at')}
+        return {
+            'user_id': row['user_id'],
+            'username': row.get('username'),
+            'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}",
+            'created_at': format_dt_for_tashkent(row.get('created_at'))
+        }
+
 
 async def add_admin(user_id: int, username: Optional[str] = None) -> None:
     global pool
@@ -199,6 +309,7 @@ async def add_admin(user_id: int, username: Optional[str] = None) -> None:
             ON CONFLICT (user_id)
             DO UPDATE SET username = COALESCE(EXCLUDED.username, admins.username)
         ''', user_id, username)
+
 
 async def remove_admin(user_id: int) -> None:
     global pool
@@ -219,12 +330,7 @@ async def log_admin_action(admin_id: int, action: str, target_user_id: Optional[
         ''', admin_id, action, target_user_id, details)
 
 
-
 async def is_superadmin(user_id: int) -> bool:
-    """
-    Return True if user_id exists in the new superadmins table.
-    The user_id column is BIGINT, so large Telegram IDs work fine.
-    """
     global pool
     if pool is None:
         await create_db_pool()
@@ -232,21 +338,22 @@ async def is_superadmin(user_id: int) -> bool:
         val = await conn.fetchval('SELECT 1 FROM superadmins WHERE user_id = $1', user_id)
         return bool(val)
 
+
 async def get_superadmin_id() -> Optional[int]:
-    """Return one superadmin user_id or None if none set."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT user_id FROM superadmins LIMIT 1')
 
+
 async def add_superadmin(user_id: int) -> None:
-    """Convenience function to add a superadmin (your code can call it or you can insert manually)."""
     global pool
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('INSERT INTO superadmins (user_id) VALUES ($1) ON CONFLICT DO NOTHING', user_id)
+
 
 async def remove_superadmin(user_id: int) -> None:
     global pool

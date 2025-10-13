@@ -20,7 +20,12 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from keyboards import admin_keyboard
 
+from zoneinfo import ZoneInfo  # Python 3.9+
+
 logger = logging.getLogger(__name__)
+
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
+REMOVE_BLOCK_DAYS = 3
 
 
 class PMStates(StatesGroup):
@@ -40,7 +45,20 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
-REMOVE_BLOCK_DAYS = 3
+def format_dt(dt: datetime) -> str:
+    """Format datetime to Asia/Tashkent human-friendly string. Accepts tz-aware or naive (assumed UTC)."""
+    if dt is None:
+        return "—"
+    if not isinstance(dt, datetime):
+        return str(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        dt_tz = dt.astimezone(TASHKENT_TZ)
+    except Exception:
+        dt = dt.replace(tzinfo=timezone.utc)
+        dt_tz = dt.astimezone(TASHKENT_TZ)
+    return dt_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def register_admin_handlers(dp, bot: Bot, database_module):
@@ -50,14 +68,14 @@ def register_admin_handlers(dp, bot: Bot, database_module):
       - is_admin(user_id) -> bool
       - is_superadmin(user_id) -> bool
       - get_admins() -> list[dict(user_id, username, created_at)]
-      - get_admin_meta(user_id) -> dict or None
+      - get_admin_meta(user_id) -> dict or None  (may return formatted created_at)
       - add_admin(user_id, username=None)
       - remove_admin(user_id)
       - get_all_users()
       - deactivate_user(user_id)
       - log_admin_action(admin_id, action, target_user_id=None, details=None)
       - get_superadmin_id() -> Optional[int]
-      - pool (asyncpg pool) for direct queries when needed
+      - pool (asyncpg pool) for raw queries when needed
     """
 
     async def require_admin_or_deny(message: Message) -> bool:
@@ -94,12 +112,12 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("❗ Xabar bo'sh. Iltimos matn yozing.")
             return
 
-        user_ids = await database_module.get_all_users()
+        user_records = await database_module.get_all_users()
         success, fail = 0, 0
         progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
 
-        total = len(user_ids) if user_ids else 0
-        for i, record in enumerate(user_ids, 1):
+        total = len(user_records) if user_records else 0
+        for i, record in enumerate(user_records, 1):
             user_id = record['user_id']
             try:
                 await bot.send_message(user_id, text_to_send)
@@ -148,24 +166,29 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         user_id = None
         try:
-            async with database_module.pool.acquire() as conn:
-                if identifier.startswith("@"):
-                    user_id = await conn.fetchval(
-                        "SELECT user_id FROM users WHERE username = $1",
-                        identifier[1:]
-                    )
-                else:
-                    try:
-                        maybe_id = int(identifier)
-                    except ValueError:
-                        await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
-                        return
-
-                    exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
-                    if exists:
-                        user_id = maybe_id
+            # Prefer using the database_module helper if exists
+            if hasattr(database_module, "get_user_by_identifier"):
+                user_id = await database_module.get_user_by_identifier(identifier)
+            else:
+                # fallback: reuse older logic directly via pool
+                async with database_module.pool.acquire() as conn:
+                    if identifier.startswith("@"):
+                        user_id = await conn.fetchval(
+                            "SELECT user_id FROM users WHERE username = $1",
+                            identifier[1:]
+                        )
                     else:
-                        user_id = None
+                        try:
+                            maybe_id = int(identifier)
+                        except ValueError:
+                            await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring:")
+                            return
+
+                        exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
+                        if exists:
+                            user_id = maybe_id
+                        else:
+                            user_id = None
         except Exception:
             logger.exception("DB error in process_user")
             await message.answer("❌ DB xatosi.")
@@ -314,6 +337,10 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             else:
                 return f'<a href="tg://user?id={user["user_id"]}">User {user["user_id"]}</a>'
 
+        last_created_str = "—"
+        if last_user and last_user.get('created_at'):
+            last_created_str = format_dt(last_user['created_at'])
+
         text = (
             "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
             f"📌 Umumiy foydalanuvchilar: <b>{total_users}</b>\n\n"
@@ -325,7 +352,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             f"└ 🔢 Faollik: {most_active_today['activity_count'] if most_active_today else 0}\n\n"
             f"🆕 Oxirgi foydalanuvchi:\n"
             f"├ 👤 {format_user(last_user)}\n"
-            f"└ 📅 Qo'shilgan: {last_user['created_at'].strftime('%Y-%m-%d %H:%M') if last_user else '—'}"
+            f"└ 📅 Qo'shilgan: {last_created_str}"
         )
         await message.answer(text, parse_mode="HTML")
 
@@ -431,13 +458,15 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 logger.exception("DB error checking is_superadmin")
                 is_super = False
 
-            requester_meta = None
+            # requester_meta from DB may contain formatted created_at; for time-checking fetch raw created_at directly
+            requester_created_at = None
             try:
-                requester_meta = await database_module.get_admin_meta(requester_id)
+                async with database_module.pool.acquire() as conn:
+                    requester_created_at = await conn.fetchval('SELECT created_at FROM admins WHERE user_id = $1', requester_id)
             except Exception:
-                logger.exception("DB error fetching admin_meta")
+                logger.exception("DB error fetching requester created_at")
 
-            if not is_super and not requester_meta:
+            if not is_super and requester_created_at is None:
                 await query.answer("❌ Bu amal faqat adminlar uchun.", show_alert=True)
                 return
 
@@ -465,24 +494,25 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             if not is_super:
-                if not requester_meta:
-                    await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
-                    return
-
-                created_at = requester_meta.get('created_at')
-                if created_at is None:
-                    await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
-                    return
-
-                if isinstance(created_at, datetime) and created_at.tzinfo is not None:
-                    created_utc = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+                # ensure requester_created_at is a datetime
+                if isinstance(requester_created_at, datetime):
+                    created_at_dt = requester_created_at
+                    if created_at_dt.tzinfo is not None:
+                        created_utc = created_at_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        created_utc = created_at_dt
                 else:
-                    created_utc = created_at
+                    # fallback: deny if we cannot determine created time
+                    await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
+                    return
 
                 now = datetime.utcnow()
                 allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
                 if now < allowed_after:
-                    allowed_str = allowed_after.strftime("%Y-%m-%d %H:%M UTC")
+                    # show allowed time in Tashkent for clarity
+                    allowed_after_utc = allowed_after.replace(tzinfo=timezone.utc)
+                    allowed_tz = allowed_after_utc.astimezone(TASHKENT_TZ)
+                    allowed_str = allowed_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
                     await query.answer(
                         f"❗ Siz yangi admin ekansiz — boshqa adminlarni o'chirish huquqi {allowed_str} dan keyin faollashadi.",
                         show_alert=True
@@ -531,13 +561,16 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         try:
             is_super = await database_module.is_superadmin(requester)
-            requester_meta = None
-            try:
-                requester_meta = await database_module.get_admin_meta(requester)
-            except Exception:
-                logger.exception("DB error fetching admin_meta")
 
-            if not is_super and not requester_meta:
+            # fetch raw created_at for requester for accurate time-check
+            requester_created_at = None
+            try:
+                async with database_module.pool.acquire() as conn:
+                    requester_created_at = await conn.fetchval('SELECT created_at FROM admins WHERE user_id = $1', requester)
+            except Exception:
+                logger.exception("DB error fetching requester created_at")
+
+            if not is_super and requester_created_at is None:
                 await message.answer("❌ Bu amal faqat adminlar uchun.")
                 await state.clear()
                 return
@@ -552,21 +585,23 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             if not is_super:
-                created_at = requester_meta.get('created_at')
-                if created_at is None:
+                if isinstance(requester_created_at, datetime):
+                    created_at_dt = requester_created_at
+                    if created_at_dt.tzinfo is not None:
+                        created_utc = created_at_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        created_utc = created_at_dt
+                else:
                     await message.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.")
                     await state.clear()
                     return
 
-                if isinstance(created_at, datetime) and created_at.tzinfo is not None:
-                    created_utc = created_at.astimezone(timezone.utc).replace(tzinfo=None)
-                else:
-                    created_utc = created_at
-
                 now = datetime.utcnow()
                 allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
                 if now < allowed_after:
-                    allowed_str = allowed_after.strftime("%Y-%m-%d %H:%M UTC")
+                    allowed_after_utc = allowed_after.replace(tzinfo=timezone.utc)
+                    allowed_tz = allowed_after_utc.astimezone(TASHKENT_TZ)
+                    allowed_str = allowed_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
                     await message.answer(f"❗ Siz yangi admin ekansiz — boshqa adminlarni o'chirish huquqi {allowed_str} dan keyin faollashadi.")
                     await state.clear()
                     return
@@ -593,6 +628,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await state.clear()
 
 
+    # register handlers
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
