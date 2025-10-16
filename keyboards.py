@@ -16,10 +16,11 @@ admin_keyboard = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="📄 Userlar ro'yxati"),
-            KeyboardButton(text="👀 Messages")
+            KeyboardButton(text="Messages")
         ],
     ], resize_keyboard=True, one_time_keyboard=False
 )
+
 
 
 
