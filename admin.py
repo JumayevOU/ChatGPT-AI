@@ -613,185 +613,181 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
+    watched_file = "watched_users.json"
+
+    async def _load_watched_file():
+        try:
+            if os.path.exists(watched_file):
+                with open(watched_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return set(int(x) for x in data)
+        except Exception:
+            logger.exception("load watched file error")
+        return set()
+
+    async def _save_watched_file(s):
+        try:
+            with open(watched_file, "w", encoding="utf-8") as f:
+                json.dump(list(s), f, ensure_ascii=False)
+        except Exception:
+            logger.exception("save watched file error")
+
+    async def is_watched(user_id: int) -> bool:
+        try:
+            if hasattr(database_module, "is_watched_user"):
+                return await database_module.is_watched_user(user_id)
+            else:
+                s = await _load_watched_file()
+                return int(user_id) in s
+        except Exception:
+            logger.exception("is_watched error")
+            return False
+
+    async def add_watched(user_id: int):
+        try:
+            if hasattr(database_module, "add_watched_user"):
+                await database_module.add_watched_user(user_id)
+                return
+            s = await _load_watched_file()
+            s.add(int(user_id))
+            await _save_watched_file(s)
+        except Exception:
+            logger.exception("add_watched error")
+
+    async def remove_watched(user_id: int):
+        try:
+            if hasattr(database_module, "remove_watched_user"):
+                await database_module.remove_watched_user(user_id)
+                return
+            s = await _load_watched_file()
+            s.discard(int(user_id))
+            await _save_watched_file(s)
+        except Exception:
+            logger.exception("remove_watched error")
+
+    original_send_message = bot.send_message
+
+    async def send_message_and_maybe_forward(chat_id, text, *args, **kwargs):
+        try:
+            if chat_id == MONITOR_GROUP_ID:
+                return await original_send_message(chat_id, text, *args, **kwargs)
+            sent_msg = await original_send_message(chat_id, text, *args, **kwargs)
+        except Exception:
+            raise
+        try:
+            try:
+                watched = await is_watched(chat_id)
+            except Exception:
+                watched = False
+            if watched and MONITOR_GROUP_ID:
+                header = f"🕵️ Bot javobi — foydalanuvchi: <a href=\"tg://user?id={chat_id}\">{chat_id}</a>\n\n"
+                if isinstance(text, str):
+                    await original_send_message(MONITOR_GROUP_ID, header + text, parse_mode=ParseMode.HTML)
+                else:
+                    await original_send_message(MONITOR_GROUP_ID, header + str(text))
+        except Exception:
+            logger.exception("forward outgoing message error")
+        return sent_msg
+
+    bot.send_message = send_message_and_maybe_forward
+
     async def start_messages_forward(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
-        await message.answer("✍️ Iltimos, kuzatmoqchi bo'lgan foydalanuvchi ID yoki @username ni kiriting:")
+        await message.answer("✍️ Iltimos, kuzatuvga qo'yiladigan foydalanuvchi ID yoki @username ni kiriting:")
         await state.set_state(MessagesForwardStates.waiting_for_user)
 
     async def process_messages_identifier(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             await state.clear()
             return
-
         identifier = (message.text or "").strip()
         if not identifier:
             await message.answer("❗ Iltimos ID yoki @username kiriting.")
             return
-
         user_id = None
         try:
-            if hasattr(database_module, "get_user_by_identifier"):
-                user_id = await database_module.get_user_by_identifier(identifier)
-            else:
+            if identifier.startswith("@"):
+                try:
+                    chat = await bot.get_chat(identifier)
+                    user_id = chat.id
+                except Exception:
+                    pass
+            if user_id is None:
+                if hasattr(database_module, "get_user_by_identifier"):
+                    user_id = await database_module.get_user_by_identifier(identifier)
+            if user_id is None:
                 async with database_module.pool.acquire() as conn:
                     if identifier.startswith("@"):
-                        user_id = await conn.fetchval(
-                            "SELECT user_id FROM users WHERE username = $1",
-                            identifier[1:]
-                        )
+                        user_id = await conn.fetchval("SELECT user_id FROM users WHERE username = $1", identifier[1:])
                     else:
                         try:
                             maybe_id = int(identifier)
-                        except ValueError:
-                            await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring.")
-                            return
-                        exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
-                        if exists:
-                            user_id = maybe_id
-                        else:
-                            user_id = None
+                            exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
+                            if exists:
+                                user_id = maybe_id
+                        except Exception:
+                            pass
+            if user_id is None:
+                try:
+                    maybe_id = int(identifier)
+                    user_id = maybe_id
+                except Exception:
+                    user_id = None
         except Exception:
-            logger.exception("DB error in process_messages_identifier")
-            await message.answer("❌ DB xatosi.")
+            logger.exception("resolve identifier error")
+            await message.answer("❌ Foydalanuvchi topishda xato yuz berdi.")
+            await state.clear()
             return
-
         if not user_id:
             await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
-            return
-
-        if not MONITOR_GROUP_ID:
-            await message.answer("❗ Server sozlamalarida GROUP_ID topilmadi. data/config.py ga GROUP_ID qo'shing.")
             await state.clear()
             return
-
-        messages = None
         try:
-            if hasattr(database_module, "get_user_messages"):
-                messages = await database_module.get_user_messages(user_id, limit=200)
-            else:
-                async with database_module.pool.acquire() as conn:
-                    try:
-                        rows = await conn.fetch(
-                            "SELECT sender, message AS content, created_at FROM user_messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200",
-                            user_id
-                        )
-                        if rows:
-                            messages = [{"role": ("bot" if r["sender"] in ("bot", "assistant") else "user"), "text": r["content"], "created_at": r["created_at"]} for r in rows]
-                    except Exception:
-                        pass
-
-                    if not messages:
-                        try:
-                            rows2 = await conn.fetch(
-                                "SELECT role, content, created_at FROM messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200",
-                                user_id
-                            )
-                            if rows2:
-                                messages = [{"role": r["role"], "text": r["content"], "created_at": r["created_at"]} for r in rows2]
-                        except Exception:
-                            pass
-
-                    if not messages:
-                        try:
-                            rows3 = await conn.fetch(
-                                "SELECT activity_type, details AS content, activity_time AS created_at FROM user_activity WHERE user_id = $1 AND details IS NOT NULL ORDER BY activity_time DESC LIMIT 200",
-                                user_id
-                            )
-                            if rows3:
-                                messages = [{"role": "user", "text": r["content"], "created_at": r["created_at"]} for r in rows3]
-                        except Exception:
-                            pass
-        except Exception:
-            logger.exception("Error while fetching messages from DB")
-            await message.answer("❌ Xabarlarni olishda xatolik yuz berdi.")
-            await state.clear()
-            return
-
-        if not messages:
-            await message.answer("ℹ️ Ushbu foydalanuvchiga oid saqlangan savol-javoblar topilmadi.")
-            await state.clear()
-            return
-
-        try:
-            messages_sorted = sorted(messages, key=lambda x: x.get("created_at") or "")
-        except Exception:
-            messages_sorted = messages
-
-        pairs = []
-        pending_user = None
-        for m in messages_sorted:
-            role = (m.get("role") or "").lower()
-            text = m.get("text") or ""
-            if role in ("user", "u", "from_user", "client"):
-                if pending_user:
-                    pending_user += "\n" + text
-                else:
-                    pending_user = text
-            elif role in ("bot", "assistant", "system", "server"):
-                if pending_user:
-                    pairs.append(("user", pending_user))
-                    pairs.append(("bot", text))
-                    pending_user = None
-                else:
-                    pairs.append(("bot", text))
-            else:
-                if pending_user:
-                    pending_user += "\n" + text
-                else:
-                    pending_user = text
-
-        if pending_user:
-            pairs.append(("user", pending_user))
-
-        header = f"📝 Foydalanuvchi: <a href=\"tg://user?id={user_id}\">{user_id}</a>\n"
-        header += f"📥 Ko'rsatilgan oxirgi {min(200, len(messages_sorted))} xabar\n\n"
-
-        formatted_lines = []
-        idx = 1
-        i = 0
-        while i < len(pairs):
-            role, txt = pairs[i]
-            if role == "user":
-                q = txt.strip()
-                a = ""
-                if i + 1 < len(pairs) and pairs[i+1][0] == "bot":
-                    a = pairs[i+1][1].strip()
-                    i += 2
-                else:
-                    i += 1
-                formatted_lines.append(f"{idx}. ❓ <b>Foydalanuvchi:</b>\n{q}\n\n➡️ <b>Bot javobi:</b>\n{(a or '—')}\n\n")
-                idx += 1
-            else:
-                formatted_lines.append(f"{idx}. ⤵️ <b>Bot:</b>\n{txt.strip()}\n\n")
-                idx += 1
-                i += 1
-
-        def chunks_from_lines(lines, limit=4000):
-            cur = ""
-            for part in lines:
-                if len(cur) + len(part) > limit:
-                    yield cur
-                    cur = part
-                else:
-                    cur += part
-            if cur:
-                yield cur
-
-        try:
-            await message.answer(f"📤 {user_id} ga oid xabarlar guruhga yuborilmoqda (group id: {MONITOR_GROUP_ID})...")
-            for chunk in chunks_from_lines([header] + formatted_lines):
-                await bot.send_message(MONITOR_GROUP_ID, chunk, parse_mode=ParseMode.HTML)
-            await message.answer("✅ Xabarlar guruhga yuborildi.")
+            await add_watched(user_id)
+            await message.answer("✅ Kuzatuv ostiga olindi.")
             try:
-                await database_module.log_admin_action(message.from_user.id, "forward_messages", user_id, f"group_id={MONITOR_GROUP_ID}")
+                await database_module.log_admin_action(message.from_user.id, "watch_user", user_id, f"group_id={MONITOR_GROUP_ID}")
             except Exception:
-                logger.exception("log_admin_action failed for forward_messages")
+                logger.exception("log watch action failed")
         except Exception:
-            logger.exception("Error sending messages to group")
-            await message.answer("❌ Guruhga yuborishda xatolik yuz berdi.")
+            logger.exception("add watched failed")
+            await message.answer("❌ Kuzatishga qo'shishda xato yuz berdi.")
         finally:
             await state.clear()
+
+    async def incoming_user_watcher(message: Message):
+        try:
+            if message.chat.type != "private":
+                return
+            uid = message.from_user.id if message.from_user else None
+            if not uid:
+                return
+            try:
+                watched = await is_watched(uid)
+            except Exception:
+                watched = False
+            if not watched:
+                return
+            if not MONITOR_GROUP_ID:
+                return
+            ts = ""
+            try:
+                ts = format_dt(message.date)
+            except Exception:
+                ts = str(message.date)
+            header = f"📝 Foydalanuvchi: <a href=\"tg://user?id={uid}\">{uid}</a>\n📅 {ts}\n\n"
+            if message.text:
+                await original_send_message(MONITOR_GROUP_ID, header + message.text, parse_mode=ParseMode.HTML)
+            elif message.caption:
+                await original_send_message(MONITOR_GROUP_ID, header + message.caption, parse_mode=ParseMode.HTML)
+            else:
+                try:
+                    await bot.copy_message(MONITOR_GROUP_ID, message.chat.id, message.message_id)
+                except Exception:
+                    await original_send_message(MONITOR_GROUP_ID, header + "<i>Non-text message</i>", parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("incoming_user_watcher error")
 
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
@@ -807,4 +803,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
     dp.message.register(start_messages_forward, F.text == 'Messages')
+    dp.message.register(start_messages_forward, F.text == '👀 Messages')
     dp.message.register(process_messages_identifier, MessagesForwardStates.waiting_for_user)
+    dp.message.register(incoming_user_watcher, F.chat.type == 'private')
