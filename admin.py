@@ -20,12 +20,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from keyboards import admin_keyboard
 
-from zoneinfo import ZoneInfo
-
-try:
-    from data.config import GROUP_ID as MONITOR_GROUP_ID
-except Exception:
-    MONITOR_GROUP_ID = None
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +45,12 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
-class MessagesForwardStates(StatesGroup):
+class MessageMonitorStates(StatesGroup):
     waiting_for_user = State()
 
 
 def format_dt(dt: datetime) -> str:
+    """Format datetime to Asia/Tashkent human-friendly string. Accepts tz-aware or naive (assumed UTC)."""
     if dt is None:
         return "—"
     if not isinstance(dt, datetime):
@@ -70,6 +66,21 @@ def format_dt(dt: datetime) -> str:
 
 
 def register_admin_handlers(dp, bot: Bot, database_module):
+    """
+    Register admin handlers.
+    database_module should implement:
+      - is_admin(user_id) -> bool
+      - is_superadmin(user_id) -> bool
+      - get_admins() -> list[dict(user_id, username, created_at)]
+      - get_admin_meta(user_id) -> dict or None  (may return formatted created_at)
+      - add_admin(user_id, username=None)
+      - remove_admin(user_id)
+      - get_all_users()
+      - deactivate_user(user_id)
+      - log_admin_action(admin_id, action, target_user_id=None, details=None)
+      - get_superadmin_id() -> Optional[int]
+      - pool (asyncpg pool) for raw queries when needed
+    """
 
     async def require_admin_or_deny(message: Message) -> bool:
         try:
@@ -159,9 +170,11 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         user_id = None
         try:
+            # Prefer using the database_module helper if exists
             if hasattr(database_module, "get_user_by_identifier"):
                 user_id = await database_module.get_user_by_identifier(identifier)
             else:
+                # fallback: reuse older logic directly via pool
                 async with database_module.pool.acquire() as conn:
                     if identifier.startswith("@"):
                         user_id = await conn.fetchval(
@@ -449,6 +462,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 logger.exception("DB error checking is_superadmin")
                 is_super = False
 
+            # requester_meta from DB may contain formatted created_at; for time-checking fetch raw created_at directly
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -484,6 +498,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             if not is_super:
+                # ensure requester_created_at is a datetime
                 if isinstance(requester_created_at, datetime):
                     created_at_dt = requester_created_at
                     if created_at_dt.tzinfo is not None:
@@ -491,12 +506,14 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     else:
                         created_utc = created_at_dt
                 else:
+                    # fallback: deny if we cannot determine created time
                     await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
                     return
 
                 now = datetime.utcnow()
                 allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
                 if now < allowed_after:
+                    # show allowed time in Tashkent for clarity
                     allowed_after_utc = allowed_after.replace(tzinfo=timezone.utc)
                     allowed_tz = allowed_after_utc.astimezone(TASHKENT_TZ)
                     allowed_str = allowed_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -549,6 +566,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         try:
             is_super = await database_module.is_superadmin(requester)
 
+            # fetch raw created_at for requester for accurate time-check
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -613,182 +631,174 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
-    watched_file = "watched_users.json"
-
-    async def _load_watched_file():
-        try:
-            if os.path.exists(watched_file):
-                with open(watched_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return set(int(x) for x in data)
-        except Exception:
-            logger.exception("load watched file error")
-        return set()
-
-    async def _save_watched_file(s):
-        try:
-            with open(watched_file, "w", encoding="utf-8") as f:
-                json.dump(list(s), f, ensure_ascii=False)
-        except Exception:
-            logger.exception("save watched file error")
-
-    async def is_watched(user_id: int) -> bool:
-        try:
-            if hasattr(database_module, "is_watched_user"):
-                return await database_module.is_watched_user(user_id)
-            else:
-                s = await _load_watched_file()
-                return int(user_id) in s
-        except Exception:
-            logger.exception("is_watched error")
-            return False
-
-    async def add_watched(user_id: int):
-        try:
-            if hasattr(database_module, "add_watched_user"):
-                await database_module.add_watched_user(user_id)
-                return
-            s = await _load_watched_file()
-            s.add(int(user_id))
-            await _save_watched_file(s)
-        except Exception:
-            logger.exception("add_watched error")
-
-    async def remove_watched(user_id: int):
-        try:
-            if hasattr(database_module, "remove_watched_user"):
-                await database_module.remove_watched_user(user_id)
-                return
-            s = await _load_watched_file()
-            s.discard(int(user_id))
-            await _save_watched_file(s)
-        except Exception:
-            logger.exception("remove_watched error")
-
-    original_send_message = bot.send_message
-
-    async def send_message_and_maybe_forward(chat_id, text, *args, **kwargs):
-        try:
-            if chat_id == MONITOR_GROUP_ID:
-                return await original_send_message(chat_id, text, *args, **kwargs)
-            sent_msg = await original_send_message(chat_id, text, *args, **kwargs)
-        except Exception:
-            raise
-        try:
-            try:
-                watched = await is_watched(chat_id)
-            except Exception:
-                watched = False
-            if watched and MONITOR_GROUP_ID:
-                header = f"🕵️ Bot javobi — foydalanuvchi: <a href=\"tg://user?id={chat_id}\">{chat_id}</a>\n\n"
-                if isinstance(text, str):
-                    await original_send_message(MONITOR_GROUP_ID, header + text, parse_mode=ParseMode.HTML)
-                else:
-                    await original_send_message(MONITOR_GROUP_ID, header + str(text))
-        except Exception:
-            logger.exception("forward outgoing message error")
-        return sent_msg
-
-    bot.send_message = send_message_and_maybe_forward
-
-    async def start_messages_forward(message: Message, state: FSMContext):
+    # YANGI FUNKSIYALAR: Message Monitoring
+    async def start_message_monitor(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
-        await message.answer("✍️ Iltimos, kuzatuvga qo'yiladigan foydalanuvchi ID yoki @username ni kiriting:")
-        await state.set_state(MessagesForwardStates.waiting_for_user)
+        await message.answer("Foydalanuvchi ID yoki @username ni kiriting:")
+        await state.set_state(MessageMonitorStates.waiting_for_user)
 
-    async def process_messages_identifier(message: Message, state: FSMContext):
+    async def process_message_monitor_user(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             await state.clear()
             return
+
         identifier = (message.text or "").strip()
         if not identifier:
-            await message.answer("❗ Iltimos ID yoki @username kiriting.")
+            await message.answer("Iltimos ID yoki @username kiriting.")
             return
+
         user_id = None
         try:
-            if identifier.startswith("@"):
-                try:
-                    chat = await bot.get_chat(identifier)
-                    user_id = chat.id
-                except Exception:
-                    pass
-            if user_id is None:
-                if hasattr(database_module, "get_user_by_identifier"):
-                    user_id = await database_module.get_user_by_identifier(identifier)
-            if user_id is None:
+            if hasattr(database_module, "get_user_by_identifier"):
+                user_id = await database_module.get_user_by_identifier(identifier)
+            else:
                 async with database_module.pool.acquire() as conn:
                     if identifier.startswith("@"):
-                        user_id = await conn.fetchval("SELECT user_id FROM users WHERE username = $1", identifier[1:])
+                        user_id = await conn.fetchval(
+                            "SELECT user_id FROM users WHERE username = $1",
+                            identifier[1:]
+                        )
                     else:
                         try:
                             maybe_id = int(identifier)
-                            exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
-                            if exists:
-                                user_id = maybe_id
-                        except Exception:
-                            pass
-            if user_id is None:
-                try:
-                    maybe_id = int(identifier)
-                    user_id = maybe_id
-                except Exception:
-                    user_id = None
-        except Exception:
-            logger.exception("resolve identifier error")
-            await message.answer("❌ Foydalanuvchi topishda xato yuz berdi.")
-            await state.clear()
-            return
-        if not user_id:
-            await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
-            await state.clear()
-            return
-        try:
-            await add_watched(user_id)
-            await message.answer("✅ Kuzatuv ostiga olindi.")
-            try:
-                await database_module.log_admin_action(message.from_user.id, "watch_user", user_id, f"group_id={MONITOR_GROUP_ID}")
-            except Exception:
-                logger.exception("log watch action failed")
-        except Exception:
-            logger.exception("add watched failed")
-            await message.answer("❌ Kuzatishga qo'shishda xato yuz berdi.")
-        finally:
-            await state.clear()
+                        except ValueError:
+                            await message.answer("Noto'g'ri ID format. Qayta urinib ko'ring:")
+                            return
 
-    async def incoming_user_watcher(message: Message):
+                        exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
+                        if exists:
+                            user_id = maybe_id
+                        else:
+                            user_id = None
+        except Exception:
+            logger.exception("DB error in process_message_monitor_user")
+            await message.answer("DB xatosi.")
+            return
+
+        if not user_id:
+            await message.answer("Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
+            return
+
+        await state.update_data(monitoring_user_id=user_id)
+        
+        try:
+            from data.config import GROUP_ID
+        except ImportError:
+            logger.error("GROUP_ID config faylda topilmadi!")
+            await message.answer("GROUP_ID config faylda topilmadi!")
+            await state.clear()
+            return
+        
+        if not hasattr(process_message_monitor_user, 'monitored_users'):
+            process_message_monitor_user.monitored_users = set()
+        
+        process_message_monitor_user.monitored_users.add(user_id)
+        
+        await message.answer(f"{user_id} foydalanuvchisining xabarlari endi kuzatilmoqda.")
+        
+        try:
+            await bot.send_message(
+                GROUP_ID,
+                f"Xabar monitori yoqildi\nFoydalanuvchi: {user_id}\nVaqt: {format_dt(datetime.now())}\nAdmin: {message.from_user.mention_html()}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Guruhga xabar yuborishda xatolik: {e}")
+
+        await state.clear()
+
+    async def handle_user_message_for_monitor(message: Message):
         try:
             if message.chat.type != "private":
                 return
-            uid = message.from_user.id if message.from_user else None
-            if not uid:
-                return
-            try:
-                watched = await is_watched(uid)
-            except Exception:
-                watched = False
-            if not watched:
-                return
-            if not MONITOR_GROUP_ID:
-                return
-            ts = ""
-            try:
-                ts = format_dt(message.date)
-            except Exception:
-                ts = str(message.date)
-            header = f"📝 Foydalanuvchi: <a href=\"tg://user?id={uid}\">{uid}</a>\n📅 {ts}\n\n"
-            if message.text:
-                await original_send_message(MONITOR_GROUP_ID, header + message.text, parse_mode=ParseMode.HTML)
-            elif message.caption:
-                await original_send_message(MONITOR_GROUP_ID, header + message.caption, parse_mode=ParseMode.HTML)
-            else:
-                try:
-                    await bot.copy_message(MONITOR_GROUP_ID, message.chat.id, message.message_id)
-                except Exception:
-                    await original_send_message(MONITOR_GROUP_ID, header + "<i>Non-text message</i>", parse_mode=ParseMode.HTML)
-        except Exception:
-            logger.exception("incoming_user_watcher error")
 
+            try:
+                from data.config import GROUP_ID
+            except ImportError:
+                return
+
+            if not hasattr(process_message_monitor_user, 'monitored_users'):
+                process_message_monitor_user.monitored_users = set()
+
+            user_id = message.from_user.id
+            
+            if user_id not in process_message_monitor_user.monitored_users:
+                return
+
+            user_info = f"{message.from_user.full_name} (ID: {user_id})"
+            if message.from_user.username:
+                user_info += f" @{message.from_user.username}"
+            
+            if message.text:
+                content = f"Xabar: {message.text}"
+            elif message.photo:
+                content = f"Rasm (caption: {message.caption or 'Yoq'})"
+            elif message.video:
+                content = f"Video (caption: {message.caption or 'Yoq'})"
+            elif message.document:
+                content = f"Fayl: {message.document.file_name}"
+            elif message.voice:
+                content = f"Ovozli xabar"
+            elif message.audio:
+                content = f"Audio"
+            else:
+                content = f"Boshqa turdagi xabar"
+            
+            try:
+                await bot.send_message(
+                    GROUP_ID,
+                    f"Foydalanuvchi xabari\n{user_info}\n{content}\n{format_dt(datetime.now())}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.error(f"Foydalanuvchi xabarini guruhga yuborishda xatolik: {e}")
+
+        except Exception as e:
+            logger.exception(f"handle_user_message_for_monitor da xatolik: {e}")
+
+    async def handle_bot_response_for_monitor(message: Message):
+        try:
+            if message.from_user.id != bot.id:
+                return
+
+            try:
+                from data.config import GROUP_ID
+            except ImportError:
+                return
+
+            user_id = message.chat.id
+            
+            if not hasattr(process_message_monitor_user, 'monitored_users'):
+                return
+            
+            if user_id not in process_message_monitor_user.monitored_users:
+                return
+
+            if message.text:
+                content = f"Bot javobi: {message.text}"
+            elif message.photo:
+                content = f"Bot rasm yubordi (caption: {message.caption or 'Yoq'})"
+            elif message.video:
+                content = f"Bot video yubordi (caption: {message.caption or 'Yoq'})"
+            elif message.document:
+                content = f"Bot fayl yubordi: {message.document.file_name}"
+            else:
+                content = f"Bot boshqa turdagi xabar yubordi"
+
+            try:
+                await bot.send_message(
+                    GROUP_ID,
+                    f"Bot javobi\nFoydalanuvchi ID: {user_id}\n{content}\n{format_dt(datetime.now())}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.error(f"Bot javobini guruhga yuborishda xatolik: {e}")
+
+        except Exception as e:
+            logger.exception(f"handle_bot_response_for_monitor da xatolik: {e}")
+
+    # register handlers
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
@@ -796,13 +806,13 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
     dp.message.register(start_remove_admin, F.text == "➖ Admin o'chirish")
+    dp.message.register(start_message_monitor, F.text == 'Messages')
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
+    dp.message.register(process_message_monitor_user, MessageMonitorStates.waiting_for_user)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-    dp.message.register(start_messages_forward, F.text == 'Messages')
-    dp.message.register(start_messages_forward, F.text == '👀 Messages')
-    dp.message.register(process_messages_identifier, MessagesForwardStates.waiting_for_user)
-    dp.message.register(incoming_user_watcher, F.chat.type == 'private')
+    dp.message.register(handle_user_message_for_monitor)
+    dp.message.register(handle_bot_response_for_monitor)
