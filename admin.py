@@ -20,7 +20,12 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from keyboards import admin_keyboard
 
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo
+
+try:
+    from data.config import GROUP_ID as MONITOR_GROUP_ID
+except Exception:
+    MONITOR_GROUP_ID = None
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +50,11 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
+class MessagesForwardStates(StatesGroup):
+    waiting_for_user = State()
+
+
 def format_dt(dt: datetime) -> str:
-    """Format datetime to Asia/Tashkent human-friendly string. Accepts tz-aware or naive (assumed UTC)."""
     if dt is None:
         return "—"
     if not isinstance(dt, datetime):
@@ -62,21 +70,6 @@ def format_dt(dt: datetime) -> str:
 
 
 def register_admin_handlers(dp, bot: Bot, database_module):
-    """
-    Register admin handlers.
-    database_module should implement:
-      - is_admin(user_id) -> bool
-      - is_superadmin(user_id) -> bool
-      - get_admins() -> list[dict(user_id, username, created_at)]
-      - get_admin_meta(user_id) -> dict or None  (may return formatted created_at)
-      - add_admin(user_id, username=None)
-      - remove_admin(user_id)
-      - get_all_users()
-      - deactivate_user(user_id)
-      - log_admin_action(admin_id, action, target_user_id=None, details=None)
-      - get_superadmin_id() -> Optional[int]
-      - pool (asyncpg pool) for raw queries when needed
-    """
 
     async def require_admin_or_deny(message: Message) -> bool:
         try:
@@ -166,11 +159,9 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         user_id = None
         try:
-            # Prefer using the database_module helper if exists
             if hasattr(database_module, "get_user_by_identifier"):
                 user_id = await database_module.get_user_by_identifier(identifier)
             else:
-                # fallback: reuse older logic directly via pool
                 async with database_module.pool.acquire() as conn:
                     if identifier.startswith("@"):
                         user_id = await conn.fetchval(
@@ -458,7 +449,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 logger.exception("DB error checking is_superadmin")
                 is_super = False
 
-            # requester_meta from DB may contain formatted created_at; for time-checking fetch raw created_at directly
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -494,7 +484,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             if not is_super:
-                # ensure requester_created_at is a datetime
                 if isinstance(requester_created_at, datetime):
                     created_at_dt = requester_created_at
                     if created_at_dt.tzinfo is not None:
@@ -502,14 +491,12 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     else:
                         created_utc = created_at_dt
                 else:
-                    # fallback: deny if we cannot determine created time
                     await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
                     return
 
                 now = datetime.utcnow()
                 allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
                 if now < allowed_after:
-                    # show allowed time in Tashkent for clarity
                     allowed_after_utc = allowed_after.replace(tzinfo=timezone.utc)
                     allowed_tz = allowed_after_utc.astimezone(TASHKENT_TZ)
                     allowed_str = allowed_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -562,7 +549,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         try:
             is_super = await database_module.is_superadmin(requester)
 
-            # fetch raw created_at for requester for accurate time-check
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -627,8 +613,186 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
+    async def start_messages_forward(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            return
+        await message.answer("✍️ Iltimos, kuzatmoqchi bo'lgan foydalanuvchi ID yoki @username ni kiriting:")
+        await state.set_state(MessagesForwardStates.waiting_for_user)
 
-    # register handlers
+    async def process_messages_identifier(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+
+        identifier = (message.text or "").strip()
+        if not identifier:
+            await message.answer("❗ Iltimos ID yoki @username kiriting.")
+            return
+
+        user_id = None
+        try:
+            if hasattr(database_module, "get_user_by_identifier"):
+                user_id = await database_module.get_user_by_identifier(identifier)
+            else:
+                async with database_module.pool.acquire() as conn:
+                    if identifier.startswith("@"):
+                        user_id = await conn.fetchval(
+                            "SELECT user_id FROM users WHERE username = $1",
+                            identifier[1:]
+                        )
+                    else:
+                        try:
+                            maybe_id = int(identifier)
+                        except ValueError:
+                            await message.answer("❌ Noto'g'ri ID format. Qayta urinib ko'ring.")
+                            return
+                        exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
+                        if exists:
+                            user_id = maybe_id
+                        else:
+                            user_id = None
+        except Exception:
+            logger.exception("DB error in process_messages_identifier")
+            await message.answer("❌ DB xatosi.")
+            return
+
+        if not user_id:
+            await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
+            return
+
+        if not MONITOR_GROUP_ID:
+            await message.answer("❗ Server sozlamalarida GROUP_ID topilmadi. data/config.py ga GROUP_ID qo'shing.")
+            await state.clear()
+            return
+
+        messages = None
+        try:
+            if hasattr(database_module, "get_user_messages"):
+                messages = await database_module.get_user_messages(user_id, limit=200)
+            else:
+                async with database_module.pool.acquire() as conn:
+                    try:
+                        rows = await conn.fetch(
+                            "SELECT sender, message AS content, created_at FROM user_messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200",
+                            user_id
+                        )
+                        if rows:
+                            messages = [{"role": ("bot" if r["sender"] in ("bot", "assistant") else "user"), "text": r["content"], "created_at": r["created_at"]} for r in rows]
+                    except Exception:
+                        pass
+
+                    if not messages:
+                        try:
+                            rows2 = await conn.fetch(
+                                "SELECT role, content, created_at FROM messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200",
+                                user_id
+                            )
+                            if rows2:
+                                messages = [{"role": r["role"], "text": r["content"], "created_at": r["created_at"]} for r in rows2]
+                        except Exception:
+                            pass
+
+                    if not messages:
+                        try:
+                            rows3 = await conn.fetch(
+                                "SELECT activity_type, details AS content, activity_time AS created_at FROM user_activity WHERE user_id = $1 AND details IS NOT NULL ORDER BY activity_time DESC LIMIT 200",
+                                user_id
+                            )
+                            if rows3:
+                                messages = [{"role": "user", "text": r["content"], "created_at": r["created_at"]} for r in rows3]
+                        except Exception:
+                            pass
+        except Exception:
+            logger.exception("Error while fetching messages from DB")
+            await message.answer("❌ Xabarlarni olishda xatolik yuz berdi.")
+            await state.clear()
+            return
+
+        if not messages:
+            await message.answer("ℹ️ Ushbu foydalanuvchiga oid saqlangan savol-javoblar topilmadi.")
+            await state.clear()
+            return
+
+        try:
+            messages_sorted = sorted(messages, key=lambda x: x.get("created_at") or "")
+        except Exception:
+            messages_sorted = messages
+
+        pairs = []
+        pending_user = None
+        for m in messages_sorted:
+            role = (m.get("role") or "").lower()
+            text = m.get("text") or ""
+            if role in ("user", "u", "from_user", "client"):
+                if pending_user:
+                    pending_user += "\n" + text
+                else:
+                    pending_user = text
+            elif role in ("bot", "assistant", "system", "server"):
+                if pending_user:
+                    pairs.append(("user", pending_user))
+                    pairs.append(("bot", text))
+                    pending_user = None
+                else:
+                    pairs.append(("bot", text))
+            else:
+                if pending_user:
+                    pending_user += "\n" + text
+                else:
+                    pending_user = text
+
+        if pending_user:
+            pairs.append(("user", pending_user))
+
+        header = f"📝 Foydalanuvchi: <a href=\"tg://user?id={user_id}\">{user_id}</a>\n"
+        header += f"📥 Ko'rsatilgan oxirgi {min(200, len(messages_sorted))} xabar\n\n"
+
+        formatted_lines = []
+        idx = 1
+        i = 0
+        while i < len(pairs):
+            role, txt = pairs[i]
+            if role == "user":
+                q = txt.strip()
+                a = ""
+                if i + 1 < len(pairs) and pairs[i+1][0] == "bot":
+                    a = pairs[i+1][1].strip()
+                    i += 2
+                else:
+                    i += 1
+                formatted_lines.append(f"{idx}. ❓ <b>Foydalanuvchi:</b>\n{q}\n\n➡️ <b>Bot javobi:</b>\n{(a or '—')}\n\n")
+                idx += 1
+            else:
+                formatted_lines.append(f"{idx}. ⤵️ <b>Bot:</b>\n{txt.strip()}\n\n")
+                idx += 1
+                i += 1
+
+        def chunks_from_lines(lines, limit=4000):
+            cur = ""
+            for part in lines:
+                if len(cur) + len(part) > limit:
+                    yield cur
+                    cur = part
+                else:
+                    cur += part
+            if cur:
+                yield cur
+
+        try:
+            await message.answer(f"📤 {user_id} ga oid xabarlar guruhga yuborilmoqda (group id: {MONITOR_GROUP_ID})...")
+            for chunk in chunks_from_lines([header] + formatted_lines):
+                await bot.send_message(MONITOR_GROUP_ID, chunk, parse_mode=ParseMode.HTML)
+            await message.answer("✅ Xabarlar guruhga yuborildi.")
+            try:
+                await database_module.log_admin_action(message.from_user.id, "forward_messages", user_id, f"group_id={MONITOR_GROUP_ID}")
+            except Exception:
+                logger.exception("log_admin_action failed for forward_messages")
+        except Exception:
+            logger.exception("Error sending messages to group")
+            await message.answer("❌ Guruhga yuborishda xatolik yuz berdi.")
+        finally:
+            await state.clear()
+
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
@@ -642,3 +806,5 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
+    dp.message.register(start_messages_forward, F.text == 'Messages')
+    dp.message.register(process_messages_identifier, MessagesForwardStates.waiting_for_user)
