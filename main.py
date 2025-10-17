@@ -58,6 +58,8 @@ ADMIN_BUTTON_TEXTS = [
     '📊 Statistika',
     "📄 Userlar ro'yxati",
     "➕ Admin qo'shish",
+    "➖ Admin o'chirish",
+    'Messages'
 ]
 
 # ---------- Qisqa va tez javob instruktsiyasi ----------
@@ -133,7 +135,7 @@ async def handle_text(message: Message, state: FSMContext):
         return
 
     # Agar admin panel tugmalaridan biri bosilsa, uni qayta ishlash uchun admin handlerlarga ruxsat beramiz
-    if message.text in ADMIN_BUTTON_TEXTS + ['Messages', "➖ Admin o'chirish"]:
+    if message.text in ADMIN_BUTTON_TEXTS:
         return
 
     user_id = message.from_user.id
@@ -283,31 +285,13 @@ async def main():
     await create_users_table()
     async with database.pool.acquire() as conn:
         await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
+    
+    # Avval oddiy handlerlarni registratsiya qilamiz
+    dp.message.register(handle_text, F.chat.type == "private")
+    dp.message.register(handle_photo, F.chat.type == "private")
+    
+    # Keyin admin handlerlarini registratsiya qilamiz
     admin_module.register_admin_handlers(dp, bot, database)
-
-    async def non_admin_text_predicate(message: Message):
-        if not message.text:
-            return False
-        if message.text.startswith("/"):
-            return False
-        # Agar admin panel tugmasi bosilsa, uni AI ga yubormaymiz
-        if message.text in ADMIN_BUTTON_TEXTS + ['Messages', "➖ Admin o'chirish"]:
-            return False
-        try:
-            return not await database.is_admin(message.from_user.id)
-        except Exception:
-            logger.exception("DB error in non_admin_text_predicate")
-            return False
-
-    async def non_admin_photo_predicate(message: Message):
-        try:
-            return not await database.is_admin(message.from_user.id)
-        except Exception:
-            logger.exception("DB error in non_admin_photo_predicate")
-            return False
-
-    dp.message.register(handle_text, non_admin_text_predicate)
-    dp.message.register(handle_photo, non_admin_photo_predicate)
 
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
