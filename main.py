@@ -132,6 +132,10 @@ async def handle_text(message: Message, state: FSMContext):
         await message.answer("📏 Matningiz juda uzun. Iltimos, 5000 belgidan qisqaroq yozing.")
         return
 
+    # Agar admin panel tugmalaridan biri bosilsa, uni qayta ishlash uchun admin handlerlarga ruxsat beramiz
+    if message.text in ADMIN_BUTTON_TEXTS + ['Messages', "➖ Admin o'chirish"]:
+        return
+
     user_id = message.from_user.id
     chat_id = message.chat.id
     await save_user(user_id, message.from_user.username)
@@ -285,6 +289,9 @@ async def main():
         if not message.text:
             return False
         if message.text.startswith("/"):
+            return False
+        # Agar admin panel tugmasi bosilsa, uni AI ga yubormaymiz
+        if message.text in ADMIN_BUTTON_TEXTS + ['Messages', "➖ Admin o'chirish"]:
             return False
         try:
             return not await database.is_admin(message.from_user.id)
