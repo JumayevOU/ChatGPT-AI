@@ -45,14 +45,6 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
-class MessageMonitorStates(StatesGroup):
-    waiting_for_user = State()
-
-
-# Global monitored users set
-monitored_users = set()
-
-
 def format_dt(dt: datetime) -> str:
     """Format datetime to Asia/Tashkent human-friendly string. Accepts tz-aware or naive (assumed UTC)."""
     if dt is None:
@@ -635,166 +627,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
-    # YANGI FUNKSIYALAR: Message Monitoring
-    async def start_message_monitor(message: Message, state: FSMContext):
-        if not await require_admin_or_deny(message):
-            return
-        await message.answer("Foydalanuvchi ID yoki @username ni kiriting:")
-        await state.set_state(MessageMonitorStates.waiting_for_user)
 
-    async def process_message_monitor_user(message: Message, state: FSMContext):
-        if not await require_admin_or_deny(message):
-            await state.clear()
-            return
-
-        identifier = (message.text or "").strip()
-        if not identifier:
-            await message.answer("Iltimos ID yoki @username kiriting.")
-            return
-
-        user_id = None
-        try:
-            if hasattr(database_module, "get_user_by_identifier"):
-                user_id = await database_module.get_user_by_identifier(identifier)
-            else:
-                async with database_module.pool.acquire() as conn:
-                    if identifier.startswith("@"):
-                        user_id = await conn.fetchval(
-                            "SELECT user_id FROM users WHERE username = $1",
-                            identifier[1:]
-                        )
-                    else:
-                        try:
-                            maybe_id = int(identifier)
-                        except ValueError:
-                            await message.answer("Noto'g'ri ID format. Qayta urinib ko'ring:")
-                            return
-
-                        exists = await conn.fetchval("SELECT 1 FROM users WHERE user_id = $1", maybe_id)
-                        if exists:
-                            user_id = maybe_id
-                        else:
-                            user_id = None
-        except Exception:
-            logger.exception("DB error in process_message_monitor_user")
-            await message.answer("DB xatosi.")
-            return
-
-        if not user_id:
-            await message.answer("Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
-            return
-        
-        # Add user to monitored users
-        monitored_users.add(user_id)
-        
-        await state.update_data(monitoring_user_id=user_id)
-        
-        try:
-            from data.config import GROUP_ID
-        except ImportError:
-            logger.error("GROUP_ID config faylda topilmadi!")
-            await message.answer("GROUP_ID config faylda topilmadi!")
-            await state.clear()
-            return
-        
-        await message.answer(f"{user_id} foydalanuvchisining xabarlari endi kuzatilmoqda.")
-        
-        try:
-            await bot.send_message(
-                GROUP_ID,
-                f"Xabar monitori yoqildi\nFoydalanuvchi: {user_id}\nVaqt: {format_dt(datetime.now())}\nAdmin: {message.from_user.mention_html()}",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Guruhga xabar yuborishda xatolik: {e}")
-
-        await state.clear()
-
-    async def handle_user_message_for_monitor(message: Message):
-        try:
-            if message.chat.type != "private":
-                return
-
-            try:
-                from data.config import GROUP_ID
-            except ImportError:
-                return
-
-            user_id = message.from_user.id
-            
-            if user_id not in monitored_users:
-                return
-
-            user_info = f"{message.from_user.full_name} (ID: {user_id})"
-            if message.from_user.username:
-                user_info += f" @{message.from_user.username}"
-            
-            if message.text:
-                content = f"Xabar: {message.text}"
-            elif message.photo:
-                content = f"Rasm (caption: {message.caption or 'Yoq'})"
-            elif message.video:
-                content = f"Video (caption: {message.caption or 'Yoq'})"
-            elif message.document:
-                content = f"Fayl: {message.document.file_name}"
-            elif message.voice:
-                content = f"Ovozli xabar"
-            elif message.audio:
-                content = f"Audio"
-            else:
-                content = f"Boshqa turdagi xabar"
-            
-            try:
-                await bot.send_message(
-                    GROUP_ID,
-                    f"Foydalanuvchi xabari\n{user_info}\n{content}\n{format_dt(datetime.now())}",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logger.error(f"Foydalanuvchi xabarini guruhga yuborishda xatolik: {e}")
-
-        except Exception as e:
-            logger.exception(f"handle_user_message_for_monitor da xatolik: {e}")
-
-    async def handle_bot_response_for_monitor(message: Message):
-        try:
-            if message.from_user.id != bot.id:
-                return
-
-            try:
-                from data.config import GROUP_ID
-            except ImportError:
-                return
-
-            user_id = message.chat.id
-            
-            if user_id not in monitored_users:
-                return
-
-            if message.text:
-                content = f"Bot javobi: {message.text}"
-            elif message.photo:
-                content = f"Bot rasm yubordi (caption: {message.caption or 'Yoq'})"
-            elif message.video:
-                content = f"Bot video yubordi (caption: {message.caption or 'Yoq'})"
-            elif message.document:
-                content = f"Bot fayl yubordi: {message.document.file_name}"
-            else:
-                content = f"Bot boshqa turdagi xabar yubordi"
-
-            try:
-                await bot.send_message(
-                    GROUP_ID,
-                    f"Bot javobi\nFoydalanuvchi ID: {user_id}\n{content}\n{format_dt(datetime.now())}",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logger.error(f"Bot javobini guruhga yuborishda xatolik: {e}")
-
-        except Exception as e:
-            logger.exception(f"handle_bot_response_for_monitor da xatolik: {e}")
-
-    # register handlers
     dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
     dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
@@ -802,16 +635,9 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
     dp.message.register(start_remove_admin, F.text == "➖ Admin o'chirish")
-    dp.message.register(start_message_monitor, F.text == '👀 Messages')  # Bu qator o'zgardi
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
-    dp.message.register(process_message_monitor_user, MessageMonitorStates.waiting_for_user)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-    
-    # Message monitoring handlerlari - faqat private chat uchun
-    dp.message.register(handle_user_message_for_monitor, F.chat.type == "private")
-    dp.message.register(handle_bot_response_for_monitor, F.chat.type == "private")
-
