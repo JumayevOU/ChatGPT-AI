@@ -802,7 +802,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(handle_dump_users, F.text == "📄 Userlar ro'yxati")
     dp.message.register(start_add_admin, F.text == "➕ Admin qo'shish")
     dp.message.register(start_remove_admin, F.text == "➖ Admin o'chirish")
-    dp.message.register(start_message_monitor, F.text == 'Messages')
+    dp.message.register(start_message_monitor, F.text == '👀 Messages')  # Bu qator o'zgardi
     dp.message.register(process_broadcast, BroadcastStates.waiting_for_broadcast_text)
     dp.message.register(process_user, PMStates.waiting_for_user)
     dp.message.register(process_message, PMStates.waiting_for_message)
@@ -814,3 +814,4 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     # Message monitoring handlerlari - faqat private chat uchun
     dp.message.register(handle_user_message_for_monitor, F.chat.type == "private")
     dp.message.register(handle_bot_response_for_monitor, F.chat.type == "private")
+
