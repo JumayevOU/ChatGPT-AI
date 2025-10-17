@@ -59,7 +59,7 @@ ADMIN_BUTTON_TEXTS = [
     "📄 Userlar ro'yxati",
     "➕ Admin qo'shish",
     "➖ Admin o'chirish",
-    'Messages'
+    '👀 Messages'  # Bu qator o'zgardi
 ]
 
 # ---------- Qisqa va tez javob instruktsiyasi ----------
@@ -137,6 +137,7 @@ async def handle_text(message: Message, state: FSMContext):
     # Agar admin panel tugmalaridan biri bosilsa, uni qayta ishlash uchun admin handlerlarga ruxsat beramiz
     if message.text in ADMIN_BUTTON_TEXTS:
         return
+
 
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -286,12 +287,12 @@ async def main():
     async with database.pool.acquire() as conn:
         await conn.execute("UPDATE admins SET created_at = NOW() - INTERVAL '30 days' WHERE created_at IS NULL;")
     
-    # Avval oddiy handlerlarni registratsiya qilamiz
+    # Avval admin handlerlarini registratsiya qilamiz
+    admin_module.register_admin_handlers(dp, bot, database)
+    
+    # Keyin oddiy handlerlarni registratsiya qilamiz
     dp.message.register(handle_text, F.chat.type == "private")
     dp.message.register(handle_photo, F.chat.type == "private")
-    
-    # Keyin admin handlerlarini registratsiya qilamiz
-    admin_module.register_admin_handlers(dp, bot, database)
 
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
