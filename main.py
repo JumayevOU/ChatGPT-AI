@@ -59,7 +59,7 @@ ADMIN_BUTTON_TEXTS = [
     "📄 Userlar ro'yxati",
     "➕ Admin qo'shish",
     "➖ Admin o'chirish",
-    '👀 Messages'  # Bu qator o'zgardi
+    '👀 Messages'
 ]
 
 # ---------- Qisqa va tez javob instruktsiyasi ----------
@@ -138,9 +138,17 @@ async def handle_text(message: Message, state: FSMContext):
     if message.text in ADMIN_BUTTON_TEXTS:
         return
 
-
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Admin bo'lsa ham AI dan foydalanishi mumkin
+    is_admin_user = False
+    try:
+        is_admin_user = await is_admin(user_id) or await database.is_superadmin(user_id)
+    except Exception:
+        logger.exception("Admin tekshiruvida xato")
+    
+    # Agar admin bo'lsa va admin panel tugmasi bosilmagan bo'lsa, AI ishlatishi mumkin
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "text_message")
 
@@ -205,6 +213,14 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Admin bo'lsa ham AI dan foydalanishi mumkin
+    is_admin_user = False
+    try:
+        is_admin_user = await is_admin(user_id) or await database.is_superadmin(user_id)
+    except Exception:
+        logger.exception("Admin tekshiruvida xato")
+    
     await save_user(user_id, message.from_user.username)
     await log_user_activity(user_id, message.from_user.username, "photo_message")
 
@@ -291,8 +307,30 @@ async def main():
     admin_module.register_admin_handlers(dp, bot, database)
     
     # Keyin oddiy handlerlarni registratsiya qilamiz
-    dp.message.register(handle_text, F.chat.type == "private")
-    dp.message.register(handle_photo, F.chat.type == "private")
+    # Bu handlerlar faqat admin bo'lmagan foydalanuvchilar uchun ishlaydi
+    async def non_admin_text_predicate(message: Message):
+        if not message.text:
+            return False
+        if message.text.startswith("/"):
+            return False
+        if message.text in ADMIN_BUTTON_TEXTS:
+            return False
+        try:
+            return not (await database.is_admin(message.from_user.id) or await database.is_superadmin(message.from_user.id))
+        except Exception:
+            logger.exception("DB error in non_admin_text_predicate")
+            return False
+
+    async def non_admin_photo_predicate(message: Message):
+        try:
+            return not (await database.is_admin(message.from_user.id) or await database.is_superadmin(message.from_user.id))
+        except Exception:
+            logger.exception("DB error in non_admin_photo_predicate")
+            return False
+
+    # Admin bo'lmaganlar uchun handlerlar
+    dp.message.register(handle_text, F.chat.type == "private", non_admin_text_predicate)
+    dp.message.register(handle_photo, F.chat.type == "private", non_admin_photo_predicate)
 
     asyncio.create_task(notify_inactive_users())
     await bot(DeleteWebhook(drop_pending_updates=True))
