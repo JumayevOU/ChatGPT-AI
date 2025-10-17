@@ -3,6 +3,7 @@ import json
 import os
 import asyncio
 from datetime import datetime, timezone, timedelta
+
 from aiogram import Bot, F
 from aiogram.types import (
     Message,
@@ -16,8 +17,10 @@ from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+
 from keyboards import admin_keyboard
-from zoneinfo import ZoneInfo 
+
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,10 @@ class RemoveAdminStates(StatesGroup):
 
 class MessageMonitorStates(StatesGroup):
     waiting_for_user = State()
+
+
+# Global monitored users set
+monitored_users = set()
 
 
 def format_dt(dt: datetime) -> str:
@@ -676,7 +683,10 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         if not user_id:
             await message.answer("Foydalanuvchi topilmadi. Qayta urinib ko'ring.")
             return
-
+        
+        # Add user to monitored users
+        monitored_users.add(user_id)
+        
         await state.update_data(monitoring_user_id=user_id)
         
         try:
@@ -686,11 +696,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             await message.answer("GROUP_ID config faylda topilmadi!")
             await state.clear()
             return
-        
-        if not hasattr(process_message_monitor_user, 'monitored_users'):
-            process_message_monitor_user.monitored_users = set()
-        
-        process_message_monitor_user.monitored_users.add(user_id)
         
         await message.answer(f"{user_id} foydalanuvchisining xabarlari endi kuzatilmoqda.")
         
@@ -715,12 +720,9 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             except ImportError:
                 return
 
-            if not hasattr(process_message_monitor_user, 'monitored_users'):
-                process_message_monitor_user.monitored_users = set()
-
             user_id = message.from_user.id
             
-            if user_id not in process_message_monitor_user.monitored_users:
+            if user_id not in monitored_users:
                 return
 
             user_info = f"{message.from_user.full_name} (ID: {user_id})"
@@ -766,10 +768,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
             user_id = message.chat.id
             
-            if not hasattr(process_message_monitor_user, 'monitored_users'):
-                return
-            
-            if user_id not in process_message_monitor_user.monitored_users:
+            if user_id not in monitored_users:
                 return
 
             if message.text:
@@ -811,6 +810,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.message.register(process_message_monitor_user, MessageMonitorStates.waiting_for_user)
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-    dp.message.register(handle_user_message_for_monitor)
-    dp.message.register(handle_bot_response_for_monitor)
-
+    
+    # Message monitoring handlerlari - faqat private chat uchun
+    dp.message.register(handle_user_message_for_monitor, F.chat.type == "private")
+    dp.message.register(handle_bot_response_for_monitor, F.chat.type == "private")
