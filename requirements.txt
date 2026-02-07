@@ -1,0 +1,10 @@
+aiogram
+openai
+pydantic>=2.0
+python-dotenv
+aiohttp
+flask
+asyncpg
+
+
+
