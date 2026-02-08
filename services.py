@@ -1,4 +1,5 @@
 import os
+import shutil
 import speech_recognition as sr
 from pydub import AudioSegment
 import edge_tts
@@ -13,8 +14,16 @@ from typing import List, Dict
 import matplotlib.pyplot as plt
 from io import BytesIO
 
-# FFmpegni tanitish (Windows uchun)
-AudioSegment.converter = "ffmpeg.exe"
+# ---------------------------------------------------
+# FFmpeg SOZLAMASI (Linux/Windows uchun moslashtirish)
+# ---------------------------------------------------
+# Avval tizimdan 'ffmpeg' bor-yo'qligini tekshiramiz (Linux uchun)
+if shutil.which("ffmpeg"):
+    AudioSegment.converter = "ffmpeg"
+else:
+    # Agar tizimda topilmasa, Windows uchun .exe ni sinab ko'ramiz
+    # (Agar lokal kompyuterda Windows bo'lsa)
+    AudioSegment.converter = "ffmpeg.exe"
 
 # ---------------------------------------------------
 # CONFIG VA IMPORTLAR
@@ -26,6 +35,7 @@ try:
         CONTEXT_WINDOW, OCR_API_KEY, OPENAI_API_KEY
     )
 except ImportError:
+    # Agar config fayli topilmasa, o'zgaruvchilarni shu yerdan olish (fallback)
     import os
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     SYSTEM_PROMPT = "You are a helpful assistant."
@@ -53,14 +63,21 @@ def clean_response(text: str) -> str:
     text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
     text = text.replace("### ", "").replace("## ", "")
     
-    # 2. Yulduzchalarni (**text**) <b>text</b> ga o'tkazish (HTML uchun)
+    # 2. Yulduzchalarni (**text**) <b>text</b> ga o'tkazish (HTML formatlash uchun)
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
     
-    # 3. Agar $$ formulalar qolib ketgan bo'lsa, ularni ham qalin qilamiz
-    text = re.sub(r'\$\$(.*?)\$\$', r'<b>\1</b>', text)
-    text = re.sub(r'\$(.*?)\$', r'<b>\1</b>', text)
+    # 3. Agar $$ formulalar qolib ketgan bo'lsa, ularni ham qalin qilamiz (matn ichida chiroyli ko'rinishi uchun)
+    # DIQQAT: Agar siz formulalarni rasm (image) sifatida chiqarayotgan bo'lsangiz,
+    # handlers.py da $$ larni qayta ishlash logikasi bo'lishi kerak.
+    # Bu funksiya shunchaki matnni tozalaydi.
+    # Agar $$ belgilarni handlers.py da split qilish uchun kerak bo'lsa, 
+    # quyidagi 2 qatorni kommentariyaga olib qo'yishingiz mumkin.
+    # Lekin hozirgi so'rovingiz bo'yicha HTML formatlash uchun qoldiramiz:
     
-    # 4. LaTeX qavslarini tozalash
+    # text = re.sub(r'\$\$(.*?)\$\$', r'<b>\1</b>', text) # Agar rasm qilmoqchi bo'lsangiz buni o'chiring
+    # text = re.sub(r'\$(.*?)\$', r'<b>\1</b>', text)     # Buni ham
+    
+    # 4. LaTeX qavslarini tozalash va HTML ga moslash
     text = text.replace("\\[", "<b>").replace("\\]", "</b>")
     text = text.replace("\\(", "<b>").replace("\\)", "</b>")
 
@@ -292,7 +309,7 @@ def render_latex_to_image(formula: str) -> BytesIO:
     LaTeX formulani rasmga (BytesIO) aylantirib beradi.
     """
     try:
-        # Matplotlib backendini xavfsiz holatga o'tkazish
+        # Linux serverda GUI (oyna) yo'qligi sababli 'Agg' backend ishlatish shart
         plt.switch_backend('Agg') 
 
         # Matplotlib sozlamalari (kichik oyna)
