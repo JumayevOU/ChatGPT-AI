@@ -8,7 +8,7 @@ from database import create_db_pool, create_users_table
 import database
 import admin as admin_module
 from helpers import ensure_pin_column, notify_inactive_users
-
+from handlers_messages import handle_start, handle_text, handle_photo, handle_voice 
 from handlers_messages import handle_start, handle_text, handle_photo
 from handlers_callbacks import handle_retry_callback, handle_expand_callback, handle_resend_photo_callback
 
@@ -38,7 +38,7 @@ async def main():
     
     dp.message.register(handle_text, F.text, non_admin_predicate)
     dp.message.register(handle_photo, F.photo, non_admin_predicate)
-
+    dp.message.register(handle_voice, F.voice, non_admin_predicate)
     dp.callback_query.register(handle_retry_callback, lambda q: q.data and q.data.startswith("retry:"))
     dp.callback_query.register(handle_expand_callback, lambda q: q.data and q.data.startswith("expand:"))
     dp.callback_query.register(handle_resend_photo_callback, lambda q: q.data and q.data.startswith("resend_photo:"))

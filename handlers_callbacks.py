@@ -8,6 +8,9 @@ from memory import failed_requests, ongoing_requests, user_last_action_ts, expan
 from services import get_gpt_reply, safe_update_history, clean_response
 from helpers import send_long_text, make_retry_keyboard
 
+# --------------------------------------------------
+# 1. RETRY HANDLER (Qayta urinish)
+# --------------------------------------------------
 async def handle_retry_callback(query: CallbackQuery):
     data = query.data or ""
     if not data.startswith("retry:"):
@@ -56,7 +59,7 @@ async def handle_retry_callback(query: CallbackQuery):
             fr["attempts_auto"] += 1
             reply = await get_gpt_reply(chat_id, prompt)
             
-            # Majburiy tozalash (Retry uchun)
+            # --- MUHIM: JAVOBNI TOZALASH ---
             reply = clean_response(reply)
 
             try: await safe_update_history(chat_id, reply, role="assistant")
@@ -65,9 +68,13 @@ async def handle_retry_callback(query: CallbackQuery):
             try:
                 try: await bot.delete_message(chat_id, fr["error_message_id"])
                 except: pass
-                await send_long_text(chat_id, reply, parse_mode="Markdown")
-            except:
-                 await bot.send_message(chat_id, reply, parse_mode="Markdown")
+                # parse_mode="HTML" ishlatamiz
+                await send_long_text(chat_id, reply, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Retry send error: {e}")
+                # Agar HTML da xato bo'lsa, oddiy matn qilib yuboramiz
+                await bot.send_message(chat_id, reply) # parse_mode yo'q
+
             success = True
             break
         except Exception as e:
@@ -85,6 +92,9 @@ async def handle_retry_callback(query: CallbackQuery):
             await query.message.edit_text("❌ Javob olinmadi.", reply_markup=kb)
         except: pass
 
+# --------------------------------------------------
+# 2. EXPAND HANDLER (Batafsil javob)
+# --------------------------------------------------
 async def handle_expand_callback(query: CallbackQuery):
     data = query.data or ""
     if not data.startswith("expand:"): return
@@ -109,15 +119,14 @@ async def handle_expand_callback(query: CallbackQuery):
     try:
         reply = await get_gpt_reply(chat_id, detailed_prompt)
         
-        # --- O'ZGARISH SHU YERDA ---
-        # AI dan javob kelgach, uni yana bir bor "Filtr"dan o'tkazamiz
+        # --- MUHIM: JAVOBNI TOZALASH ---
         reply = clean_response(reply)
-        # ---------------------------
 
         try: await safe_update_history(chat_id, reply, role="assistant")
         except: pass
         
-        await send_long_text(chat_id, reply, parse_mode="Markdown")
+        # parse_mode="HTML" ishlatamiz
+        await send_long_text(chat_id, reply, parse_mode="HTML")
         
         try: await bot.delete_message(chat_id, loading_msg.message_id)
         except: pass
@@ -128,7 +137,10 @@ async def handle_expand_callback(query: CallbackQuery):
         except: pass
         await bot.send_message(chat_id, "❌ To'liq javob olishda xatolik yuz berdi.")
 
+# --------------------------------------------------
+# 3. RESEND PHOTO HANDLER (Rasmni qayta yuborish)
+# --------------------------------------------------
 async def handle_resend_photo_callback(query: CallbackQuery):
     await query.answer()
-    try: await query.message.answer("Iltimos, rasmni yuboring.")
+    try: await query.message.answer("📸 Iltimos, rasmni qayta yuboring.")
     except: pass

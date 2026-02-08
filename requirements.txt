@@ -5,6 +5,6 @@ python-dotenv
 aiohttp
 flask
 asyncpg
-
-
-
+pydub
+edge-tts
+matplotlib

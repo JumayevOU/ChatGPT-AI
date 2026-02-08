@@ -1,11 +1,24 @@
+import os
+import speech_recognition as sr
+from pydub import AudioSegment
+import edge_tts
 import inspect
 import asyncio
 import aiohttp
 import re
 import logging
+import html
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict
+import matplotlib.pyplot as plt
+from io import BytesIO
 
+# FFmpegni tanitish (Windows uchun)
+AudioSegment.converter = "ffmpeg.exe"
+
+# ---------------------------------------------------
+# CONFIG VA IMPORTLAR
+# ---------------------------------------------------
 try:
     from config import (
         SYSTEM_PROMPT, GPT_MODEL, GPT_TEMPERATURE, GPT_MAX_TOKENS, GPT_TOP_P,
@@ -31,32 +44,31 @@ from loader import openai_client, logger
 from utils.history import update_chat_history
 
 # ------------------------------------------------------------
-# YAKUNIY TOZALASH FUNKSIYASI
+# 1. TOZALASH FUNKSIYASI (CLEAN RESPONSE)
 # ------------------------------------------------------------
 def clean_response(text: str) -> str:
-    """
-    1. ### va ## belgilarni SHUNCHAKI O'CHIRADI. Matnni qalin qilmaydi.
-       Natija: "### 1. Kirish" -> "1. Kirish" (Ro'yxat saqlanadi).
-    2. #heshteg larni saqlab qoladi (chunki probelga qaraymiz).
-    """
-    if not text:
-        return ""
+    if not text: return ""
     
-    # 1. Satr boshidagi ###, ##, # belgilarni olib tashlaymiz.
-    # Mantiq: ^(boshlanish) + bo'sh joy + # + YANA BO'SH JOY (\s+)
-    # \s+ bo'lishi shart, shunda #Hashtag (probelsiz) o'chib ketmaydi.
+    # 1. Sarlavha panjaralarini (###) olib tashlash
     text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
-    
-    # 2. Ehtiyot shart: matn orasida qolib ketgan "### " larni tozalash
     text = text.replace("### ", "").replace("## ", "")
-
-    # 3. Yulduzchalarni to'g'irlash (agar AI o'zi qo'shgan bo'lsa)
-    # Ba'zan AI "**### Matn**" yuboradi -> "** Matn**" qoladi -> "**Matn**" qilamiz
-    text = text.replace("** ", "**").replace(" **", "**")
+    
+    # 2. Yulduzchalarni (**text**) <b>text</b> ga o'tkazish (HTML uchun)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+    
+    # 3. Agar $$ formulalar qolib ketgan bo'lsa, ularni ham qalin qilamiz
+    text = re.sub(r'\$\$(.*?)\$\$', r'<b>\1</b>', text)
+    text = re.sub(r'\$(.*?)\$', r'<b>\1</b>', text)
+    
+    # 4. LaTeX qavslarini tozalash
+    text = text.replace("\\[", "<b>").replace("\\]", "</b>")
+    text = text.replace("\\(", "<b>").replace("\\)", "</b>")
 
     return text.strip()
-# ------------------------------------------------------------
 
+# ------------------------------------------------------------
+# 2. TARIX VA YORDAMCHI FUNKSIYALAR
+# ------------------------------------------------------------
 async def safe_update_history(chat_id: int, content: str, role: str = "user"):
     if not content: return
     try:
@@ -130,11 +142,9 @@ def role_instruction(role: str) -> str:
     if role == "supportive": return "Javobni yumshoq, empatik va qo'llab-quvvatlovchi uslubda bering."
     return ""
 
-try:
-    from service.openai_service import get_openai_reply as service_get_openai_reply
-except Exception:
-    service_get_openai_reply = None
-
+# ------------------------------------------------------------
+# 3. OPENAI CORE (AI MIYASI)
+# ------------------------------------------------------------
 async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_MODEL,
                            temperature: float = GPT_TEMPERATURE, max_tokens: int = GPT_MAX_TOKENS,
                            top_p: float = GPT_TOP_P, frequency_penalty: float = GPT_FREQUENCY_PENALTY,
@@ -165,13 +175,8 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
     if ENABLE_STREAMING:
         try:
             stream = await openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty,
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                top_p=top_p, frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
                 stream=True 
             )
             collected = ""
@@ -201,6 +206,9 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
 async def get_gpt_reply(chat_id: int, user_message: str):
     return await get_openai_reply(chat_id, user_message)
 
+# ------------------------------------------------------------
+# 4. OCR (RASM O'QISH)
+# ------------------------------------------------------------
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
     headers = {"apikey": OCR_API_KEY}
@@ -216,3 +224,100 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
     except Exception as e:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
+
+# ------------------------------------------------------------
+# 5. VOICE TO TEXT (OVOZNI O'QISH)
+# ------------------------------------------------------------
+async def speech_to_text(file_path: str) -> str:
+    r = sr.Recognizer()
+    wav_path = file_path + ".wav"
+    
+    try:
+        audio = AudioSegment.from_file(file_path)
+        audio.export(wav_path, format="wav")
+        
+        with sr.AudioFile(wav_path) as source:
+            audio_data = r.record(source)
+            text = r.recognize_google(audio_data, language="uz-UZ")
+            return text
+            
+    except sr.UnknownValueError:
+        return "" 
+    except sr.RequestError:
+        return "" 
+    except Exception as e:
+        logger.error(f"Ovoz xatosi: {e}")
+        return ""
+    finally:
+        try:
+            if os.path.exists(file_path): os.remove(file_path)
+            if os.path.exists(wav_path): os.remove(wav_path)
+        except: pass    
+
+# ------------------------------------------------------------
+# 6. TEXT TO SPEECH (MATNNI OVOZGA AYLANTIRISH)
+# ------------------------------------------------------------
+async def text_to_speech(text: str, filename: str) -> str:
+    """
+    Matnni o'zbek tilida ovozli faylga aylantiradi.
+    O'zgarishlar:
+    1. ' va ` belgilarni 'ʻ' (tutuq belgisi) ga almashtiradi.
+    2. HTML teglarni tozalaydi.
+    3. Madina ovozidan foydalanadi.
+    4. Tezlik -10% sekinlashtirilgan.
+    """
+    
+    # MUHIM: Apostroflarni to'g'irlash ("O'zbek" -> "O‘zbek")
+    text = text.replace("'", "‘").replace("`", "‘")
+
+    # Ovoz uchun matnni tozalash (HTML teglarni olib tashlash)
+    clean_text_for_speech = re.sub(r'<[^>]+>', '', text)
+
+    VOICE = "uz-UZ-MadinaNeural"
+    
+    try:
+        # rate="-10%" sekinroq va aniqroq o'qishi uchun
+        communicate = edge_tts.Communicate(clean_text_for_speech, VOICE, rate="-10%")
+        await communicate.save(filename)
+        return filename
+    except Exception as e:
+        logger.error(f"TTS xatosi: {e}")
+        return None
+
+# ------------------------------------------------------------
+# 7. FORMULANI RASMGA AYLANTIRISH (LaTeX -> Image)
+# ------------------------------------------------------------
+def render_latex_to_image(formula: str) -> BytesIO:
+    """
+    LaTeX formulani rasmga (BytesIO) aylantirib beradi.
+    """
+    try:
+        # Matplotlib backendini xavfsiz holatga o'tkazish
+        plt.switch_backend('Agg') 
+
+        # Matplotlib sozlamalari (kichik oyna)
+        plt.figure(figsize=(0.1, 0.1))
+        
+        # Formulani yozish ($ ichiga olamiz)
+        text = f"${formula}$"
+        
+        # Rasm chizish
+        fig = plt.figure()
+        
+        # Matnni markazga joylashtirish
+        plt.text(0.5, 0.5, text, fontsize=20, ha='center', va='center')
+        
+        # O'qlar va ramkalarni o'chirish
+        plt.axis('off')
+        
+        # Rasmni xotiraga saqlash
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=200)
+        buf.seek(0)
+        
+        plt.close(fig) # Xotirani tozalash
+        return buf
+        
+    except Exception as e:
+        logger.error(f"LaTeX render error: {e}")
+        return None

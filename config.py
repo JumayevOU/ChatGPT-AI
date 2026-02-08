@@ -28,9 +28,15 @@ SYSTEM_PROMPT = (
 
 CONCISE_INSTRUCTION = (
     "Qoida: Oddiy suhbat va salomlashish uchun (masalan: 'Salom', 'Rahmat') juda QISQA (1-2 gap) javob bering va oxiriga [NO_BUTTON] qo'shing.\n"
-    "LEKIN: Agar savol MATEMATIKA, FIZIKA, KODLASH yoki MANTIQIY MASALA bo'lsa, qisqartirmang! "
-    "Bunday hollarda yechilish yo'lini bosqichma-bosqich tushuntirib, keyin javobni bering.\n"
-    "Oddiy ma'lumot so'ralsa (masalan: 'Olma haqida'), 2-3 ta asosiy fakt bilan qisqa javob bering."
+    "Oddiy ma'lumot so'ralsa, 2-3 ta asosiy fakt bilan qisqa javob bering."
+)
+
+STRICT_MATH_RULES = (
+    "\n⚠️ MUHIM QOIDALAR (Fizika/Matematika/Kimyo uchun):"
+    "\n1. Javobingiz MAKSIMAL DARAJADA QISQA va ANIQ bo'lsin."
+    "\n2. Masalalarni yechishda ZINHOR dasturlash kodidan (Python, Code block) foydalanmang."
+    "\n3. Formulalarni tabiiy matematik ko'rinishda yozing (masalan: F = m*a)."
+    "\n4. Agar foydalanuvchi aniq 'kod yoz' demasa, faqat nazariy yechim va javobni bering."
 )
 
 STATIC_KNOWLEDGE_BASE = {
