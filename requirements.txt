@@ -8,3 +8,4 @@ asyncpg
 pydub
 edge-tts
 matplotlib
+SpeechRecognition
