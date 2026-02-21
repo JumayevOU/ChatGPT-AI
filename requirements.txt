@@ -9,3 +9,7 @@ pydub
 edge-tts
 matplotlib
 SpeechRecognition
+duckduckgo-search
+PyMuPDF
+youtube-transcript-api
+
