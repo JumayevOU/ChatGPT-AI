@@ -1,12 +1,12 @@
 import time
 import random
 import asyncio
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, BufferedInputFile
 from config import MAX_MANUAL_RETRIES, MAX_AUTO_RETRIES, AUTO_BACKOFFS, USER_COOLDOWN
 from loader import logger, bot
-from memory import failed_requests, ongoing_requests, user_last_action_ts, expansion_requests, clear_failed_request
-from services import get_gpt_reply, safe_update_history, clean_response
-from helpers import send_long_text, make_retry_keyboard
+from memory import failed_requests, ongoing_requests, user_last_action_ts, expansion_requests, clear_failed_request, last_button_messages
+from services import get_gpt_reply, safe_update_history, clean_response, render_latex_to_image
+from helpers import send_long_text, make_retry_keyboard, make_expand_keyboard
 
 # --------------------------------------------------
 # 1. RETRY HANDLER (Qayta urinish)
@@ -59,6 +59,11 @@ async def handle_retry_callback(query: CallbackQuery):
             fr["attempts_auto"] += 1
             reply = await get_gpt_reply(chat_id, prompt)
             
+            show_button = True
+            if "[NO_BUTTON]" in reply:
+                reply = reply.replace("[NO_BUTTON]", "").strip()
+                show_button = False
+
             # --- MUHIM: JAVOBNI TOZALASH ---
             reply = clean_response(reply)
 
@@ -68,8 +73,34 @@ async def handle_retry_callback(query: CallbackQuery):
             try:
                 try: await bot.delete_message(chat_id, fr["error_message_id"])
                 except: pass
-                # parse_mode="HTML" ishlatamiz
-                await send_long_text(chat_id, reply, parse_mode="HTML")
+                
+                # FORMULA TEKSHIRUVI ($$) VA YAKUNIY HTML XABAR
+                if "$$" in reply:
+                    parts = reply.split("$$")
+                    for i, part in enumerate(parts):
+                        part = part.strip()
+                        if not part: continue
+                        
+                        if i % 2 == 0:
+                            await send_long_text(chat_id, part, parse_mode="HTML")
+                        else:
+                            image_buf = render_latex_to_image(part)
+                            if image_buf:
+                                photo = BufferedInputFile(image_buf.getvalue(), filename="formula.png")
+                                await bot.send_photo(chat_id, photo)
+                            else:
+                                await bot.send_message(chat_id, f"<b>{part}</b>", parse_mode="HTML")
+                    
+                    expand_kb = make_expand_keyboard(chat_id) if show_button else None
+                    if expand_kb:
+                         sent = await bot.send_message(chat_id, "Davom ettirish:", reply_markup=expand_kb)
+                         last_button_messages[chat_id] = sent.message_id
+                else:
+                    expand_kb = make_expand_keyboard(chat_id) if show_button else None
+                    sent_msg = await send_long_text(chat_id, reply, parse_mode="HTML", reply_markup=expand_kb)
+                    if sent_msg and show_button:
+                        last_button_messages[chat_id] = sent_msg.message_id
+                        
             except Exception as e:
                 logger.error(f"Retry send error: {e}")
                 # Agar HTML da xato bo'lsa, oddiy matn qilib yuboramiz
@@ -125,11 +156,27 @@ async def handle_expand_callback(query: CallbackQuery):
         try: await safe_update_history(chat_id, reply, role="assistant")
         except: pass
         
-        # parse_mode="HTML" ishlatamiz
-        await send_long_text(chat_id, reply, parse_mode="HTML")
-        
         try: await bot.delete_message(chat_id, loading_msg.message_id)
         except: pass
+
+        # FORMULA TEKSHIRUVI ($$) VA YAKUNIY HTML XABAR
+        if "$$" in reply:
+            parts = reply.split("$$")
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if not part: continue
+                
+                if i % 2 == 0:
+                    await send_long_text(chat_id, part, parse_mode="HTML")
+                else:
+                    image_buf = render_latex_to_image(part)
+                    if image_buf:
+                        photo = BufferedInputFile(image_buf.getvalue(), filename="formula.png")
+                        await bot.send_photo(chat_id, photo)
+                    else:
+                        await bot.send_message(chat_id, f"<b>{part}</b>", parse_mode="HTML")
+        else:
+            await send_long_text(chat_id, reply, parse_mode="HTML")
 
     except Exception as e:
         logger.exception(f"Expand error: {e}")
