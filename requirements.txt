@@ -1,0 +1,16 @@
+aiogram
+openai
+pydantic>=2.0
+python-dotenv
+aiohttp
+flask
+asyncpg
+pydub
+edge-tts
+matplotlib
+SpeechRecognition
+duckduckgo-search
+PyMuPDF
+youtube-transcript-api
+ddgs
+aiosqlite
