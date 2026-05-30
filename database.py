@@ -175,7 +175,11 @@ async def get_all_users() -> List[Dict[str, Any]]:
                 'user_id': r['user_id'],
                 'username': r.get('username'),
                 'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
+<<<<<<< HEAD
                 # XATO SHU YERDA EDI (created_at_raw qo'shtirnoqsiz qolgandi), TO'G'RILANDI:
+=======
+                # raw datetimes for program logic (may be tz-aware)
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
                 'created_at_raw': created_raw,
                 'last_seen_raw': last_raw,
                 # formatted strings for display
@@ -264,6 +268,7 @@ async def get_users_count() -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
+<<<<<<< HEAD
 # -------------------------
 # Yangi Profile Stats Funksiyasi
 # -------------------------
@@ -294,6 +299,8 @@ async def get_user_stats(user_id: int) -> Dict[str, Any]:
             'doc_count': row['doc_count'] if row else 0,
             'total_count': row['total_count'] if row else 0,
         }
+=======
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
 # -------------------------
 # Admins / superadmin helpers

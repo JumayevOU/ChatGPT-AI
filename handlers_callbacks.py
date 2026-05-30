@@ -1,4 +1,5 @@
 import time
+<<<<<<< HEAD
 import asyncio
 from aiogram.types import CallbackQuery
 from config import MAX_MANUAL_RETRIES, MAX_AUTO_RETRIES, AUTO_BACKOFFS, USER_COOLDOWN
@@ -13,6 +14,16 @@ from services import get_gpt_reply, safe_update_history
 from helpers import make_retry_keyboard
 
 from handlers_messages import process_stream_draft
+=======
+import random
+import asyncio
+from aiogram.types import CallbackQuery, BufferedInputFile
+from config import MAX_MANUAL_RETRIES, MAX_AUTO_RETRIES, AUTO_BACKOFFS, USER_COOLDOWN
+from loader import logger, bot
+from memory import failed_requests, ongoing_requests, user_last_action_ts, expansion_requests, clear_failed_request, last_button_messages
+from services import get_gpt_reply, safe_update_history, clean_response, render_latex_to_image
+from helpers import send_long_text, make_retry_keyboard, make_expand_keyboard
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
 # --------------------------------------------------
 # 1. RETRY HANDLER (Qayta urinish)
@@ -21,7 +32,10 @@ async def handle_retry_callback(query: CallbackQuery):
     data = query.data or ""
     if not data.startswith("retry:"):
         await query.answer("Noto'g'ri so'rov.", show_alert=True); return
+<<<<<<< HEAD
 
+=======
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     try: chat_id = int(data.split(":", 1)[1])
     except: await query.answer("Noto'g'ri so'rov.", show_alert=True); return
 
@@ -45,6 +59,7 @@ async def handle_retry_callback(query: CallbackQuery):
     if fr["attempts_manual"] >= MAX_MANUAL_RETRIES:
         await query.answer("Maksimal urinish tugadi.", show_alert=True); return
 
+<<<<<<< HEAD
     if is_ongoing(chat_id):
         await query.answer("Jarayon ketmoqda...", show_alert=False); return
 
@@ -53,15 +68,30 @@ async def handle_retry_callback(query: CallbackQuery):
     fr["last_attempt_ts"] = now
 
     try: await query.message.edit_reply_markup(reply_markup=None)
+=======
+    if ongoing_requests.get(chat_id):
+        await query.answer("Jarayon ketmoqda...", show_alert=False); return
+
+    ongoing_requests[chat_id] = True
+    fr["attempts_manual"] += 1
+    fr["last_attempt_ts"] = now
+
+    try: await query.message.edit_text("⏳ Qayta so‘ralmoqda... Iltimos kuting.")
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     except: pass
 
     prompt = fr.get("prompt")
     if not prompt:
+<<<<<<< HEAD
         release_ongoing(chat_id)
+=======
+        ongoing_requests.pop(chat_id, None)
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
         await bot.send_message(chat_id, "⚠️ So'rov topilmadi."); return
 
     success = False
     for attempt_idx in range(MAX_AUTO_RETRIES):
+<<<<<<< HEAD
         if attempt_idx > 0:
             wait = AUTO_BACKOFFS[min(attempt_idx - 1, len(AUTO_BACKOFFS) - 1)]
             await asyncio.sleep(wait)
@@ -78,13 +108,72 @@ async def handle_retry_callback(query: CallbackQuery):
 
             try: await safe_update_history(chat_id, reply, role="assistant")
             except: pass
+=======
+        try:
+            fr["attempts_auto"] += 1
+            reply = await get_gpt_reply(chat_id, prompt)
+            
+            show_button = True
+            if "[NO_BUTTON]" in reply:
+                reply = reply.replace("[NO_BUTTON]", "").strip()
+                show_button = False
+
+            # --- MUHIM: JAVOBNI TOZALASH ---
+            reply = clean_response(reply)
+
+            try: await safe_update_history(chat_id, reply, role="assistant")
+            except: pass
+            
+            try:
+                try: await bot.delete_message(chat_id, fr["error_message_id"])
+                except: pass
+                
+                # FORMULA TEKSHIRUVI ($$) VA YAKUNIY HTML XABAR
+                if "$$" in reply:
+                    parts = reply.split("$$")
+                    for i, part in enumerate(parts):
+                        part = part.strip()
+                        if not part: continue
+                        
+                        if i % 2 == 0:
+                            await send_long_text(chat_id, part, parse_mode="HTML")
+                        else:
+                            image_buf = render_latex_to_image(part)
+                            if image_buf:
+                                photo = BufferedInputFile(image_buf.getvalue(), filename="formula.png")
+                                await bot.send_photo(chat_id, photo)
+                            else:
+                                await bot.send_message(chat_id, f"<b>{part}</b>", parse_mode="HTML")
+                    
+                    expand_kb = make_expand_keyboard(chat_id) if show_button else None
+                    if expand_kb:
+                         sent = await bot.send_message(chat_id, "Davom ettirish:", reply_markup=expand_kb)
+                         last_button_messages[chat_id] = sent.message_id
+                else:
+                    expand_kb = make_expand_keyboard(chat_id) if show_button else None
+                    sent_msg = await send_long_text(chat_id, reply, parse_mode="HTML", reply_markup=expand_kb)
+                    if sent_msg and show_button:
+                        last_button_messages[chat_id] = sent_msg.message_id
+                        
+            except Exception as e:
+                logger.error(f"Retry send error: {e}")
+                # Agar HTML da xato bo'lsa, oddiy matn qilib yuboramiz
+                await bot.send_message(chat_id, reply) # parse_mode yo'q
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
             success = True
             break
         except Exception as e:
             logger.exception(f"Retry failed: {e}")
+<<<<<<< HEAD
 
     release_ongoing(chat_id)
+=======
+            wait = AUTO_BACKOFFS[min(attempt_idx, len(AUTO_BACKOFFS)-1)]
+            await asyncio.sleep(wait + random.random() * 0.3)
+
+    ongoing_requests.pop(chat_id, None)
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     if success:
         clear_failed_request(chat_id)
     else:
@@ -102,16 +191,23 @@ async def handle_expand_callback(query: CallbackQuery):
     if not data.startswith("expand:"): return
     try: chat_id = int(data.split(":", 1)[1])
     except: return
+<<<<<<< HEAD
 
     await query.answer()
 
     original_text = get_expansion_request(chat_id)
+=======
+    
+    await query.answer()
+    original_text = expansion_requests.get(chat_id)
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     if not original_text:
         await query.answer("⚠️ Matn xotiradan o'chgan.", show_alert=True)
         try: await query.message.edit_reply_markup(reply_markup=None)
         except: pass
         return
 
+<<<<<<< HEAD
     try: await query.message.edit_reply_markup(reply_markup=None)
     except: pass
 
@@ -130,6 +226,50 @@ async def handle_expand_callback(query: CallbackQuery):
 
     except Exception as e:
         logger.exception(f"Expand error: {e}")
+=======
+    # Tugmani yo'qotish
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    
+    loading_msg = await query.message.reply("⏳ To'liq javob tayyorlanmoqda...")
+
+    detailed_prompt = "Batafsil, kengaytirilgan va to'liq tushuntirib javob bering:\n\n" + original_text
+    try:
+        reply = await get_gpt_reply(chat_id, detailed_prompt)
+        
+        # --- MUHIM: JAVOBNI TOZALASH ---
+        reply = clean_response(reply)
+
+        try: await safe_update_history(chat_id, reply, role="assistant")
+        except: pass
+        
+        try: await bot.delete_message(chat_id, loading_msg.message_id)
+        except: pass
+
+        # FORMULA TEKSHIRUVI ($$) VA YAKUNIY HTML XABAR
+        if "$$" in reply:
+            parts = reply.split("$$")
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if not part: continue
+                
+                if i % 2 == 0:
+                    await send_long_text(chat_id, part, parse_mode="HTML")
+                else:
+                    image_buf = render_latex_to_image(part)
+                    if image_buf:
+                        photo = BufferedInputFile(image_buf.getvalue(), filename="formula.png")
+                        await bot.send_photo(chat_id, photo)
+                    else:
+                        await bot.send_message(chat_id, f"<b>{part}</b>", parse_mode="HTML")
+        else:
+            await send_long_text(chat_id, reply, parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception(f"Expand error: {e}")
+        try: await bot.delete_message(chat_id, loading_msg.message_id)
+        except: pass
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
         await bot.send_message(chat_id, "❌ To'liq javob olishda xatolik yuz berdi.")
 
 # --------------------------------------------------

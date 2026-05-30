@@ -2,22 +2,36 @@ import asyncio
 from aiogram import types, F  
 from aiogram.filters import CommandStart
 from aiogram.methods import DeleteWebhook
+<<<<<<< HEAD
+=======
+
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 from loader import dp, bot, logger
 from database import create_db_pool, create_users_table
 import database
 import admin as admin_module
 from helpers import ensure_pin_column, notify_inactive_users
+<<<<<<< HEAD
 from handlers_messages import handle_start, handle_text, handle_photo, handle_document, handle_voice 
 from handlers_callbacks import handle_retry_callback
 from utils.history import init_db
 from memory import start_cleanup_task
+=======
+from handlers_messages import handle_start, handle_text, handle_photo, handle_voice 
+from handlers_messages import handle_start, handle_text, handle_photo
+from handlers_callbacks import handle_retry_callback, handle_expand_callback, handle_resend_photo_callback
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
 async def main():
     await create_db_pool()
     await create_users_table()
     await ensure_pin_column()
+<<<<<<< HEAD
     await init_db()
     asyncio.create_task(start_cleanup_task())
+=======
+
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     try:
         import utils.history as uh
         if hasattr(uh, "create_history_table"):
@@ -36,15 +50,30 @@ async def main():
             return False
 
     dp.message.register(handle_start, CommandStart())
+<<<<<<< HEAD
     dp.message.register(handle_text, F.text, non_admin_predicate)
     dp.message.register(handle_photo, F.photo, non_admin_predicate)
     dp.message.register(handle_document, F.document, non_admin_predicate) 
     dp.message.register(handle_voice, F.voice, non_admin_predicate)
     dp.callback_query.register(handle_retry_callback, lambda q: q.data and q.data.startswith("retry:"))
+=======
+    
+    dp.message.register(handle_text, F.text, non_admin_predicate)
+    dp.message.register(handle_photo, F.photo, non_admin_predicate)
+    dp.message.register(handle_voice, F.voice, non_admin_predicate)
+    dp.callback_query.register(handle_retry_callback, lambda q: q.data and q.data.startswith("retry:"))
+    dp.callback_query.register(handle_expand_callback, lambda q: q.data and q.data.startswith("expand:"))
+    dp.callback_query.register(handle_resend_photo_callback, lambda q: q.data and q.data.startswith("resend_photo:"))
+
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     asyncio.create_task(notify_inactive_users())
 
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     asyncio.run(main())
+=======
+    asyncio.run(main())
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import asyncio
 import aiosqlite
 from typing import List, Dict
@@ -100,3 +101,19 @@ async def clear_history(chat_id: int):
 
 async def clear_user_history(chat_id: int):
     await clear_history(chat_id)
+=======
+from datetime import datetime
+
+chat_history = {}
+user_last_activity = {}
+
+def update_chat_history(chat_id: int, content: str, role: str = "user"):
+    if chat_id not in chat_history:
+        chat_history[chat_id] = [{"role": "system", "content": "Siz foydali yordamchisiz."}]
+    chat_history[chat_id].append({"role": role, "content": content})
+    chat_history[chat_id] = [chat_history[chat_id][0]] + chat_history[chat_id][-9:]
+
+def clear_user_history(chat_id: int):
+    if chat_id in chat_history:
+        chat_history[chat_id] = [chat_history[chat_id][0]]
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742

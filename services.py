@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 import re
 import logging
+<<<<<<< HEAD
 import base64 
 import json   
 import random
@@ -18,11 +19,30 @@ from io import BytesIO
 
 from ddgs import DDGS
 
+=======
+import html
+import base64 
+import json   
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict
+import matplotlib.pyplot as plt
+from io import BytesIO
+
+# ---------------------------------------------------
+# FFmpeg SOZLAMASI (Linux/Windows uchun moslashtirish)
+# ---------------------------------------------------
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 if shutil.which("ffmpeg"):
     AudioSegment.converter = "ffmpeg"
 else:
     AudioSegment.converter = "ffmpeg.exe"
 
+<<<<<<< HEAD
+=======
+# ---------------------------------------------------
+# CONFIG VA IMPORTLAR
+# ---------------------------------------------------
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 try:
     from config import (
         SYSTEM_PROMPT, GPT_MODEL, GPT_TEMPERATURE, GPT_MAX_TOKENS, GPT_TOP_P,
@@ -47,11 +67,23 @@ from openai import AsyncOpenAI
 from loader import openai_client, logger
 from utils.history import update_chat_history
 
+<<<<<<< HEAD
 # ─────────────────────────────────────────────────────────────
 # YORDAMCHI: TARIX FUNKSIYALARI
 # ─────────────────────────────────────────────────────────────
 
 async def clear_chat_history(chat_id: int):
+=======
+# ============================================================
+# 🌟 SUPER FUNKSIYALAR BAZASI
+# ============================================================
+
+# ------------------------------------------------------------
+# [YANGI] XOTIRANI TOZALASH FUNKSIYASI
+# ------------------------------------------------------------
+async def clear_chat_history(chat_id: int):
+    """Foydalanuvchining botdagi suhbat tarixini (kontekstni) tozalaydi."""
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     try:
         import utils.history as uh
         if hasattr(uh, "chat_history") and isinstance(uh.chat_history, dict):
@@ -65,6 +97,146 @@ async def clear_chat_history(chat_id: int):
     except Exception as e:
         logger.error(f"Xotirani tozalashda xatolik: {e}")
 
+<<<<<<< HEAD
+=======
+# ------------------------------------------------------------
+# [YANGILANGAN] YOUTUBE VIDEONI XULOSALASH (ZIRHLI VERSYIA)
+# ------------------------------------------------------------
+async def get_youtube_summary(chat_id: int, video_id: str, user_prompt: str = "") -> str:
+    """YouTube videoning subtitrlarini olib, GPT orqali xulosa qiladi."""
+    def _fetch_transcript():
+        import youtube_transcript_api
+        try:
+            # Avvaliga o'zbek, rus, ingliz tillarini izlaymiz
+            return youtube_transcript_api.YouTubeTranscriptApi.get_transcript(video_id, languages=['uz', 'ru', 'en'])
+        except:
+            # Agar maxsus tillar topilmasa, videoda qanday til bo'lsa o'shani avtomatik oladi
+            try:
+                transcript_list = youtube_transcript_api.YouTubeTranscriptApi.list_transcripts(video_id)
+                for transcript in transcript_list:
+                    return transcript.fetch()
+            except Exception:
+                return []
+        return []
+
+    try:
+        # Asinxron ishlashi uchun to_thread ga o'raymiz
+        transcript_data = await asyncio.to_thread(_fetch_transcript)
+        
+        if not transcript_data:
+            return "Kechirasiz, bu videoning ochiq subtitrlari yo'q ekan (yoki video yopiq/musiqiy). Boshqa video yuborib ko'ring."
+            
+        # Subtitrlarni bitta matnga yig'amiz
+        full_text = " ".join([t.get('text', '') for t in transcript_data])
+        
+        # Xarajatni tejash: Maksimal 15,000 belgi o'qiymiz (taxminan 20 daqiqalik video qismi)
+        if len(full_text) > 15000:
+            full_text = full_text[:15000] + "\n...[Xarajatni tejash uchun videoning qolgan qismi qisqartirildi]."
+
+        # 🔥 XATONING YECHIMI: f-string ichida backslash (\) ishlatmaslik uchun matnni oldin tayyorlab olamiz
+        default_prompt = "Shu videoni qisqacha xulosa qilib ber va asosiy g'oyalarini ayt"
+        final_prompt_text = user_prompt if user_prompt else default_prompt
+
+        prompt = (
+            f"Quyida YouTube videosining matni (subtitrlari) berilgan. "
+            f"Foydalanuvchining so'rovi: '{final_prompt_text}'.\n\n"
+            f"Video matni:\n{full_text}"
+        )
+
+        return await get_gpt_reply(chat_id, prompt)
+
+    except Exception as e:
+        logger.error(f"YouTube Transcript xatosi: {e}")
+        return "Videoni tahlil qilishda kutilmagan xatolik yuz berdi."
+
+# ------------------------------------------------------------
+# 1. WEB SEARCH (Jonli Internet Qidiruv)
+# ------------------------------------------------------------
+async def search_web(query: str) -> str:
+    def _search():
+        from ddgs import DDGS
+        return DDGS().text(query, max_results=3)
+        
+    try:
+        results = await asyncio.to_thread(_search)
+        if not results:
+            return "Ma'lumot topilmadi."
+        formatted_results = "\n".join([f"- Sarlavha: {r.get('title', '')}\n  Matn: {r.get('body', '')}" for r in results])
+        return formatted_results
+    except Exception as e:
+        logger.error(f"Web Search xatosi: {e}")
+        return "Internetdan qidirishda xatolik yuz berdi."
+
+# ------------------------------------------------------------
+# 2. PDF VA TXT HUJJATLARNI O'QISH
+# ------------------------------------------------------------
+def extract_text_from_document(file_bytes: bytes, file_name: str) -> str:
+    text = ""
+    try:
+        if file_name.lower().endswith('.pdf'):
+            import fitz  
+            pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+            max_pages = min(10, len(pdf_document))
+            for page_num in range(max_pages):
+                page = pdf_document.load_page(page_num)
+                text += page.get_text() + "\n"
+            if len(pdf_document) > 10:
+                text += "\n[TIZIM XABARI: Xarajat va xotirani tejash maqsadida hujjatning faqat dastlabki 10 sahifasi o'qildi.]"
+        elif file_name.lower().endswith('.txt'):
+            text = file_bytes.decode('utf-8')
+        else:
+            return "Kechirasiz, hozircha faqat PDF va TXT formatidagi hujjatlarni o'qiy olaman."
+    except Exception as e:
+        logger.error(f"Hujjat o'qish xatosi: {e}")
+        return "Hujjatni o'qishda xatolik yuz berdi. Fayl buzilgan bo'lishi mumkin."
+    return text[:15000]
+
+# ------------------------------------------------------------
+# 3. VISION (Rasmni Ko'rish Qobiliyati)
+# ------------------------------------------------------------
+async def get_vision_reply(chat_id: int, base64_image: str, user_message: str) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_message},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}",
+                        "detail": "auto" 
+                    }
+                }
+            ]
+        }
+    ]
+    try:
+        response = await openai_client.chat.completions.create(
+            model=GPT_MODEL, 
+            messages=messages,
+            max_tokens=GPT_MAX_TOKENS,
+        )
+        reply_text = response.choices[0].message.content
+        return clean_response(reply_text)
+    except Exception as e:
+        logger.error(f"Vision API xatosi: {e}")
+        return "Rasmni tahlil qilishda xatolik yuz berdi."
+
+# ============================================================
+# ASOSIY FUNKSIYALAR DAVOMI
+# ============================================================
+
+def clean_response(text: str) -> str:
+    if not text: return ""
+    text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
+    text = text.replace("### ", "").replace("## ", "")
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+    text = text.replace("\\[", "<b>").replace("\\]", "</b>")
+    text = text.replace("\\(", "<b>").replace("\\)", "</b>")
+    return text.strip()
+
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 async def safe_update_history(chat_id: int, content: str, role: str = "user"):
     if not content: return
     try:
@@ -122,6 +294,7 @@ async def safe_get_chat_history(chat_id: int, limit: int = CONTEXT_WINDOW) -> Li
         logger.debug(f"safe_get_chat_history fallback: {e}")
     return []
 
+<<<<<<< HEAD
 # ─────────────────────────────────────────────────────────────
 # YOUTUBE SUMMARY
 # ─────────────────────────────────────────────────────────────
@@ -385,10 +558,20 @@ def detect_role_from_text(text: str) -> str:
     psycho  = ["ruhiy", "psixolog", "depress", "stress", "maslahat"]
     if any(k in t for k in tech):   return "technical"
     if any(k in t for k in sales):  return "commercial"
+=======
+def detect_role_from_text(text: str) -> str:
+    t = text.lower()
+    tech = ["kod", "error", "xato", "python", "javascript", "ai", "api", "server", "sql"]
+    sales = ["narx", "sotish", "savdo", "mijoz", "reklama", "marketing"]
+    psycho = ["ruhiy", "psixolog", "depress", "stress", "maslahat"]
+    if any(k in t for k in tech): return "technical"
+    if any(k in t for k in sales): return "commercial"
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     if any(k in t for k in psycho): return "supportive"
     return ""
 
 def role_instruction(role: str) -> str:
+<<<<<<< HEAD
     if role == "technical":   return "Javobni texnik uslubda, aniq kod misollari yoki buyruqlar bilan taqdim et."
     if role == "commercial":  return "Javobni tijoriy, qisqa va savdoga yo'naltirilgan tilda bering."
     if role == "supportive":  return "Javobni yumshoq, empatik va qo'llab-quvvatlovchi uslubda bering."
@@ -470,11 +653,25 @@ async def get_openai_reply(
     presence_penalty: float = GPT_PRESENCE_PENALTY,
 ):
     messages: List[Dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+=======
+    if role == "technical": return "Javobni texnik uslubda, aniq kod misollari yoki buyruqlar bilan taqdim et."
+    if role == "commercial": return "Javobni tijoriy, qisqa va savdoga yo'naltirilgan tilda bering."
+    if role == "supportive": return "Javobni yumshoq, empatik va qo'llab-quvvatlovchi uslubda bering."
+    return ""
+
+async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_MODEL,
+                           temperature: float = GPT_TEMPERATURE, max_tokens: int = GPT_MAX_TOKENS,
+                           top_p: float = GPT_TOP_P, frequency_penalty: float = GPT_FREQUENCY_PENALTY,
+                           presence_penalty: float = GPT_PRESENCE_PENALTY) -> str:
+    messages: List[Dict[str, str]] = []
+    messages.append({"role": "system", "content": SYSTEM_PROMPT})
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
     try:
         now_utc = datetime.now(timezone.utc)
         now_tashkent = now_utc.astimezone(timezone(timedelta(hours=5)))
         time_msg = (
+<<<<<<< HEAD
             f"[TIZIM MA'LUMOTI]\n"
             f"Hozirgi sana: {now_tashkent.strftime('%Y-%m-%d')}, "
             f"Vaqt: {now_tashkent.strftime('%H:%M')} (O'zbekiston, UTC+5).\n"
@@ -613,6 +810,87 @@ async def get_gpt_reply(chat_id: int, user_message: str):
 # ─────────────────────────────────────────────────────────────
 # OCR, STT, TTS, LaTeX, IMAGE GENERATION
 # ─────────────────────────────────────────────────────────────
+=======
+            f"Bugungi sana: {now_tashkent.strftime('%Y-%m-%d %H:%M')}. "
+            f"Haftaning kuni: {now_tashkent.strftime('%A')}. "
+            "⚠️ QAT'IY BUYRUQ: Agar foydalanuvchi ob-havo, valyuta kurslari, yangiliklar, joriy sport natijalari "
+            "yoki qandaydir oxirgi o'zgarishlar haqida so'rasa, O'ZINGIZDAN UZR SO'RAMANG VA JAVOB TO'QIMANG! "
+            "Siz darhol 'internet_search' funksiyasidan foydalanib internetdan qidirishingiz SHART."
+        )
+        messages.append({"role": "system", "content": time_msg})
+    except Exception: pass
+
+    recent = await safe_get_chat_history(chat_id, limit=CONTEXT_WINDOW)
+    if recent:
+        for m in recent:
+            if "role" in m and "content" in m: 
+                messages.append({"role": m["role"], "content": m["content"]})
+    
+    role = detect_role_from_text(message_text)
+    r_instr = role_instruction(role)
+    if r_instr: 
+        messages.append({"role": "system", "content": f"ROLE_INSTRUCTION: {r_instr}"})
+
+    messages.append({"role": "user", "content": message_text})
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "internet_search",
+                "description": "Joriy vaqt, bugungi ob-havo, valyuta, yangiliklar va boshqa jonli ma'lumotlarni internetdan qidirish uchun.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Internet qidiruv so'rovi (masalan, 'Toshkent bugun ob-havo')"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+    ]
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, top_p=top_p, frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty, tools=tools, tool_choice="auto"
+        )
+        
+        response_message = response.choices[0].message
+        
+        if response_message.tool_calls:
+            messages.append(response_message)
+            for tool_call in response_message.tool_calls:
+                if tool_call.function.name == "internet_search":
+                    args = json.loads(tool_call.function.arguments)
+                    query = args.get("query", "")
+                    search_result = await search_web(query)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": search_result
+                    })
+            
+            final_response = await openai_client.chat.completions.create(
+                model=model, messages=messages, temperature=temperature,
+                max_tokens=max_tokens, top_p=top_p
+            )
+            return clean_response(final_response.choices[0].message.content)
+        else:
+            reply_text = response_message.content if response_message.content else ""
+            return clean_response(reply_text)
+
+    except Exception as e:
+        logger.error(f"GPT Error: {e}")
+        raise e
+
+async def get_gpt_reply(chat_id: int, user_message: str):
+    return await get_openai_reply(chat_id, user_message)
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
 async def extract_text_from_image(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
@@ -622,8 +900,12 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         async with aiohttp.ClientSession() as session:
             form = aiohttp.FormData()
             form.add_field("file", image_bytes, filename="image.jpg", content_type="image/jpeg")
+<<<<<<< HEAD
             for key, val in data.items():
                 form.add_field(key, str(val))
+=======
+            for key, val in data.items(): form.add_field(key, str(val))
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
             async with session.post(url, data=form, headers=headers) as resp:
                 result = await resp.json()
                 return result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
@@ -631,7 +913,10 @@ async def extract_text_from_image(image_bytes: bytes) -> str:
         logger.error(f"OCR xatosi: {str(e)}")
         return ""
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 async def speech_to_text(file_path: str) -> str:
     r = sr.Recognizer()
     wav_path = file_path + ".wav"
@@ -642,6 +927,7 @@ async def speech_to_text(file_path: str) -> str:
             audio_data = r.record(source)
             text = r.recognize_google(audio_data, language="uz-UZ")
             return text
+<<<<<<< HEAD
     except Exception:
         return ""
     finally:
@@ -654,6 +940,17 @@ async def speech_to_text(file_path: str) -> str:
 
 async def text_to_speech(text: str, filename: str) -> str:
     text = text.replace("'", "'").replace("`", "'")
+=======
+    except Exception: return ""
+    finally:
+        try:
+            if os.path.exists(file_path): os.remove(file_path)
+            if os.path.exists(wav_path): os.remove(wav_path)
+        except: pass    
+
+async def text_to_speech(text: str, filename: str) -> str:
+    text = text.replace("'", "‘").replace("`", "‘")
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
     clean_text_for_speech = re.sub(r'<[^>]+>', '', text)
     clean_text_for_speech = clean_text_for_speech.replace("$$", "").replace("$", "")
     VOICE = "uz-UZ-MadinaNeural"
@@ -665,10 +962,16 @@ async def text_to_speech(text: str, filename: str) -> str:
         logger.error(f"TTS xatosi: {e}")
         return None
 
+<<<<<<< HEAD
 
 def render_latex_to_image(formula: str) -> BytesIO:
     try:
         plt.switch_backend('Agg')
+=======
+def render_latex_to_image(formula: str) -> BytesIO:
+    try:
+        plt.switch_backend('Agg') 
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
         plt.figure(figsize=(0.1, 0.1))
         text = f"${formula}$"
         fig = plt.figure()
@@ -683,7 +986,10 @@ def render_latex_to_image(formula: str) -> BytesIO:
         logger.error(f"LaTeX render error: {e}")
         return None
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 async def generate_image(prompt: str) -> bytes:
     try:
         safe_prompt = prompt.replace(" ", "%20")
@@ -693,6 +999,12 @@ async def generate_image(prompt: str) -> bytes:
             async with session.get(url) as response:
                 if response.status == 200:
                     return await response.read()
+<<<<<<< HEAD
                 return None
     except Exception:
+=======
+                else:
+                    return None
+    except Exception as e:
+>>>>>>> d525665592d98036647d88bec8ad24f9f234c742
         return None
