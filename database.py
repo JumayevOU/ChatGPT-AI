@@ -4,7 +4,7 @@ import asyncpg
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo  
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -125,9 +125,6 @@ async def log_user_activity(user_id: int, username: Optional[str], activity_type
         ''', user_id, username, activity_type)
 
 
-# -------------------------
-# Timezone / formatting helper
-# -------------------------
 def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
     """
     Convert a timezone-aware or naive datetime (assumed UTC if naive)
@@ -136,22 +133,16 @@ def format_dt_for_tashkent(dt: Optional[datetime]) -> Optional[str]:
     """
     if dt is None:
         return None
-    # If naive, assume UTC
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     try:
         dt_tashkent = dt.astimezone(TASHKENT_TZ)
     except Exception:
-        # fallback: attach UTC then convert
         dt = dt.replace(tzinfo=timezone.utc)
         dt_tashkent = dt.astimezone(TASHKENT_TZ)
-    # use explicit label to avoid seeing only "+05"
     return dt_tashkent.strftime("%Y-%m-%d %H:%M:%S") + " Asia/Tashkent"
 
 
-# -------------------------
-# User retrieval helpers
-# -------------------------
 async def get_all_users() -> List[Dict[str, Any]]:
     """
     Return all active users with basic metadata.
@@ -175,14 +166,8 @@ async def get_all_users() -> List[Dict[str, Any]]:
                 'user_id': r['user_id'],
                 'username': r.get('username'),
                 'display_name': f"@{r.get('username')}" if r.get('username') else f"ID:{r['user_id']}",
-<<<<<<< HEAD
-                # XATO SHU YERDA EDI (created_at_raw qo'shtirnoqsiz qolgandi), TO'G'RILANDI:
-=======
-                # raw datetimes for program logic (may be tz-aware)
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742
                 'created_at_raw': created_raw,
                 'last_seen_raw': last_raw,
-                # formatted strings for display
                 'created_at': format_dt_for_tashkent(created_raw),
                 'last_seen': format_dt_for_tashkent(last_raw)
             })
@@ -239,16 +224,13 @@ async def get_user_by_identifier(identifier: str) -> Optional[int]:
     if pool is None:
         await create_db_pool()
     identifier = identifier.strip()
-    # numeric -> treat as user_id
     if identifier.isdigit():
         uid = int(identifier)
         async with pool.acquire() as conn:
             exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', uid)
             return uid if exists else None
-    # if starts with @, strip it
     if identifier.startswith("@"):
         identifier = identifier[1:]
-    # treat as username
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT user_id FROM users WHERE username = $1', identifier)
 
@@ -268,43 +250,7 @@ async def get_users_count() -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_active = TRUE')
 
-<<<<<<< HEAD
-# -------------------------
-# Yangi Profile Stats Funksiyasi
-# -------------------------
-async def get_user_stats(user_id: int) -> Dict[str, Any]:
-    """Foydalanuvchining barcha faollik statistikasini hisoblaydi."""
-    global pool
-    if pool is None:
-        await create_db_pool()
-    async with pool.acquire() as conn:
-        created_at = await conn.fetchval('SELECT created_at FROM users WHERE user_id = $1', user_id)
-        
-        row = await conn.fetchrow('''
-            SELECT 
-                COUNT(CASE WHEN activity_type = 'text_message' THEN 1 END) as text_count,
-                COUNT(CASE WHEN activity_type = 'photo_message' THEN 1 END) as photo_count,
-                COUNT(CASE WHEN activity_type = 'voice_message' THEN 1 END) as voice_count,
-                COUNT(CASE WHEN activity_type = 'document_message' THEN 1 END) as doc_count,
-                COUNT(*) as total_count
-            FROM user_activity
-            WHERE user_id = $1
-        ''', user_id)
-        
-        return {
-            'created_at': created_at,
-            'text_count': row['text_count'] if row else 0,
-            'photo_count': row['photo_count'] if row else 0,
-            'voice_count': row['voice_count'] if row else 0,
-            'doc_count': row['doc_count'] if row else 0,
-            'total_count': row['total_count'] if row else 0,
-        }
-=======
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 
-# -------------------------
-# Admins / superadmin helpers
-# -------------------------
 async def is_admin(user_id: int) -> bool:
     global pool
     if pool is None:
@@ -351,9 +297,7 @@ async def get_admin_meta(user_id: int) -> Optional[Dict[str, Any]]:
         return {
             'user_id': row['user_id'],
             'username': row.get('username'),
-            # raw datetime for comparisons (this keeps admin.py logic working)
             'created_at': created_raw,
-            # human-friendly formatted string
             'created_at_str': format_dt_for_tashkent(created_raw),
             'display_name': f"@{row.get('username')}" if row.get('username') else f"ID:{row['user_id']}"
         }

@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
 
 from keyboards import admin_keyboard
 
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo  
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,6 @@ class RemoveAdminStates(StatesGroup):
     waiting_for_admin_id = State()
 
 
-# --- Yangi: ReportStates (foydalanuvchi adminga xabar yozganda foydalaniladi) ---
 class ReportStates(StatesGroup):
     waiting_for_report_message = State()
 
@@ -171,11 +170,9 @@ def register_admin_handlers(dp, bot: Bot, database_module):
 
         user_id = None
         try:
-            # Prefer using the database_module helper if exists
             if hasattr(database_module, "get_user_by_identifier"):
                 user_id = await database_module.get_user_by_identifier(identifier)
             else:
-                # fallback: reuse older logic directly via pool
                 async with database_module.pool.acquire() as conn:
                     if identifier.startswith("@"):
                         user_id = await conn.fetchval(
@@ -463,7 +460,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 logger.exception("DB error checking is_superadmin")
                 is_super = False
 
-            # requester_meta from DB may contain formatted created_at; for time-checking fetch raw created_at directly
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -499,7 +495,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 return
 
             if not is_super:
-                # ensure requester_created_at is a datetime
                 if isinstance(requester_created_at, datetime):
                     created_at_dt = requester_created_at
                     if created_at_dt.tzinfo is not None:
@@ -507,14 +502,12 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     else:
                         created_utc = created_at_dt
                 else:
-                    # fallback: deny if we cannot determine created time
                     await query.answer("❌ Sizning admin vaqtingizni aniqlab bo'lmadi. Amal bajarilmadi.", show_alert=True)
                     return
 
                 now = datetime.utcnow()
                 allowed_after = created_utc + timedelta(days=REMOVE_BLOCK_DAYS)
                 if now < allowed_after:
-                    # show allowed time in Tashkent for clarity
                     allowed_after_utc = allowed_after.replace(tzinfo=timezone.utc)
                     allowed_tz = allowed_after_utc.astimezone(TASHKENT_TZ)
                     allowed_str = allowed_tz.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -567,7 +560,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         try:
             is_super = await database_module.is_superadmin(requester)
 
-            # fetch raw created_at for requester for accurate time-check
             requester_created_at = None
             try:
                 async with database_module.pool.acquire() as conn:
@@ -632,7 +624,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
         finally:
             await state.clear()
 
-    # --- Yangi: report callback (foydalanuvchi reporting tugmasini bosganda) ---
     async def report_callback(query: CallbackQuery, state: FSMContext):
         """
         Callback data: report:{chat_id}
@@ -644,22 +635,18 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await query.answer("Noto'g'ri so'rov.", show_alert=True)
                 return
 
-            # extract reported chat id (original chat for which user reported an error)
             try:
                 reported_chat_id = int(data.split(":", 1)[1])
             except Exception:
                 reported_chat_id = None
 
-            # Acknowledge callback quickly
             await query.answer()
 
-            # Save context: we will ask the user to type the message now
             await query.message.answer(
                 "✉️ Adminga yuborish uchun xabar matnini kiriting. Iltimos, muammoni qisqacha tushuntiring.\n\n"
                 "Agar shaxsiy ma'lumotlar bo'lsa, ularni kiritmang. Yuborganingizdan so'ng superadminga yetib boradi."
             )
             await state.set_state(ReportStates.waiting_for_report_message)
-            # store reported_chat_id so we can include it in the forwarded report
             await state.update_data(reported_chat_id=reported_chat_id, reporter_chat_id=query.message.chat.id)
         except Exception:
             logger.exception("report_callback error")
@@ -683,7 +670,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                 await message.answer("❗ Xabar bo'sh. Iltimos, matn kiriting yoki amalni bekor qilish uchun /cancel yozing.")
                 return
 
-            # prepare message for admin
             reporter = message.from_user
             reporter_name = f"@{reporter.username}" if reporter.username else f"User {reporter.id}"
             reporter_link = f'<a href="tg://user?id={reporter.id}">{reporter.first_name}</a>'
@@ -698,7 +684,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
             report_payload += f"🕒 Vaqt: {format_dt(datetime.utcnow())}\n\n"
             report_payload += f"✏️ Xabar:\n{report_text}"
 
-            # Try to send to superadmin first
             try:
                 super_id = await database_module.get_superadmin_id()
             except Exception:
@@ -716,7 +701,6 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     logger.exception("Send to superadmin failed")
                     failed_to.append(super_id)
 
-            # If no superadmin or sending failed, fallback to sending to all admins
             if not sent_to:
                 try:
                     admins = await database_module.get_admins()
@@ -732,14 +716,11 @@ def register_admin_handlers(dp, bot: Bot, database_module):
                     except Exception:
                         logger.exception(f"Failed to send report to admin {aid}")
                         failed_to.append(aid)
-
-            # Notify reporter
             if sent_to:
                 await message.answer("✅ Xabaringiz adminga yuborildi. Tez orada tekshiriladi. Rahmat!")
             else:
                 await message.answer("❌ Afsus, xabaringizni adminga yuborib bo'lmadi. Iltimos keyinroq urinib ko'ring.")
 
-            # Optionally log this action
             try:
                 await database_module.log_admin_action(None, "user_report", None, json.dumps({
                     "reporter_id": reporter.id,
@@ -771,12 +752,7 @@ def register_admin_handlers(dp, bot: Bot, database_module):
     dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
-
-    # register report message handler (user types the report text after pressing report button)
     dp.message.register(process_report_message, ReportStates.waiting_for_report_message)
-
-    # callback handlers
     dp.callback_query.register(remove_admin_callback, lambda q: q.data and q.data.startswith("remove_admin:"))
-    # register report callback (this allows the inline "Adminga xabar" button to trigger report flow)
     dp.callback_query.register(report_callback, lambda q: q.data and q.data.startswith("report:"))
 

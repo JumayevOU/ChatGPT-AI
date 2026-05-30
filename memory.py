@@ -1,20 +1,13 @@
-<<<<<<< HEAD
 import time
 import asyncio
 from typing import Dict, Any, Optional
 
-# --------------------------------------------------
-# TTL KONSTANTALARI (soniyalarda)
-# --------------------------------------------------
 FAILED_REQUEST_TTL   = 3600  
 EXPANSION_TTL        = 1800   
 USER_ACTION_TTL      = 86400 
 ONGOING_TTL          = 120   
 CLEANUP_INTERVAL     = 300    
 
-# --------------------------------------------------
-# ASOSIY XOTIRA LUG'ATLARI
-# --------------------------------------------------
 failed_requests:      Dict[int, Dict[str, Any]] = {}
 ongoing_requests:     Dict[int, float]           = {}  
 user_last_action_ts:  Dict[int, float]           = {}
@@ -22,9 +15,6 @@ expansion_requests:   Dict[int, Dict]            = {}
 last_button_messages: Dict[int, int]             = {}
 chat_last_interaction: Dict[int, float]          = {}  
 
-# --------------------------------------------------
-# FAILED REQUEST
-# --------------------------------------------------
 def store_failed_request(chat_id: int, user_id: int, prompt: str,
                          original_text: str, error_message_id: int):
     failed_requests[chat_id] = {
@@ -42,9 +32,6 @@ def clear_failed_request(chat_id: int):
     failed_requests.pop(chat_id, None)
     ongoing_requests.pop(chat_id, None)
 
-# --------------------------------------------------
-# ONGOING REQUEST — crash-safe
-# --------------------------------------------------
 def set_ongoing(chat_id: int):
     """bool emas, timestamp saqlaydi — crash bo'lsa ONGOING_TTL dan keyin avtomatik ochiladi."""
     ongoing_requests[chat_id] = time.time()
@@ -62,9 +49,6 @@ def is_ongoing(chat_id: int) -> bool:
 def release_ongoing(chat_id: int):
     ongoing_requests.pop(chat_id, None)
 
-# --------------------------------------------------
-# EXPANSION REQUEST — TTL bilan
-# --------------------------------------------------
 def store_expansion_request(chat_id: int, text: str):
     expansion_requests[chat_id] = {"text": text, "stored_at": time.time()}
 
@@ -81,9 +65,6 @@ def get_expansion_request(chat_id: int) -> Optional[str]:
 def clear_expansion_request(chat_id: int):
     expansion_requests.pop(chat_id, None)
 
-# --------------------------------------------------
-# FON TOZALASH VAZIFASI
-# --------------------------------------------------
 def cleanup_expired():
     """Muddati o'tgan barcha yozuvlarni xotiradan o'chiradi."""
     now = time.time()
@@ -117,30 +98,3 @@ async def start_cleanup_task():
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL)
         cleanup_expired()
-=======
-from typing import Dict, Any
-
-failed_requests: Dict[int, Dict[str, Any]] = {}   
-ongoing_requests: Dict[int, bool] = {}            
-user_last_action_ts: Dict[int, float] = {}        
-expansion_requests: Dict[int, str] = {}           
-
-last_button_messages: Dict[int, int] = {}
-
-def store_failed_request(chat_id: int, user_id: int, prompt: str, original_text: str, error_message_id: int):
-    failed_requests[chat_id] = {
-        "user_id": user_id,
-        "prompt": prompt,
-        "original_text": original_text,
-        "attempts_manual": 0,
-        "attempts_auto": 0,
-        "error_message_id": error_message_id,
-        "last_attempt_ts": None,
-    }
-
-def clear_failed_request(chat_id: int):
-    if chat_id in failed_requests:
-        del failed_requests[chat_id]
-    if chat_id in ongoing_requests:
-        del ongoing_requests[chat_id]
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742

@@ -3,28 +3,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-<<<<<<< HEAD
-# ─────────────────────────────────────────
-#  ENVIRONMENT VARIABLES
-# ─────────────────────────────────────────
 BOT_TOKEN        = os.getenv("BOT_TOKEN")
 OCR_API_KEY      = os.getenv("OCR_API_KEY")
 OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
-
-# ─────────────────────────────────────────
-#  MODEL SETTINGS
-# ─────────────────────────────────────────
 GPT_MODEL             = "gpt-4o-mini"
-GPT_TEMPERATURE       = 0.7    # Natural, human-like responses (was 0.25 — too robotic)
-GPT_MAX_TOKENS        = 2048   # Room for detailed answers when needed
-GPT_TOP_P             = 0.95   # Slightly wider token sampling for fluency
-GPT_FREQUENCY_PENALTY = 0.3    # Reduces word repetition
-GPT_PRESENCE_PENALTY  = 0.3    # Encourages exploring new ideas
+GPT_TEMPERATURE       = 0.7   
+GPT_MAX_TOKENS        = 2048  
+GPT_TOP_P             = 0.95   
+GPT_FREQUENCY_PENALTY = 0.3    
+GPT_PRESENCE_PENALTY  = 0.3  
 CONTEXT_WINDOW        = 20
 
-# ─────────────────────────────────────────
-#  SYSTEM PROMPT  (English → AI understands deeper)
-# ─────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are a highly intelligent, thoughtful, and friendly AI assistant.
 You MUST reply in the UZBEK language in every single response, no exceptions.
@@ -99,9 +88,6 @@ ALLOWED — only these formatting tools:
 When in doubt, use plain text. Clarity matters more than formatting.
 """
 
-# ─────────────────────────────────────────
-#  RESPONSE ADAPTATION INSTRUCTION
-# ─────────────────────────────────────────
 CONCISE_INSTRUCTION = """
 RESPONSE ADAPTATION:
 - Simple greeting or one-word question → max 2 sentences, no formatting at all.
@@ -110,9 +96,6 @@ RESPONSE ADAPTATION:
 Always match the answer size to the question size. Never pad. Never truncate important details.
 """
 
-# ─────────────────────────────────────────
-#  MATH & SCIENCE STRICT RULES
-# ─────────────────────────────────────────
 STRICT_MATH_RULES = """
 MATH / PHYSICS / CHEMISTRY:
 1. Solutions must be accurate and as concise as possible.
@@ -122,10 +105,6 @@ MATH / PHYSICS / CHEMISTRY:
 5. Use · or × for multiplication. NEVER use *.
 """
 
-# ─────────────────────────────────────────
-#  ERROR MESSAGES
-# ─────────────────────────────────────────
-=======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OCR_API_KEY = os.getenv("OCR_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -173,7 +152,6 @@ STATIC_KNOWLEDGE_BASE = {
     "admin": "Admin va yaratuvchi bilan bog'lanish: @jumayeevou",
 }
 
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742
 ERROR_MESSAGES = [
     "⚙️ Miyamda qandaydir xatolik yuz berdi, havotir olmang — tekshirib chiqamiz.",
     "🔧 Biror vintim bo'shab qolgan shekilli... Yaqinda tuzatamiz.",
@@ -181,17 +159,7 @@ ERROR_MESSAGES = [
     "🙃 Nimadir noto'g'ri ketdi. Iltimos, qayta yuboring yoki adminga xabar bering.",
 ]
 
-<<<<<<< HEAD
-# ─────────────────────────────────────────
-#  RETRY & RATE LIMIT SETTINGS
-# ─────────────────────────────────────────
-MAX_MANUAL_RETRIES = 5
-MAX_AUTO_RETRIES   = 3
-AUTO_BACKOFFS      = [1, 2, 4]
-USER_COOLDOWN      = 3
-=======
 MAX_MANUAL_RETRIES = 5
 MAX_AUTO_RETRIES = 3
 AUTO_BACKOFFS = [1, 2, 4]
 USER_COOLDOWN = 3
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742

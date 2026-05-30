@@ -13,7 +13,4 @@ duckduckgo-search
 PyMuPDF
 youtube-transcript-api
 ddgs
-<<<<<<< HEAD
 aiosqlite
-=======
->>>>>>> d525665592d98036647d88bec8ad24f9f234c742
