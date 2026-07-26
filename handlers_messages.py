@@ -254,7 +254,7 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
 
 EMOJI_ID_BY_TYPE: dict[str, str] = {
     "text": "5980787993139481991",
-    "photo": "5980787993139481991",
+    "photo": "5947288798713875484",
     "document": "5818955300463447293",
     "voice": "5947042989145590769",
     "search": "5821388137443626414",
