@@ -1,0 +1,563 @@
+import asyncio
+import base64
+import os
+import re
+import time
+from io import BytesIO
+
+import aiohttp
+from aiogram import Router
+from aiogram.types import Message, FSInputFile
+
+from loader import bot, logger
+from config import (
+    BOT_TOKEN,
+    MESSAGE_COST_TEXT,
+    MESSAGE_COST_PHOTO,
+    MESSAGE_COST_DOCUMENT,
+    MESSAGE_COST_VOICE,
+)
+from database import has_started, check_and_consume_quota, refund_quota
+from helpers import notify_watchers
+from services import (
+    get_gpt_reply,
+    get_vision_reply,
+    extract_text_from_document,
+    speech_to_text,
+    text_to_speech,
+    safe_update_history,
+)
+
+router = Router()
+
+MAX_GUEST_REPLY_LEN = 3800
+
+# Oddiy handlers_messages.py dagi handle_document bilan bir xil chegara —
+# guest oqimida ham 5 MB dan katta fayllarni rad etamiz.
+GUEST_DOCUMENT_MAX_SIZE = 5 * 1024 * 1024
+
+# Har bir content-type uchun kunlik kvota narxi (config.py dagi bir xil
+# konstantalar — handlers_messages.py bilan mos kelishi uchun).
+_GUEST_CONTENT_COST = {
+    "text": MESSAGE_COST_TEXT,
+    "photo": MESSAGE_COST_PHOTO,
+    "document": MESSAGE_COST_DOCUMENT,
+    "voice": MESSAGE_COST_VOICE,
+}
+
+# Placeholder ("o'ylayapman") xabari uchun content-type'ga mos matn.
+_GUEST_THINKING_TEXT = {
+    "text": "☁️ O'ylayapman...",
+    "photo": "🖼 Rasmni tahlil qilyapman...",
+    "document": "📄 Hujjatni o'qiyapman...",
+    "voice": "🎙 Ovozli xabarni tinglayapman...",
+}
+
+
+def _detect_guest_content_type(message: Message) -> str:
+    """Guest chaqiruv xabarining content-type'ini aniqlaydi.
+
+    Oddiy handlers_messages.py dagi F.photo/F.document/F.voice filtrlariga
+    mos keladi, faqat bu yerda bitta universal handler (`guest_message`)
+    ichida qo'lda tekshiriladi, chunki Guest Mode barcha content-type'lar
+    uchun bitta yagona update turi orqali keladi.
+    """
+    if message.photo:
+        return "photo"
+    if message.document:
+        return "document"
+    if message.voice:
+        return "voice"
+    return "text"
+
+
+_GUEST_MODE_SUPPORTED = False
+try:
+    from aiogram.methods import AnswerGuestQuery
+    from aiogram.types import InputTextMessageContent, InlineQueryResultArticle
+
+    _GUEST_MODE_SUPPORTED = hasattr(router, "guest_message")
+except ImportError:
+    _GUEST_MODE_SUPPORTED = False
+
+if not _GUEST_MODE_SUPPORTED:
+    logger.error(
+        "⚠️ Guest Mode O'CHIRILGAN: o'rnatilgan aiogram versiyasi "
+        "AnswerGuestQuery / guest_message'ni qo'llab-quvvatlamaydi. "
+        "Terminalda `pip show aiogram` bilan versiyani tekshiring "
+        "(kerak: >= 3.29.0) va `pip install -U aiogram` orqali yangilang. "
+        "Bu yerda xatolik bo'lsa ham, botning qolgan qismi (matn/rasm/ovoz) "
+        "normal ishlayveradi."
+    )
+else:
+    _http_session: aiohttp.ClientSession | None = None
+    _http_session_lock = asyncio.Lock()
+
+    async def _get_http_session() -> aiohttp.ClientSession:
+        global _http_session
+        if _http_session is None or _http_session.closed:
+            async with _http_session_lock:
+                if _http_session is None or _http_session.closed:
+                    connector = aiohttp.TCPConnector(
+                        limit=50,
+                        limit_per_host=20,
+                        ttl_dns_cache=300,
+                        keepalive_timeout=75,
+                    )
+                    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+                    _http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        return _http_session
+
+    _bot_username_cache: str | None = None
+    _bot_username_lock = asyncio.Lock()
+
+    async def _get_bot_username() -> str | None:
+        global _bot_username_cache
+        if _bot_username_cache is not None:
+            return _bot_username_cache
+        async with _bot_username_lock:
+            if _bot_username_cache is None:
+                try:
+                    bot_user = await bot.get_me()
+                    _bot_username_cache = bot_user.username
+                except Exception as e:
+                    logger.debug(f"Guest mode: get_me xatosi: {e}")
+        return _bot_username_cache
+
+    _recent_guest_queries: dict[str, float] = {}
+    _recent_guest_queries_lock = asyncio.Lock()
+    _GUEST_DEDUPE_TTL = 120.0  # soniya
+
+    async def _is_duplicate_guest_query(guest_query_id: str) -> bool:
+        now = time.monotonic()
+        async with _recent_guest_queries_lock:
+            expired = [k for k, ts in _recent_guest_queries.items() if now - ts > _GUEST_DEDUPE_TTL]
+            for k in expired:
+                _recent_guest_queries.pop(k, None)
+
+            if guest_query_id in _recent_guest_queries:
+                return True
+            _recent_guest_queries[guest_query_id] = now
+            return False
+
+    def _balance_markdown_fences(text: str) -> str:
+        """Markdown kod bloklarining (```) ochiq qolib ketmasligini ta'minlaydi."""
+        if text.count("```") % 2 != 0:
+            return text + "\n```"
+        return text
+
+    async def _answer_guest_query_rich(guest_query_id: str, answer_text: str) -> bool:
+        """
+        Rich Markdown bilan javob yuborishga urinadi.
+        Muvaffaqiyatli bo'lsa True, aks holda False qaytaradi.
+
+        MUHIM TUZATISH: avvalgi versiyada bu yerga <tg-thinking>/<tg-emoji>
+        kabi HTML-only teglar "markdown" maydoniga (tg-thinking hatto
+        yopilmagan holda) aralashtirib yuborilardi. Natijada: (1) parser
+        butun matnni formatlay olmay, xom "*" belgilari ko'rinib qolardi,
+        (2) guest javobi FAQAT BIR MARTA yuboriladi (draft/preview yo'q),
+        ya'ni "Savol tahlil qilinmoqda…" degan vaqtinchalik status
+        yakuniy, abadiy saqlanadigan xabarga abadiy yopishib qolardi —
+        bu API xatosi emas, mantiqiy xato edi. Kutish paytidagi holat
+        allaqachon _typing_ping_loop orqali ko'rsatiladi, shuning uchun
+        bu yerda faqat TOZA yakuniy javob yuboriladi.
+        """
+        if not BOT_TOKEN:
+            return False
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerGuestQuery"
+        payload = {
+            "guest_query_id": guest_query_id,
+            "result": {
+                "type": "article",
+                "id": str(guest_query_id),
+                "title": "AI javobi",
+                "input_message_content": {
+                    "rich_message": {
+                        "markdown": answer_text,
+                        "skip_entity_detection": True,
+                    }
+                },
+            },
+        }
+        try:
+            session = await _get_http_session()
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 200 and data.get("ok"):
+                    return True
+                logger.debug(f"Guest rich-answer rad etildi (fallbackka o'tamiz): {data}")
+                return False
+        except Exception as e:
+            logger.debug(f"Guest rich-answer xatosi (fallbackka o'tamiz): {e}")
+            return False
+
+    async def _extract_guest_query(message: Message) -> str:
+        """
+        Guest chaqiruv matnidan @username mention qismini olib tashlaydi.
+
+        Diqqat: bu funksiya `message.text or message.caption`dan o'qiydi,
+        shuning uchun rasm/hujjat/ovoz xabarlarining caption'i uchun ham
+        (agar bo'lsa) ishlatilishi mumkin — alohida caption-parser shart emas.
+        """
+        text = (message.text or message.caption or "").strip()
+        if not text:
+            return ""
+
+        bot_username = await _get_bot_username()
+
+        if bot_username:
+            text = re.sub(
+                rf"@{re.escape(bot_username)}\b",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip()
+
+        return text
+
+    @router.guest_message()
+    async def handle_guest_message(message: Message):
+        """
+        Foydalanuvchi botni istalgan chatda (bot a'zo bo'lmasa ham) @mention
+        qilganda yoki botning oldingi xabariga reply qilganda ishga tushadi.
+
+        v2 TUZATISH: avvalgi versiyada faqat matnli so'rovlar ishlardi.
+        Endi content-type aniqlanadi va rasm/hujjat/ovoz uchun ham xuddi
+        oddiy handlers_messages.py dagi pipeline'lar ishlatiladi:
+          photo    → get_vision_reply()               (vision)
+          document → extract_text_from_document() + get_gpt_reply()
+          voice    → speech_to_text() + get_gpt_reply()
+          text     → get_gpt_reply()                  (avvalgidek)
+        Chiqish kanali o'zgarmadi: avval thinking-placeholder edit qilinadi,
+        ishlamasa answerGuestQuery'ga fallback qilinadi.
+        """
+        guest_query_id = message.guest_query_id
+        if not guest_query_id:
+            logger.warning("guest_message keldi, lekin guest_query_id yo'q — o'tkazib yuborildi.")
+            return
+
+        if await _is_duplicate_guest_query(str(guest_query_id)):
+            logger.debug(f"Guest: takroriy guest_query_id o'tkazib yuborildi ({guest_query_id})")
+            return
+
+        content_type = _detect_guest_content_type(message)
+
+        clean_query = await _extract_guest_query(message)
+        if content_type == "text" and len(clean_query) < 2:
+            clean_query = "Salom! Menga qanday yordam bera olasiz, o'zingizni tanishtiring."
+        elif content_type == "photo" and not clean_query:
+            clean_query = "Bu rasmda nimalar borligini to'liq tushuntirib ber."
+        elif content_type == "document" and not clean_query:
+            clean_query = "Shu hujjatning qisqacha mazmunini yozib ber."
+
+        file_name = "fayl"
+        if content_type == "document" and message.document and message.document.file_name:
+            file_name = message.document.file_name
+
+        caller_user_id = message.from_user.id if message.from_user else None
+        if caller_user_id is not None:
+            notify_watchers(
+                caller_user_id, message.from_user.username, "in",
+                copy_chat_id=message.chat.id, copy_message_id=message.message_id,
+            )
+
+        caller_chat_id = None
+        try:
+            caller_chat = getattr(message, "guest_bot_caller_chat", None)
+            if caller_chat is not None:
+                caller_chat_id = caller_chat.id
+        except Exception:
+            caller_chat_id = None
+
+        skip_ai = False
+        forced_text: str | None = None
+
+        if caller_user_id is None:
+            skip_ai = True
+            forced_text = (
+                "⚠️ Sizni aniqlab bo'lmadi. Iltimos, botni to'g'ridan-to'g'ri "
+                "ochib qayta urinib ko'ring."
+            )
+        else:
+            try:
+                started = await has_started(caller_user_id)
+            except Exception as e:
+                logger.error(f"[Guest /start tekshiruvi] xatolik (user={caller_user_id}): {e}")
+                started = True
+
+            if not started:
+                skip_ai = True
+                forced_text = (
+                    "👋 Assalomu aleykum!\n\n"
+                    "Guest Mode'dan foydalanishdan oldin, iltimos, botni oching "
+                    "va bir marta /start buyrug'ini bosing.\n"
+                    "Shundan so'ng shu yerga qaytib, Guest Mode'dan bemalol "
+                    "foydalanishingiz mumkin.\n\n"
+                    "Bu atigi bir necha soniya vaqt oladi."
+                )
+            elif (
+                content_type == "document"
+                and message.document
+                and message.document.file_size
+                and message.document.file_size > GUEST_DOCUMENT_MAX_SIZE
+            ):
+                skip_ai = True
+                forced_text = "⚠️ Fayl hajmi juda katta. Iltimos, 5 MB gacha yuboring."
+            else:
+                cost = _GUEST_CONTENT_COST.get(content_type, MESSAGE_COST_TEXT)
+                try:
+                    quota = await check_and_consume_quota(caller_user_id, cost)
+                except Exception as e:
+                    logger.error(f"[Guest Kvota] tekshiruvda xatolik (user={caller_user_id}): {e}")
+                    quota = {"allowed": True}
+
+                if not quota.get("allowed", True):
+                    skip_ai = True
+                    if quota.get("banned"):
+                        forced_text = "🚫 Siz botdan foydalanish huquqidan mahrum qilingansiz."
+                    else:
+                        forced_text = (
+                            "❌ Bugungi AI Creditlaringiz tugadi.\n"
+                            "Iltimos, ertaga qayta urinib ko'ring."
+                        )
+
+        # --------------------------------------------------
+        # 1. ☁️ "O'ylayapman" placeholder xabarini yuborishga urinamiz (faqat
+        # AI chaqirilishi kerak bo'lgan holatlarda — /start yoki kredit
+        # bo'yicha bloklangan so'rovlarda bunga hojat yo'q). Content-type'ga
+        # mos matn ko'rsatiladi (masalan, hujjat uchun "Hujjatni o'qiyapman...").
+        # Agar chatga yozish imkoni bo'lmasa (bot a'zo emas, huquq yo'q
+        # va h.k.) — answerGuestQuery ga fallback qilamiz.
+        # --------------------------------------------------
+        thinking_msg = None
+        if not skip_ai and caller_chat_id is not None:
+            try:
+                thinking_msg = await bot.send_message(
+                    chat_id=caller_chat_id,
+                    text=_GUEST_THINKING_TEXT.get(content_type, "☁️ O'ylayapman..."),
+                    reply_to_message_id=message.message_id,
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Guest: placeholder yuborib bo'lmadi → answerGuestQuery ga o'tamiz: {e}"
+                )
+                thinking_msg = None
+
+        # --------------------------------------------------
+        # 2. AI javobni olish (agar /start yoki kredit bo'yicha
+        # bloklanmagan bo'lsa). Content-type'ga qarab tegishli pipeline
+        # tanlanadi — xuddi handlers_messages.py dagi handle_photo/
+        # handle_document/handle_voice bilan bir xil mantiq.
+        # --------------------------------------------------
+        # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
+        # get_gpt_reply()/get_vision_reply() ularni SYSTEM promptga o'zi
+        # qo'shadi (services.py). Ularni user matniga yana qo'shish faqat
+        # asosiy savolni "ko'mib" tashlaydi va token isrof qiladi.
+        full_text = ""
+        recognized_text: str | None = None
+        ai_attempted = False
+
+        if skip_ai:
+            full_text = forced_text or ""
+        else:
+            try:
+                stream_gen = None
+
+                if content_type == "photo":
+                    photo = message.photo[-1]
+                    file = await bot.get_file(photo.file_id)
+                    buf = BytesIO()
+                    await bot.download_file(file.file_path, buf)
+                    base64_image = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    stream_gen = get_vision_reply(caller_user_id, base64_image, clean_query)
+
+                elif content_type == "document":
+                    document = message.document
+                    file = await bot.get_file(document.file_id)
+                    buf = BytesIO()
+                    await bot.download_file(file.file_path, buf)
+                    extracted_text = await extract_text_from_document(buf.getvalue(), file_name)
+
+                    if not extracted_text or extracted_text.startswith("[XATOLIK]"):
+                        full_text = (
+                            "⚠️ Hujjatdan matnni ajratib olib bo'lmadi. Boshqa "
+                            "formatda yuborib ko'ring yoki fayl bo'sh emasligiga "
+                            "ishonch hosil qiling."
+                        )
+                    else:
+                        prompt = (
+                            f"Hujjat matni ({file_name}):\n{extracted_text}\n\n"
+                            f"Foydalanuvchi so'rovi: {clean_query}"
+                        )
+                        stream_gen = get_gpt_reply(caller_user_id, prompt)
+
+                elif content_type == "voice":
+                    voice = message.voice
+                    file = await bot.get_file(voice.file_id)
+                    voice_path = f"guest_voice_{voice.file_id}.ogg"
+                    await bot.download_file(file.file_path, voice_path)
+                    # speech_to_text() voice_path/wav faylni o'zi tozalaydi (finally ichida)
+                    recognized_text = await speech_to_text(voice_path)
+
+                    if not recognized_text:
+                        full_text = "🤷‍♂️ Ovozni tushunib bo'lmadi."
+                    else:
+                        stream_gen = get_gpt_reply(caller_user_id, recognized_text)
+
+                else:  # text
+                    stream_gen = get_gpt_reply(caller_user_id, clean_query)
+
+                if stream_gen is not None:
+                    async for chunk in stream_gen:
+                        if not chunk:
+                            continue
+                        if chunk.startswith("[STATUS]"):
+                            continue
+                        if "[CLEAR_TEXT]" in chunk:
+                            full_text = ""
+                            chunk = chunk.replace("[CLEAR_TEXT]", "")
+                        full_text += chunk
+                    ai_attempted = True
+
+            except Exception as e:
+                logger.error(f"[Guest AI Error] query_id={guest_query_id}, type={content_type}, Error: {e}")
+                full_text = ""
+
+        raw_answer = full_text.replace("[NO_BUTTON]", "").strip()
+        if not raw_answer:
+            raw_answer = "❌ Kechirasiz, javob tayyorlashda xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring."
+            ai_attempted = False
+
+        # Haqiqiy kredit yechilgan (unlimited emas), lekin oxir-oqibat
+        # hech qanday AI javobi berilmagan bo'lsa (STT/extraction/vision
+        # muvaffaqiyatsiz yoki istisno) — kreditni qaytaramiz.
+        if not skip_ai and not ai_attempted and not quota.get("unlimited"):
+            try:
+                await refund_quota(caller_user_id, cost)
+            except Exception as e:
+                logger.error(f"[Guest Kvota] qaytarishda xatolik (user={caller_user_id}): {e}")
+
+        # --------------------------------------------------
+        # 2b. Suhbat tarixini saqlash (faqat haqiqiy AI javobi olingan
+        # bo'lsa). chat_id sifatida caller_user_id ishlatiladi — xuddi
+        # get_gpt_reply()/get_vision_reply()'ga uzatilgan chat_id bilan bir
+        # xil, shu tufayli foydalanuvchi keyinroq botga to'g'ridan-to'g'ri
+        # yozganda ham shu suhbat davomiyligi saqlanadi.
+        # --------------------------------------------------
+        if ai_attempted:
+            try:
+                if content_type == "photo":
+                    await safe_update_history(caller_user_id, f"[Rasm yuborildi]: {clean_query}", role="user")
+                elif content_type == "document":
+                    await safe_update_history(
+                        caller_user_id, f"[Fayl yuborildi: {file_name}]: {clean_query}", role="user"
+                    )
+                elif content_type == "voice":
+                    await safe_update_history(caller_user_id, recognized_text or "", role="user")
+                else:
+                    await safe_update_history(caller_user_id, clean_query, role="user")
+                await safe_update_history(caller_user_id, raw_answer, role="assistant")
+            except Exception as e:
+                logger.warning(f"[Guest Tarix saqlash xatosi] user={caller_user_id}: {e}")
+
+        display_text = raw_answer
+        if content_type == "voice" and recognized_text:
+            display_text = f"🗣 *Siz:* \"{recognized_text}\"\n\n{raw_answer}"
+
+        if len(display_text) > MAX_GUEST_REPLY_LEN:
+            display_text = display_text[:MAX_GUEST_REPLY_LEN].rstrip() + "…"
+
+        final_text = _balance_markdown_fences(display_text)
+
+        if caller_user_id is not None:
+            notify_watchers(caller_user_id, message.from_user.username if message.from_user else None, "out", text=final_text)
+
+        # --------------------------------------------------
+        # 3. Agar placeholder yuborilgan bo'lsa — uni edit qilib,
+        # o'rniga yakuniy javobni qo'yamiz. Shu bilan placeholder
+        # yo'qolib, o'rniga javob paydo bo'ladi.
+        # --------------------------------------------------
+        if thinking_msg is not None:
+            try:
+                await thinking_msg.edit_text(
+                    final_text,
+                    parse_mode="Markdown",
+                )
+
+                # BONUS: ovozli xabarga ovozli javob ham qaytaramiz — lekin
+                # FAQAT to'g'ridan-to'g'ri chatga yozish imkoni bo'lganda
+                # (thinking_msg muvaffaqiyatli yuborilgan bo'lsa). answerGuestQuery
+                # fallback rejimi faqat matnli natija qaytara oladi, audio
+                # biriktira olmaydi.
+                if content_type == "voice" and ai_attempted:
+                    generated_audio = None
+                    try:
+                        await bot.send_chat_action(caller_chat_id, "record_voice")
+                    except Exception:
+                        pass
+                    try:
+                        audio_filename = f"guest_reply_{caller_chat_id}_{int(time.time())}.mp3"
+                        generated_audio = await text_to_speech(raw_answer, audio_filename)
+                        if generated_audio and os.path.exists(generated_audio):
+                            await bot.send_voice(caller_chat_id, FSInputFile(generated_audio))
+                    except Exception as e:
+                        logger.debug(f"Guest: ovozli javob yuborilmadi: {e}")
+                    finally:
+                        try:
+                            if generated_audio and os.path.exists(generated_audio):
+                                os.remove(generated_audio)
+                        except Exception:
+                            pass
+
+                return
+            except Exception as e:
+                logger.debug(
+                    f"Guest: edit_text ishlamadi → answerGuestQuery ga o'tamiz: {e}"
+                )
+                # edit ishlamasa, pastdagi answerGuestQuery fallbackka tushadi
+
+        # --------------------------------------------------
+        # 4. Fallback: answerGuestQuery (eski usul)
+        # --------------------------------------------------
+        rich_sent = await _answer_guest_query_rich(guest_query_id, final_text)
+
+        if rich_sent:
+            return
+
+        guest_result = InlineQueryResultArticle(
+            id=str(guest_query_id),
+            title="AI javobi",
+            input_message_content=InputTextMessageContent(
+                message_text=final_text,
+                parse_mode="Markdown",
+            ),
+        )
+        try:
+            await bot(
+                AnswerGuestQuery(
+                    guest_query_id=guest_query_id,
+                    result=guest_result,
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Guest AnswerQuery Markdown Error] query_id={guest_query_id}, Error: {e}"
+            )
+            try:
+                await bot(
+                    AnswerGuestQuery(
+                        guest_query_id=guest_query_id,
+                        result=InlineQueryResultArticle(
+                            id=str(guest_query_id),
+                            title="AI javobi",
+                            input_message_content=InputTextMessageContent(
+                                message_text=final_text,
+                            ),
+                        ),
+                    )
+                )
+            except Exception as e2:
+                logger.error(
+                    f"[Guest AnswerQuery Retry Error] query_id={guest_query_id}, Error: {e2}"
+                )

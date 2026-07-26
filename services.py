@@ -1,0 +1,760 @@
+import os
+import shutil
+import speech_recognition as sr
+from pydub import AudioSegment
+import edge_tts
+import asyncio
+import aiohttp
+import re
+import json
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
+from html import escape as html_escape
+
+from ddgs import DDGS
+
+if shutil.which("ffmpeg"):
+    AudioSegment.converter = "ffmpeg"
+else:
+    AudioSegment.converter = "ffmpeg.exe"
+
+try:
+    from config import (
+        SYSTEM_PROMPT, GPT_MODEL, GPT_TEMPERATURE, GPT_MAX_TOKENS, GPT_TOP_P,
+        GPT_FREQUENCY_PENALTY, GPT_PRESENCE_PENALTY,
+        CONTEXT_WINDOW, OPENAI_API_KEY,
+        CONCISE_INSTRUCTION, STRICT_MATH_RULES
+    )
+except ImportError:
+    import os
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    SYSTEM_PROMPT = "You are a helpful assistant."
+    CONCISE_INSTRUCTION = ""
+    STRICT_MATH_RULES = ""
+    GPT_MODEL = "gpt-4o-mini"
+    GPT_TEMPERATURE = 0.3
+    GPT_MAX_TOKENS = 1500
+    GPT_TOP_P = 1.0
+    GPT_FREQUENCY_PENALTY = 0
+    GPT_PRESENCE_PENALTY = 0
+    CONTEXT_WINDOW = 12
+
+from loader import openai_client, logger
+from utils.history import update_chat_history
+
+# ─────────────────────────────────────────────────────────────
+# YORDAMCHI: TARIX FUNKSIYALARI
+# ─────────────────────────────────────────────────────────────
+
+async def clear_chat_history(chat_id: int):
+    try:
+        from utils.history import clear_history
+        await clear_history(chat_id)
+    except Exception as e:
+        logger.error(f"Xotirani tozalashda xatolik: {e}")
+
+async def safe_update_history(chat_id: int, content: str, role: str = "user"):
+    if not content:
+        return
+    try:
+        await update_chat_history(chat_id, content, role=role)
+    except Exception as e:
+        # Xabar HECH QAYERGA saqlanmagani keyingi javoblarda kontekst
+        # yo'qolishiga bevosita olib keladi, shuning uchun warning.
+        logger.warning(f"[Tarix yozish xatosi] chat={chat_id}, role={role}: {e}")
+
+async def safe_get_chat_history(chat_id: int, limit: int = CONTEXT_WINDOW) -> List[Dict[str, str]]:
+    try:
+        from utils.history import get_chat_history
+        hist = await get_chat_history(chat_id, limit=limit)
+        return hist[-limit:] if isinstance(hist, list) else []
+    except Exception as e:
+        # DIQQAT: bu yerda xatolik "yutilib" bo'sh ro'yxat qaytarilsa,
+        # foydalanuvchi uchun BUTUN suhbat konteksti indamay yo'qoladi.
+        # Shuning uchun debug emas, warning darajasida logga yoziladi —
+        # aks holda production'da bunday holatlarni payqash deyarli
+        # imkonsiz bo'ladi.
+        logger.warning(f"[Tarix o'qish xatosi] chat={chat_id}: {e} — bo'sh tarix qaytarilmoqda!")
+        return []
+
+# ─────────────────────────────────────────────────────────────
+# RICH MESSAGE HELPERS
+# ─────────────────────────────────────────────────────────────
+
+_RICH_CODE_RE = re.compile(r"```([a-zA-Z0-9_+-]*)\n(.*?)\n```", re.S)
+_RICH_MATH_BLOCK_RE = re.compile(r"(?<!\\)\$\$(.+?)\$\$", re.S)
+_RICH_MATH_INLINE_RE = re.compile(r"(?<!\\)\$(?!\s)(.+?)(?<!\s)\$(?!\$)", re.S)
+_RICH_DATE_PATTERNS = (
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?\b"),
+    re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})(?:[ T](\d{2}):(\d{2}))?\b"),
+)
+
+
+def _protect_code_blocks(text: str):
+    placeholders = []
+
+    def repl(match):
+        token = f"@@CODE_BLOCK_{len(placeholders)}@@"
+        placeholders.append((token, match.group(0)))
+        return token
+
+    return _RICH_CODE_RE.sub(repl, text), placeholders
+
+
+def _restore_code_blocks(text: str, placeholders):
+    for token, block in placeholders:
+        text = text.replace(token, block)
+    return text
+
+
+def _looks_like_math(expr: str) -> bool:
+    expr = expr.strip()
+    if not expr:
+        return False
+    if len(expr) > 120:
+        return False
+    math_chars = set("=+-*/^_()[]{}<>∑∫√π∞≈≠≤≥·×÷")
+    return any(ch in math_chars for ch in expr) or (any(ch.isdigit() for ch in expr) and any(ch.isalpha() for ch in expr))
+
+
+def _replace_math_block(match):
+    expr = match.group(1).strip()
+    if not _looks_like_math(expr):
+        return match.group(0)
+    return f"<tg-math-block>{html_escape(expr)}</tg-math-block>"
+
+
+def _replace_math_inline(match):
+    expr = match.group(1).strip()
+    if not _looks_like_math(expr):
+        return match.group(0)
+    return f"<tg-math>{html_escape(expr)}</tg-math>"
+
+
+def _replace_dates(text: str) -> str:
+    tz_uz = timezone(timedelta(hours=5))
+
+    def fmt_datetime(dt: datetime, original: str, has_time: bool) -> str:
+        unix = int(dt.timestamp())
+        fmt = "wDT" if has_time else "d"
+        return f'<tg-time unix="{unix}" format="{fmt}">{html_escape(original)}</tg-time>'
+
+    def repl_iso(match):
+        year, month, day, hour, minute = match.groups()
+        has_time = hour is not None and minute is not None
+        try:
+            if has_time:
+                dt = datetime(int(year), int(month), int(day), int(hour), int(minute), tzinfo=tz_uz)
+            else:
+                dt = datetime(int(year), int(month), int(day), 0, 0, tzinfo=tz_uz)
+            return fmt_datetime(dt, match.group(0), has_time)
+        except Exception:
+            return match.group(0)
+
+    def repl_eu(match):
+        day, month, year, hour, minute = match.groups()
+        has_time = hour is not None and minute is not None
+        try:
+            if has_time:
+                dt = datetime(int(year), int(month), int(day), int(hour), int(minute), tzinfo=tz_uz)
+            else:
+                dt = datetime(int(year), int(month), int(day), 0, 0, tzinfo=tz_uz)
+            return fmt_datetime(dt, match.group(0), has_time)
+        except Exception:
+            return match.group(0)
+
+    text = _RICH_DATE_PATTERNS[0].sub(repl_iso, text)
+    text = _RICH_DATE_PATTERNS[1].sub(repl_eu, text)
+    return text
+
+
+def build_rich_markdown(text: str) -> str:
+    """Best-effort rich message markdown for Telegram Bot API 10.1."""
+    if not text:
+        return ""
+    protected, placeholders = _protect_code_blocks(text)
+    protected = _RICH_MATH_BLOCK_RE.sub(_replace_math_block, protected)
+    protected = _RICH_MATH_INLINE_RE.sub(_replace_math_inline, protected)
+    protected = _replace_dates(protected)
+    protected = _restore_code_blocks(protected, placeholders)
+    return protected
+
+# ─────────────────────────────────────────────────────────────
+# YOUTUBE SUMMARY
+# ─────────────────────────────────────────────────────────────
+
+async def get_youtube_summary(chat_id: int, video_id: str, user_prompt: str = ""):
+    def _fetch_transcript():
+        import youtube_transcript_api
+        try:
+            return youtube_transcript_api.YouTubeTranscriptApi.get_transcript(video_id, languages=['uz', 'ru', 'en'])
+        except:
+            try:
+                transcript_list = youtube_transcript_api.YouTubeTranscriptApi.list_transcripts(video_id)
+                for transcript in transcript_list:
+                    return transcript.fetch()
+            except Exception:
+                return []
+        return []
+
+    try:
+        transcript_data = await asyncio.to_thread(_fetch_transcript)
+        
+        if not transcript_data:
+            yield "Kechirasiz, bu videoning ochiq subtitrlari yo'q ekan (yoki video yopiq/musiqiy). Boshqa video yuborib ko'ring."
+            return
+            
+        full_text = " ".join([t.get('text', '') for t in transcript_data])
+        
+        if len(full_text) > 15000:
+            full_text = full_text[:15000] + "\n...[Xarajatni tejash uchun videoning qolgan qismi qisqartirildi]."
+
+        default_prompt = "Shu videoni qisqacha xulosa qilib ber va asosiy g'oyalarini ayt"
+        final_prompt_text = user_prompt if user_prompt else default_prompt
+
+        prompt = (
+            f"Quyida YouTube videosining matni (subtitrlari) berilgan. "
+            f"Foydalanuvchining so'rovi: '{final_prompt_text}'.\n\n"
+            f"Video matni:\n{full_text}"
+        )
+
+        async for chunk in get_gpt_reply(chat_id, prompt):
+            yield chunk
+
+    except Exception as e:
+        logger.error(f"YouTube Transcript xatosi: {e}")
+        yield "Videoni tahlil qilishda kutilmagan xatolik yuz berdi."
+
+# ─────────────────────────────────────────────────────────────
+# 🔍 YAXSHILANGAN QIDIRUV BLOKI
+# ─────────────────────────────────────────────────────────────
+
+async def fetch_page_content(url: str, max_chars: int = 4000) -> str:
+    """
+    Berilgan URL dan sahifaning to'liq matnini yuklaydi va
+    HTML teglarini olib tashlab, toza matn qaytaradi.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=12)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+            "Accept-Language": "uz,ru;q=0.9,en;q=0.8",
+        }
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers, ssl=False) as resp:
+                if resp.status != 200:
+                    return ""
+                ct = resp.headers.get("Content-Type", "")
+                if "text/html" not in ct and "text/plain" not in ct:
+                    return ""
+                html = await resp.text(errors="ignore")
+
+                html = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r"<style[^>]*>.*?</style>",  " ", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r"<nav[^>]*>.*?</nav>",       " ", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r"<footer[^>]*>.*?</footer>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r"<header[^>]*>.*?</header>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+                clean = re.sub(r"<[^>]+>", " ", html)
+                clean = re.sub(r"&[a-zA-Z]{2,6};", " ", clean)
+                clean = re.sub(r"&#\d+;", " ", clean)
+                clean = re.sub(r"\s{2,}", " ", clean).strip()
+
+                return clean[:max_chars]
+
+    except asyncio.TimeoutError:
+        logger.debug(f"fetch_page_content timeout: {url}")
+    except Exception as e:
+        logger.debug(f"fetch_page_content xatosi ({url}): {e}")
+    return ""
+
+
+async def multi_source_deep_search(
+    primary_query: str,
+    extra_queries: Optional[List[str]] = None,
+    fetch_pages: int = 3,
+) -> str:
+    """
+    Bir nechta so'rov bilan chuqur qidiruv:
+      1. primary_query + extra_queries orqali qidiruv snippetlari
+      2. Eng yuqori N ta URL dan to'liq sahifa matni yuklanadi
+      3. Hammasi bitta kontekst sifatida qaytariladi
+    """
+    queries: List[str] = [primary_query]
+    if extra_queries:
+        queries += extra_queries[:2]   
+
+    seen_urls: set = set()
+    all_snippets: List[str] = []
+    top_urls: List[tuple] = []      
+
+    for q in queries:
+        def _s(query=q):
+            try:
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=6))
+            except Exception as e:
+                logger.error(f"DDGS error [{query}]: {e}")
+                return []
+
+        results = await asyncio.to_thread(_s)
+        if not results:
+            all_snippets.append(f"⚠️ «{q}» bo'yicha natija topilmadi.")
+            continue
+
+        block = f"📌 QIDIRUV: «{q}»\n{'─'*50}\n"
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "")
+            url   = r.get("href", "")
+            body  = r.get("body", "")
+            block += f"[{i}] {title}\n    🔗 {url}\n    {body}\n\n"
+
+            if url and url not in seen_urls and i <= 2:
+                seen_urls.add(url)
+                top_urls.append((url, title))
+
+        all_snippets.append(block)
+
+    snippets_text = "\n\n".join(all_snippets)
+
+    if top_urls and fetch_pages > 0:
+        urls_to_fetch = top_urls[:fetch_pages]
+        tasks = [fetch_page_content(url) for url, _ in urls_to_fetch]
+        page_contents = await asyncio.gather(*tasks, return_exceptions=True)
+
+        pages_block = "\n\n📄 SAHIFALARDAN TO'LIQ MA'LUMOT:\n" + "═" * 55 + "\n"
+        any_page = False
+        for (url, title), content in zip(urls_to_fetch, page_contents):
+            if isinstance(content, str) and len(content) > 150:
+                pages_block += f"\n🌐 {title}\n🔗 {url}\n\n{content[:3500]}\n{'─'*50}\n"
+                any_page = True
+
+        if any_page:
+            snippets_text += pages_block
+
+    return snippets_text if snippets_text.strip() else "Hech qanday ma'lumot topilmadi."
+
+
+# ─────────────────────────────────────────────────────────────
+# HUJJAT VA RASM
+# ─────────────────────────────────────────────────────────────
+
+def _extract_text_from_document_sync(file_bytes: bytes, filename: str) -> str:
+    """
+    Hujjatdan matnni ajratib olishning bloklovchi (CPU/IO) qismi.
+    fitz (PDF) va python-docx kutubxonalari sinxron ishlaydi, shuning uchun
+    bu funksiya faqat `asyncio.to_thread` orqali, alohida oqimda chaqiriladi —
+    event loopni band qilmaslik uchun.
+    """
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    text = ""
+
+    if ext == 'pdf':
+        # PDF fayllarni o'qish (eskisi kabi 10 sahifa limiti bilan)
+        import fitz
+        pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+        pages_to_read = min(10, len(pdf_document))
+        for page_num in range(pages_to_read):
+            page = pdf_document.load_page(page_num)
+            text += page.get_text()
+        if len(pdf_document) > 10:
+            text += "\n\n[TIZIM XABARI: Xarajat va xotirani tejash maqsadida hujjatning faqat dastlabki 10 sahifasi o'qildi.]"
+
+    elif ext in ['doc', 'docx']:
+        # Word fayllarini o'qish
+        from io import BytesIO
+        import docx
+        doc = docx.Document(BytesIO(file_bytes))
+        text = "\n".join([para.text for para in doc.paragraphs])
+
+    else:
+        # Qolgan barcha formatlar (txt, csv, json, kod fayllari, va h.k.) uchun
+        # Ularni oddiy UTF-8 matn sifatida o'qishga harakat qilamiz
+        # errors='ignore' parametri binar (noma'lum) fayllar botni qatirmasligini ta'minlaydi
+        text = file_bytes.decode('utf-8', errors='ignore')
+
+    # AI xotirasi to'lib qolmasligi uchun barcha fayllarga umumiy belgi cheklovi
+    return text[:15000]
+
+
+async def extract_text_from_document(file_bytes: bytes, filename: str) -> str:
+    """Hujjatlardan matnni ajratib olish (PDF, DOCX va barcha boshqa formatlar).
+
+    Diqqat: PDF/DOCX parsing CPU/IO bo'yicha og'ir va sinxron kutubxonalar
+    (fitz, python-docx) orqali amalga oshiriladi. Shuning uchun bu ishni
+    to'g'ridan-to'g'ri bajarish event loopni bloklab, o'sha vaqtda BOSHQA
+    barcha foydalanuvchilarning botga yuborgan xabarlarini "muzlatib" qo'yardi.
+    `asyncio.to_thread` yordamida bu og'ir qism alohida oqimga o'tkazilgan.
+    """
+    try:
+        return await asyncio.to_thread(_extract_text_from_document_sync, file_bytes, filename)
+    except Exception as e:
+        logger.error(f"Faylni o'qishda xatolik ({filename}): {e}")
+        return "[XATOLIK] Ushbu fayl formatidan matnni ajratib olib bo'lmadi."
+
+
+def _completion_limit_kwargs(model_name: str, limit: int) -> dict:
+    """
+    gpt-5* modellari `max_tokens` emas, `max_completion_tokens` parametrini
+    talab qiladi (OpenAI'ning yangi talabi). Model nomiga qarab to'g'ri
+    kalit so'zni tanlab beradi. Barcha chat.completions.create() chaqiruvlari
+    shu funksiya orqali max-tokens parametrini olishi kerak — aks holda
+    "Unsupported parameter: 'max_tokens'" (400 Bad Request) xatosi chiqadi.
+    """
+    model_name = (model_name or "").lower()
+    if model_name.startswith("gpt-5"):
+        return {"max_completion_tokens": limit}
+    return {"max_tokens": limit}
+
+
+async def get_vision_reply(chat_id: int, base64_image: str, user_message: str):
+    messages = [
+        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"},
+    ]
+
+    # BONUS TUZATISH: avvalgi versiyada rasm tahlili har doim "nol"
+    # kontekstdan boshlanardi — suhbat tarixi umuman qo'shilmasdi. Endi
+    # matnli oqim bilan bir xil tamoyilda oldingi xabarlar ham kiritiladi,
+    # shunda foydalanuvchi rasm haqida davom etuvchi savol bersa
+    # ("bu yerdagi ikkinchi odam-chi?"), model buni oldingi rasm/suhbat
+    # bilan bog'lay oladi.
+    recent = await safe_get_chat_history(chat_id, limit=CONTEXT_WINDOW)
+    for m in recent:
+        if "role" in m and "content" in m:
+            messages.append({"role": m["role"], "content": m["content"]})
+
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": user_message},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_image}",
+                    "detail": "auto"
+                }
+            }
+        ]
+    })
+    try:
+        response = await openai_client.chat.completions.create(
+            model=GPT_MODEL,
+            messages=messages,
+            stream=True,
+            **_completion_limit_kwargs(GPT_MODEL, GPT_MAX_TOKENS),
+        )
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    except Exception as e:
+        logger.error(f"Vision API xatosi: {e}")
+        raise
+
+
+# ─────────────────────────────────────────────────────────────
+# ROLE DETECTION
+# ─────────────────────────────────────────────────────────────
+
+def detect_role_from_text(text: str) -> str:
+    t = text.lower()
+    tech    = ["kod", "error", "xato", "python", "javascript", "ai", "api", "server", "sql"]
+    sales   = ["narx", "sotish", "savdo", "mijoz", "reklama", "marketing"]
+    psycho  = ["ruhiy", "psixolog", "depress", "stress", "maslahat"]
+    if any(k in t for k in tech):   return "technical"
+    if any(k in t for k in sales):  return "commercial"
+    if any(k in t for k in psycho): return "supportive"
+    return ""
+
+def role_instruction(role: str) -> str:
+    if role == "technical":   return "Javobni texnik uslubda, aniq kod misollari yoki buyruqlar bilan taqdim et."
+    if role == "commercial":  return "Javobni tijoriy, qisqa va savdoga yo'naltirilgan tilda bering."
+    if role == "supportive":  return "Javobni yumshoq, empatik va qo'llab-quvvatlovchi uslubda bering."
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────
+# 🌟 ASOSIY GPT JAVOBI — MUKAMMAL MULTI-ROUND SEARCH
+# ─────────────────────────────────────────────────────────────
+
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "internet_search",
+            "description": (
+                "Real vaqt ma'lumotlarini (ob-havo, valyuta kursi, yangiliklar, narxlar, "
+                "mahsulotlar, sport natijalari va boshqa o'zgaruvchan faktlar) internetdan "
+                "qidirish uchun. O'zbekiston kontekstida: valyuta uchun cbu.uz, ob-havo uchun "
+                "meteo.uz yoki uzgidromet, yangiliklar uchun kun.uz / gazeta.uz ishlatilsin."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "primary_query": {
+                        "type": "string",
+                        "description": (
+                            "Asosiy qidiruv so'rovi. Imkon qadar aniq va manbani "
+                            "ko'rsatib yozing. Masalan: 'USD UZS kursi bugun cbu.uz 2025', "
+                            "'Toshkent ob-havo bugun meteo.uz', 'site:kun.uz so'nggi yangiliklar'."
+                        ),
+                    },
+                    "extra_queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Qo'shimcha 1-2 ta qidiruv so'rovi. Manbalarni solishtirish yoki "
+                            "ma'lumotni kengaytirish uchun ishlatiladi. Masalan birinchi so'rov "
+                            "o'zbekcha bo'lsa, ikkinchisi ruscha yoki inglizcha bo'lishi mumkin."
+                        ),
+                    },
+                },
+                "required": ["primary_query"],
+            },
+        },
+    }
+]
+
+_SYNTHESIS_SYSTEM = """QAT'IY BUYRUQ — ANIQ VA CHUQUR JAVOB YOZ:
+
+0. TIL — ENG MUHIM QOIDA: Yakuniy javobni albatta foydalanuvchining ASL savoli
+   (yuqoridagi "user" xabari) qanday tilda yozilgan bo'lsa, AYNAN o'sha tilda yoz —
+   bu qidiruv natijalari/manbalar qaysi tilda bo'lishidan (ular ko'pincha o'zbek
+   tilida chiqadi, chunki qidiruv so'zlari cbu.uz/meteo.uz kabi manbalar uchun
+   o'zbekcha tuziladi) qat'iy nazar. Masalan foydalanuvchi ruscha yozgan bo'lsa,
+   manbalar o'zbekcha bo'lsa ham, javob albatta RUSCHA bo'lishi SHART. Bu qoidani
+   hech qachon buzma — pastdagi format qoidalari ham shu tilda qo'llanadi.
+
+1. MANBALARNI TAHLIL QIL: Berilgan barcha manba matnlarini o'qib, ularni SOLISHTIR.
+   Bir manba boshqasiga zid bo'lsa — bu ziddiyatni foydalanuvchiga ayt.
+
+2. MANTIQ: Harorat, kurs yoki raqamlarni HISOBLASHDA xato qilma.
+   - Agar 24°C va yomg'ir kutilsa → qalin kiyim TAVSIYA ETMA.
+   - Dollar kursi so'ralsa → faqat UZS qiymatini yoz, taxmin qilma.
+
+3. FORMAT — qisqa va lo'nda TAQIQLANADI:
+   - Sarlavhalar (bold) ishlat.
+   - Raqamli yoki belgili ro'yxatlar tuz.
+   - Tegishli emojilar qo'sh (☀️ 🌧️ 💰 📈 📰).
+   - Kamida 3-5 xat boshi yoz.
+
+4. MANBA: Javob oxirida foydalanilgan manbalar QU'YIDAGI FORMATDA ko'rsat:
+   - [Sayt nomi](URL)
+   Misol: - [Weather.com](https://weather.com/...) yoki - [CoinMarketCap](https://coinmarketcap.com/...)
+   Hech qachon raw URL yozma. Doim [Nom](url) formatidan foydalan.
+   Agar rasmiy sayt topilmasa — buni ochiq ayt.
+
+5. SANA/VAQT: Agar ma'lumot eskirgan bo'lsa yoki aniq sana topilmasa — buni ham ayt."""
+
+
+async def get_openai_reply(
+    chat_id: int,
+    message_text: str,
+    *,
+    model: str = GPT_MODEL,
+    temperature: float = GPT_TEMPERATURE,
+    max_tokens: int = GPT_MAX_TOKENS,
+    top_p: float = GPT_TOP_P,
+    frequency_penalty: float = GPT_FREQUENCY_PENALTY,
+    presence_penalty: float = GPT_PRESENCE_PENALTY,
+):
+    messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"}]
+
+    try:
+        now_utc = datetime.now(timezone.utc)
+        now_tashkent = now_utc.astimezone(timezone(timedelta(hours=5)))
+        time_msg = (
+            f"[TIZIM MA'LUMOTI]\n"
+            f"Hozirgi sana: {now_tashkent.strftime('%Y-%m-%d')}, "
+            f"Vaqt: {now_tashkent.strftime('%H:%M')} (O'zbekiston, UTC+5).\n"
+            f"Foydalanuvchi O'zbekistonda. 'Dollar' = USD/UZS kursi (Markaziy bank). "
+            f"'Ob-havo' = O'zbekiston hududi (uzgidromet / meteo.uz).\n"
+            f"Real vaqt ma'lumotlari uchun DOIM 'internet_search' asbobini ishlat — "
+            f"o'z bilimingdan javob to'qima!"
+        )
+        messages.append({"role": "system", "content": time_msg})
+    except Exception:
+        pass
+
+    recent = await safe_get_chat_history(chat_id, limit=CONTEXT_WINDOW)
+    for m in recent:
+        if "role" in m and "content" in m:
+            messages.append({"role": m["role"], "content": m["content"]})
+
+    role = detect_role_from_text(message_text)
+    r_instr = role_instruction(role)
+    if r_instr:
+        messages.append({"role": "system", "content": f"ROLE_INSTRUCTION: {r_instr}"})
+
+    messages.append({"role": "user", "content": message_text})
+    MAX_TOOL_ROUNDS = 3
+    tool_round = 0
+    search_performed = False
+
+    while tool_round < MAX_TOOL_ROUNDS:
+        try:
+            response = await openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                top_p=top_p,
+                frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty,
+                tools=_TOOLS,
+                tool_choice="auto",
+                stream=False,
+                **_completion_limit_kwargs(model, 512),
+            )
+        except Exception as e:
+            logger.error(f"GPT tool-detection xatosi: {e}")
+            raise
+
+        choice = response.choices[0]
+        finish_reason = choice.finish_reason
+
+        if finish_reason != "tool_calls":
+            break
+
+        tool_calls = choice.message.tool_calls
+        if not tool_calls:
+            break
+
+        tc = tool_calls[0]
+        tool_name = tc.function.name
+        tool_call_id = tc.id
+
+        try:
+            args = json.loads(tc.function.arguments)
+        except Exception:
+            args = {}
+
+        primary_query = args.get("primary_query", "")
+        extra_queries = args.get("extra_queries", [])
+
+        if not primary_query:
+            break
+
+        if not search_performed:
+            # Kontent emas — faqat "band" animatsiyasiga signal: qidiruv
+            # (sekundlab davom etadigan tarmoq so'rovi) boshlanmoqda.
+            yield "[STATUS]search"
+            search_performed = True
+
+        logger.info(
+            f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
+        )
+        search_result = await multi_source_deep_search(
+            primary_query=primary_query,
+            extra_queries=extra_queries if extra_queries else None,
+            fetch_pages=3,
+        )
+
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+            ],
+        })
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": search_result,
+        })
+
+        tool_round += 1
+
+    if search_performed:
+        messages.append({"role": "system", "content": _SYNTHESIS_SYSTEM})
+        yield "[CLEAR_TEXT]"
+
+    try:
+        final_resp = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            stream=True,
+            **_completion_limit_kwargs(model, max_tokens),
+        )
+        async for chunk in final_resp:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+    except Exception as e:
+        logger.error(f"GPT Final synthesis xatosi: {e}")
+        raise
+
+
+async def get_gpt_reply(chat_id: int, user_message: str):
+    async for chunk in get_openai_reply(chat_id, user_message):
+        yield chunk
+
+# ─────────────────────────────────────────────────────────────
+# STT, TTS
+# ─────────────────────────────────────────────────────────────
+
+def _speech_to_text_sync(file_path: str, wav_path: str) -> str:
+    """
+    Ovozni matnga aylantirishning bloklovchi qismi:
+    - AudioSegment (pydub/ffmpeg) orqali formatni konvertatsiya qilish,
+    - r.recognize_google() orqali Google Speech API'ga SINXRON tarmoq so'rovi.
+    Bu ikkalasi ham event loopni sekundlab bloklashi mumkin, shuning uchun
+    faqat `asyncio.to_thread` orqali, alohida oqimda chaqiriladi.
+    """
+    r = sr.Recognizer()
+    audio = AudioSegment.from_file(file_path)
+    audio.export(wav_path, format="wav")
+    with sr.AudioFile(wav_path) as source:
+        audio_data = r.record(source)
+        return r.recognize_google(audio_data, language="uz-UZ")
+
+
+async def speech_to_text(file_path: str) -> str:
+    """Ovozli xabarni matnga o'giradi.
+
+    Diqqat: avvalgi versiyada butun konvertatsiya + Google'ga tarmoq so'rovi
+    to'g'ridan-to'g'ri `async def` ichida, `await`siz bajarilardi — bu esa
+    o'sha soniyalarda BUTUN botni (barcha foydalanuvchilar uchun) muzlatib
+    qo'yardi. Endi bu og'ir ish `asyncio.to_thread` orqali alohida oqimda
+    ishlaydi, event loop esa shu vaqtda boshqa foydalanuvchilarga xizmat
+    qilishda davom etaveradi.
+    """
+    wav_path = file_path + ".wav"
+    try:
+        return await asyncio.to_thread(_speech_to_text_sync, file_path, wav_path)
+    except Exception:
+        return ""
+    finally:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+        except Exception:
+            pass
+
+
+async def text_to_speech(text: str, filename: str) -> str:
+    text = text.replace("'", "'").replace("`", "'")
+    clean_text_for_speech = re.sub(r'<[^>]+>', '', text)
+    clean_text_for_speech = clean_text_for_speech.replace("$$", "").replace("$", "")
+    VOICE = "uz-UZ-MadinaNeural"
+    try:
+        communicate = edge_tts.Communicate(clean_text_for_speech, VOICE, rate="-10%")
+        await communicate.save(filename)
+        return filename
+    except Exception as e:
+        logger.error(f"TTS xatosi: {e}")
+        return None
