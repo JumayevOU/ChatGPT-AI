@@ -7,11 +7,13 @@ import asyncio
 import aiohttp
 import re
 import json
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 from html import escape as html_escape
 
 from ddgs import DDGS
+from openai import NotFoundError, RateLimitError
 
 if shutil.which("ffmpeg"):
     AudioSegment.converter = "ffmpeg"
@@ -20,24 +22,28 @@ else:
 
 try:
     from config import (
-        SYSTEM_PROMPT, GPT_MODEL, GPT_TEMPERATURE, GPT_MAX_TOKENS, GPT_TOP_P,
-        GPT_FREQUENCY_PENALTY, GPT_PRESENCE_PENALTY,
-        CONTEXT_WINDOW, OPENAI_API_KEY,
-        CONCISE_INSTRUCTION, STRICT_MATH_RULES
+        GPT_MODEL, MODEL_FALLBACKS, CONTEXT_WINDOW, OPENAI_API_KEY,
+        REQUEST_TIMEOUT, CONCISE_INSTRUCTION, STRICT_MATH_RULES,
+        build_system_prompt, build_request_params, pick_reasoning_effort,
     )
 except ImportError:
     import os
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    SYSTEM_PROMPT = "You are a helpful assistant."
     CONCISE_INSTRUCTION = ""
     STRICT_MATH_RULES = ""
     GPT_MODEL = "gpt-4o-mini"
-    GPT_TEMPERATURE = 0.3
-    GPT_MAX_TOKENS = 1500
-    GPT_TOP_P = 1.0
-    GPT_FREQUENCY_PENALTY = 0
-    GPT_PRESENCE_PENALTY = 0
+    MODEL_FALLBACKS = []
+    REQUEST_TIMEOUT = 60.0
     CONTEXT_WINDOW = 12
+
+    def build_system_prompt() -> str:
+        return "You are a helpful assistant."
+
+    def build_request_params(user_text: str = "", force_deep: bool = False, model: Optional[str] = None) -> Dict:
+        return {"model": model or GPT_MODEL, "max_output_tokens": 1500, "reasoning": {"effort": "low"}}
+
+    def pick_reasoning_effort(text: str, force_deep: bool = False) -> str:
+        return "low"
 
 from loader import openai_client, logger
 from utils.history import update_chat_history
@@ -396,24 +402,34 @@ async def extract_text_from_document(file_bytes: bytes, filename: str) -> str:
         return "[XATOLIK] Ushbu fayl formatidan matnni ajratib olib bo'lmadi."
 
 
-def _completion_limit_kwargs(model_name: str, limit: int) -> dict:
+async def _open_response_stream(stack: AsyncExitStack, candidate_models: List[str], **kwargs):
     """
-    gpt-5* modellari `max_tokens` emas, `max_completion_tokens` parametrini
-    talab qiladi (OpenAI'ning yangi talabi). Model nomiga qarab to'g'ri
-    kalit so'zni tanlab beradi. Barcha chat.completions.create() chaqiruvlari
-    shu funksiya orqali max-tokens parametrini olishi kerak — aks holda
-    "Unsupported parameter: 'max_tokens'" (400 Bad Request) xatosi chiqadi.
+    `candidate_models` ro'yxatini ketma-ket sinaydi — asosiy model 404
+    (mavjud emas) yoki 429 (limitga yetgan) qaytarsa, keyingi zaxira
+    modelga o'tadi (config.py'dagi MODEL_FALLBACKS). Muvaffaqiyatli ochilgan
+    oqimni (uni yopish `stack` orqali kafolatlanadi) va qaysi model
+    ishlaganini qaytaradi.
     """
-    model_name = (model_name or "").lower()
-    if model_name.startswith("gpt-5"):
-        return {"max_completion_tokens": limit}
-    return {"max_tokens": limit}
+    last_err: Optional[Exception] = None
+    for candidate in candidate_models:
+        try:
+            stream = await stack.enter_async_context(
+                openai_client.responses.stream(model=candidate, timeout=REQUEST_TIMEOUT, **kwargs)
+            )
+            return stream, candidate
+        except (NotFoundError, RateLimitError) as e:
+            last_err = e
+            logger.warning(
+                f"Model '{candidate}' ishlamadi ({type(e).__name__}), keyingi zaxira modelga o'tilmoqda..."
+            )
+            continue
+    raise last_err
 
 
-async def get_vision_reply(chat_id: int, base64_image: str, user_message: str):
-    messages = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"},
-    ]
+async def get_vision_reply(chat_id: int, base64_image: str, user_message: str, *, model: str = GPT_MODEL):
+    system_prompt = f"{build_system_prompt()}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"
+
+    messages: list = []
 
     # BONUS TUZATISH: avvalgi versiyada rasm tahlili har doim "nol"
     # kontekstdan boshlanardi — suhbat tarixi umuman qo'shilmasdi. Endi
@@ -429,26 +445,32 @@ async def get_vision_reply(chat_id: int, base64_image: str, user_message: str):
     messages.append({
         "role": "user",
         "content": [
-            {"type": "text", "text": user_message},
+            {"type": "input_text", "text": user_message},
             {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{base64_image}",
-                    "detail": "auto"
-                }
-            }
-        ]
+                "type": "input_image",
+                "image_url": f"data:image/jpeg;base64,{base64_image}",
+                "detail": "auto",
+            },
+        ],
     })
+
+    base_params = build_request_params(user_text=user_message, model=model)
+    initial_model = base_params.pop("model")
+
     try:
-        response = await openai_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=messages,
-            stream=True,
-            **_completion_limit_kwargs(GPT_MODEL, GPT_MAX_TOKENS),
-        )
-        async for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        async with AsyncExitStack() as stack:
+            stream, _resolved_model = await _open_response_stream(
+                stack,
+                [initial_model, *MODEL_FALLBACKS],
+                input=messages,
+                instructions=system_prompt,
+                store=False,
+                **base_params,
+            )
+            async for event in stream:
+                if event.type == "response.output_text.delta":
+                    yield event.delta
+            await stream.get_final_response()
     except Exception as e:
         logger.error(f"Vision API xatosi: {e}")
         raise
@@ -463,9 +485,15 @@ def detect_role_from_text(text: str) -> str:
     tech    = ["kod", "error", "xato", "python", "javascript", "ai", "api", "server", "sql"]
     sales   = ["narx", "sotish", "savdo", "mijoz", "reklama", "marketing"]
     psycho  = ["ruhiy", "psixolog", "depress", "stress", "maslahat"]
-    if any(k in t for k in tech):   return "technical"
-    if any(k in t for k in sales):  return "commercial"
-    if any(k in t for k in psycho): return "supportive"
+
+    def _has_word(words: list) -> bool:
+        # Chegara (\b) bilan qidiriladi — aks holda "api" so'zi "kaPItal"
+        # ichida ham "topilib", bexosdan noto'g'ri uslub tanlanardi.
+        return any(re.search(rf"\b{re.escape(w)}\b", t) for w in words)
+
+    if _has_word(tech):   return "technical"
+    if _has_word(sales):  return "commercial"
+    if _has_word(psycho): return "supportive"
     return ""
 
 def role_instruction(role: str) -> str:
@@ -479,41 +507,42 @@ def role_instruction(role: str) -> str:
 # 🌟 ASOSIY GPT JAVOBI — MUKAMMAL MULTI-ROUND SEARCH
 # ─────────────────────────────────────────────────────────────
 
+# Responses API tool sxemasi Chat Completions'dan farqli — "function" ichiga
+# emas, to'g'ridan-to'g'ri tekis (flat) shaklda beriladi.
 _TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "internet_search",
-            "description": (
-                "Real vaqt ma'lumotlarini (ob-havo, valyuta kursi, yangiliklar, narxlar, "
-                "mahsulotlar, sport natijalari va boshqa o'zgaruvchan faktlar) internetdan "
-                "qidirish uchun. O'zbekiston kontekstida: valyuta uchun cbu.uz, ob-havo uchun "
-                "meteo.uz yoki uzgidromet, yangiliklar uchun kun.uz / gazeta.uz ishlatilsin."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "primary_query": {
-                        "type": "string",
-                        "description": (
-                            "Asosiy qidiruv so'rovi. Imkon qadar aniq va manbani "
-                            "ko'rsatib yozing. Masalan: 'USD UZS kursi bugun cbu.uz 2025', "
-                            "'Toshkent ob-havo bugun meteo.uz', 'site:kun.uz so'nggi yangiliklar'."
-                        ),
-                    },
-                    "extra_queries": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Qo'shimcha 1-2 ta qidiruv so'rovi. Manbalarni solishtirish yoki "
-                            "ma'lumotni kengaytirish uchun ishlatiladi. Masalan birinchi so'rov "
-                            "o'zbekcha bo'lsa, ikkinchisi ruscha yoki inglizcha bo'lishi mumkin."
-                        ),
-                    },
+        "name": "internet_search",
+        "description": (
+            "Real vaqt ma'lumotlarini (ob-havo, valyuta kursi, yangiliklar, narxlar, "
+            "mahsulotlar, sport natijalari va boshqa o'zgaruvchan faktlar) internetdan "
+            "qidirish uchun. O'zbekiston kontekstida: valyuta uchun cbu.uz, ob-havo uchun "
+            "meteo.uz yoki uzgidromet, yangiliklar uchun kun.uz / gazeta.uz ishlatilsin."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "primary_query": {
+                    "type": "string",
+                    "description": (
+                        "Asosiy qidiruv so'rovi. Imkon qadar aniq va manbani "
+                        "ko'rsatib yozing. Masalan: 'USD UZS kursi bugun cbu.uz 2025', "
+                        "'Toshkent ob-havo bugun meteo.uz', 'site:kun.uz so'nggi yangiliklar'."
+                    ),
                 },
-                "required": ["primary_query"],
+                "extra_queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Qo'shimcha 1-2 ta qidiruv so'rovi. Manbalarni solishtirish yoki "
+                        "ma'lumotni kengaytirish uchun ishlatiladi. Masalan birinchi so'rov "
+                        "o'zbekcha bo'lsa, ikkinchisi ruscha yoki inglizcha bo'lishi mumkin."
+                    ),
+                },
             },
+            "required": ["primary_query"],
         },
+        "strict": False,
     }
 ]
 
@@ -549,18 +578,10 @@ _SYNTHESIS_SYSTEM = """QAT'IY BUYRUQ — ANIQ VA CHUQUR JAVOB YOZ:
 5. SANA/VAQT: Agar ma'lumot eskirgan bo'lsa yoki aniq sana topilmasa — buni ham ayt."""
 
 
-async def get_openai_reply(
-    chat_id: int,
-    message_text: str,
-    *,
-    model: str = GPT_MODEL,
-    temperature: float = GPT_TEMPERATURE,
-    max_tokens: int = GPT_MAX_TOKENS,
-    top_p: float = GPT_TOP_P,
-    frequency_penalty: float = GPT_FREQUENCY_PENALTY,
-    presence_penalty: float = GPT_PRESENCE_PENALTY,
-):
-    messages = [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"}]
+async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_MODEL):
+    system_prompt = f"{build_system_prompt()}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"
+
+    messages: list = []
 
     try:
         now_utc = datetime.now(timezone.utc)
@@ -574,7 +595,7 @@ async def get_openai_reply(
             f"Real vaqt ma'lumotlari uchun DOIM 'internet_search' asbobini ishlat — "
             f"o'z bilimingdan javob to'qima!"
         )
-        messages.append({"role": "system", "content": time_msg})
+        messages.append({"role": "developer", "content": time_msg})
     except Exception:
         pass
 
@@ -586,115 +607,111 @@ async def get_openai_reply(
     role = detect_role_from_text(message_text)
     r_instr = role_instruction(role)
     if r_instr:
-        messages.append({"role": "system", "content": f"ROLE_INSTRUCTION: {r_instr}"})
+        messages.append({"role": "developer", "content": f"ROLE_INSTRUCTION: {r_instr}"})
 
     messages.append({"role": "user", "content": message_text})
+
+    # Reasoning effort xabar murakkabligiga qarab tanlanadi (config.py:
+    # pick_reasoning_effort) — soddasiga tez/arzon, murakkabiga chuqurroq.
+    base_params = build_request_params(user_text=message_text, model=model)
+    initial_model = base_params.pop("model")
+
     MAX_TOOL_ROUNDS = 3
     tool_round = 0
     search_performed = False
+    synthesis_injected = False
+    resolved_model: Optional[str] = None
 
-    while tool_round < MAX_TOOL_ROUNDS:
+    while True:
+        # MUHIM: qidiruv 1-2 bosqichda tugasa ham (model ko'proq tool
+        # so'ramasa), keyingi chaqiruvda hali ham `tools` biriktirilgan
+        # bo'lishi mumkin (model xohlasa yana qidirishi mumkin) — shuning
+        # uchun _SYNTHESIS_SYSTEM'ni faqat MAX_TOOL_ROUNDS'da MAJBURIY
+        # yakuniy bosqichga emas, birinchi qidiruv natijasi qaytgan zahoti
+        # (pastda) bir marta qo'shamiz — u qachon javob bersa ham ishlaydi.
+        attach_tools = tool_round < MAX_TOOL_ROUNDS
+
+        call_kwargs = dict(base_params)
+        call_kwargs.update(input=messages, instructions=system_prompt, store=False)
+        if attach_tools:
+            call_kwargs.update(tools=_TOOLS, tool_choice="auto")
+
+        candidate_models = [resolved_model] if resolved_model else [initial_model, *MODEL_FALLBACKS]
+
         try:
-            response = await openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty,
-                tools=_TOOLS,
-                tool_choice="auto",
-                stream=False,
-                **_completion_limit_kwargs(model, 512),
-            )
+            async with AsyncExitStack() as stack:
+                stream, resolved_model = await _open_response_stream(stack, candidate_models, **call_kwargs)
+
+                got_function_call = False
+                pending_calls = []
+
+                async for event in stream:
+                    et = event.type
+                    if et == "response.output_text.delta":
+                        yield event.delta
+                    elif et == "response.output_item.added" and getattr(event.item, "type", None) == "function_call":
+                        got_function_call = True
+                        if not search_performed:
+                            # Kontent emas — faqat "band" animatsiyasiga signal:
+                            # qidiruv (sekundlab davom etadigan tarmoq so'rovi) boshlanmoqda.
+                            yield "[STATUS]search"
+                            search_performed = True
+                    elif et == "response.output_item.done" and getattr(event.item, "type", None) == "function_call":
+                        pending_calls.append(event.item)
+
+                final_response = await stream.get_final_response()
         except Exception as e:
-            logger.error(f"GPT tool-detection xatosi: {e}")
+            logger.error(f"GPT javob xatosi: {e}")
             raise
 
-        choice = response.choices[0]
-        finish_reason = choice.finish_reason
+        if not got_function_call:
+            if final_response.status == "incomplete":
+                logger.warning(f"GPT javobi incomplete tugadi: {final_response.incomplete_details}")
+            return
 
-        if finish_reason != "tool_calls":
-            break
+        for call_item in pending_calls:
+            try:
+                args = json.loads(call_item.arguments or "{}")
+            except Exception:
+                args = {}
 
-        tool_calls = choice.message.tool_calls
-        if not tool_calls:
-            break
+            primary_query = args.get("primary_query", "")
+            extra_queries = args.get("extra_queries", [])
 
-        tc = tool_calls[0]
-        tool_name = tc.function.name
-        tool_call_id = tc.id
+            if primary_query:
+                logger.info(
+                    f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
+                )
+                search_result = await multi_source_deep_search(
+                    primary_query=primary_query,
+                    extra_queries=extra_queries if extra_queries else None,
+                    fetch_pages=3,
+                )
+            else:
+                search_result = "Qidiruv so'rovi bo'sh bo'lgani uchun bajarilmadi."
 
-        try:
-            args = json.loads(tc.function.arguments)
-        except Exception:
-            args = {}
+            messages.append({
+                "type": "function_call",
+                "call_id": call_item.call_id,
+                "name": call_item.name,
+                "arguments": call_item.arguments,
+            })
+            messages.append({
+                "type": "function_call_output",
+                "call_id": call_item.call_id,
+                "output": search_result,
+            })
 
-        primary_query = args.get("primary_query", "")
-        extra_queries = args.get("extra_queries", [])
-
-        if not primary_query:
-            break
-
-        if not search_performed:
-            # Kontent emas — faqat "band" animatsiyasiga signal: qidiruv
-            # (sekundlab davom etadigan tarmoq so'rovi) boshlanmoqda.
-            yield "[STATUS]search"
-            search_performed = True
-
-        logger.info(
-            f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
-        )
-        search_result = await multi_source_deep_search(
-            primary_query=primary_query,
-            extra_queries=extra_queries if extra_queries else None,
-            fetch_pages=3,
-        )
-
-        messages.append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-            ],
-        })
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": search_result,
-        })
+        if not synthesis_injected:
+            # Birinchi qidiruv natijasi endigina qo'shildi — shu joydan
+            # boshlab, model qachon (shu bosqichda yoki keyingisida)
+            # yakuniy javob bersa ham, u manba-formatlash qoidasiga rioya
+            # qiladi.
+            messages.append({"role": "developer", "content": _SYNTHESIS_SYSTEM})
+            yield "[CLEAR_TEXT]"
+            synthesis_injected = True
 
         tool_round += 1
-
-    if search_performed:
-        messages.append({"role": "system", "content": _SYNTHESIS_SYSTEM})
-        yield "[CLEAR_TEXT]"
-
-    try:
-        final_resp = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-            stream=True,
-            **_completion_limit_kwargs(model, max_tokens),
-        )
-        async for chunk in final_resp:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
-
-    except Exception as e:
-        logger.error(f"GPT Final synthesis xatosi: {e}")
-        raise
 
 
 async def get_gpt_reply(chat_id: int, user_message: str):
@@ -704,6 +721,14 @@ async def get_gpt_reply(chat_id: int, user_message: str):
 # ─────────────────────────────────────────────────────────────
 # STT, TTS
 # ─────────────────────────────────────────────────────────────
+
+# Bir xil STT servisi (Google recognize_google) bilan bir nechta til
+# gipotezasini ketma-ket sinaymiz — bepul recognize_google bitta chaqiruvda
+# tilni o'zi avtomatik aniqlay olmaydi, shuning uchun ovoz o'zbekcha bo'lmasa
+# oldin "uz-UZ" xato/bo'sh natija berardi. Model/servis o'zgarmaydi, faqat
+# shu servisga qaysi til bilan murojaat qilishni o'zimiz tanlaymiz.
+_STT_LANGUAGE_CANDIDATES = ("uz-UZ", "ru-RU", "en-US")
+
 
 def _speech_to_text_sync(file_path: str, wav_path: str) -> str:
     """
@@ -718,7 +743,15 @@ def _speech_to_text_sync(file_path: str, wav_path: str) -> str:
     audio.export(wav_path, format="wav")
     with sr.AudioFile(wav_path) as source:
         audio_data = r.record(source)
-        return r.recognize_google(audio_data, language="uz-UZ")
+
+    for lang in _STT_LANGUAGE_CANDIDATES:
+        try:
+            text = r.recognize_google(audio_data, language=lang)
+            if text:
+                return text
+        except sr.UnknownValueError:
+            continue
+    return ""
 
 
 async def speech_to_text(file_path: str) -> str:

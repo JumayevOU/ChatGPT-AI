@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  
-from config import GPT_MODEL, DAILY_FREE_LIMIT
+from config import GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -739,7 +739,7 @@ async def get_full_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
             'is_banned': user_row.get('is_banned', False),
             'plan_type': user_row.get('plan_type', 'free'),
             'premium_until': user_row.get('premium_until'),
-            'current_model': GPT_MODEL,
+            'current_model': GPT_MODEL_DISPLAY_NAME,
             'media_analysis_active': user_row.get('media_analysis_active', True),
             'daily_requests_used': daily_used,
             'total_tokens_used': total_tokens or 0,

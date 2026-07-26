@@ -7,7 +7,10 @@ from database import create_db_pool, create_users_table, create_history_table
 import database
 import admin as admin_module
 from helpers import ensure_pin_column, notify_inactive_users
-from handlers_messages import handle_start, handle_text, handle_photo, handle_document, handle_voice
+from handlers_messages import (
+    handle_start, handle_text, handle_photo, handle_document, handle_voice,
+    router as generating_state_router,
+)
 from handlers_callbacks import handle_retry_callback
 from utils.history import init_db
 from memory import start_cleanup_task
@@ -69,6 +72,11 @@ async def main():
     general_router.message.register(handle_document, F.document, non_admin_predicate)
     general_router.message.register(handle_voice, F.voice, non_admin_predicate)
     dp.include_router(guest_router)
+    # GeneratingState uchun spam-guard (busy_handler) ODDIY handlerlardan
+    # OLDIN ro'yxatdan o'tishi SHART — aks holda javob kutilayotganda
+    # kelgan yangi xabar to'g'ridan-to'g'ri handle_text/photo/... ga tushib,
+    # parallel ikkinchi so'rov boshlab yuborardi.
+    dp.include_router(generating_state_router)
     dp.include_router(general_router)
 
     dp.callback_query.register(handle_retry_callback, lambda q: q.data and q.data.startswith("retry:"))

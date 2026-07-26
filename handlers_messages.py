@@ -6,12 +6,11 @@ import base64
 import html as html_lib
 
 import aiohttp
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.types import Message, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.filters import Command
 
 from config import (
     BOT_TOKEN, CONTEXT_WINDOW,
@@ -19,6 +18,7 @@ from config import (
     TEXT_MERGE_MAX_CHARS, MAX_TEXT_LENGTH,
     DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
     MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE,
+    message_cost, pick_reasoning_effort,
 )
 from loader import logger, bot
 from database import (
@@ -26,7 +26,7 @@ from database import (
     check_and_consume_quota, refund_quota, is_banned,
 )
 from keyboards import admin_keyboard
-from helpers import process_daily_pin, notify_watchers
+from helpers import process_daily_pin, notify_watchers, send_error_with_retry
 from memory import get_text_merge_lock, text_merge_buffers, clear_text_merge_buffer
 from services import (
     safe_update_history, get_gpt_reply,
@@ -254,7 +254,7 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
 
 EMOJI_ID_BY_TYPE: dict[str, str] = {
     "text": "5980787993139481991",
-    "photo": "5980787993139481991",
+    "photo": "5947288798713875484",
     "document": "5818955300463447293",
     "voice": "5947042989145590769",
     "search": "5821388137443626414",
@@ -574,7 +574,14 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
 # --------------------------------------------------
 # 1. START VA COMMAND HANDLERS
 # --------------------------------------------------
-@router.message(Command("start"))
+# DIQQAT: bu funksiyalar `@router...` bilan bezatilmagan ataylab — ular
+# main.py'da `general_router.message.register(...)` orqali, tegishli
+# (non_admin_predicate va h.k.) filtrlar bilan qo'lda ro'yxatdan o'tkaziladi.
+# `router` bu yerda FAQAT `GeneratingState` spam-guard (busy_handler) uchun
+# ishlatiladi — agar bu funksiyalarga ham `@router...` qo'shilsa, main.py
+# `router`ni include qilganda ular filtrsiz (masalan admin uchun ham)
+# qayta ro'yxatdan o'tib, general_router'dagi to'g'ri filtrlangan versiyani
+# hech qachon ishga tushirmay qo'yadi.
 async def handle_start(message: Message, state: FSMContext):
     await state.clear()
     track_user_activity(message.from_user.id, message.from_user.username, "start")
@@ -611,7 +618,6 @@ async def handle_start(message: Message, state: FSMContext):
 # --------------------------------------------------
 # 2. TEXT HANDLER (YouTube + Web Search)
 # --------------------------------------------------
-@router.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -697,7 +703,11 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         return
 
     user_id = last_message.from_user.id
-    quota = await _check_quota(user_id, MESSAGE_COST_TEXT)
+    # Matn murakkabligiga qarab reasoning darajasi (va shunga mos narx) tanlanadi —
+    # "salom" arzon (past effort), matematik/kod savoli qimmatroq (chuqurroq effort).
+    text_effort = pick_reasoning_effort(merged_text)
+    text_cost = message_cost("text", text_effort)
+    quota = await _check_quota(user_id, text_cost)
     if not quota["allowed"]:
         await _send_limit_reached_message(last_message, quota, feature="text")
         return
@@ -766,9 +776,13 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
     except Exception as e:
         logger.error(f"[Text Error] {e}")
         try:
-            await bot.send_message(chat_id, "⚠️ Xatolik yuz berdi. Qayta urinib ko'ring.")
+            await send_error_with_retry(
+                chat_id=chat_id, message_id=last_message.message_id,
+                user_id=user_id, prompt=merged_text,
+            )
         except Exception:
             pass
+        await _refund_quota(user_id, text_cost, quota)
     finally:
         await state.clear()
 
@@ -776,7 +790,6 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
 # --------------------------------------------------
 # 3. PHOTO HANDLER (Vision)
 # --------------------------------------------------
-@router.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -834,7 +847,6 @@ async def handle_photo(message: Message, state: FSMContext):
 # --------------------------------------------------
 # 4. DOCUMENT HANDLER (ALL FILES)
 # --------------------------------------------------
-@router.message(F.document)
 async def handle_document(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -866,6 +878,7 @@ async def handle_document(message: Message, state: FSMContext):
     except Exception:
         pass
 
+    prompt = None
     try:
         file = await bot.get_file(document.file_id)
         from io import BytesIO
@@ -906,7 +919,16 @@ async def handle_document(message: Message, state: FSMContext):
 
     except Exception as e:
         logger.error(f"Hujjat xatosi: {str(e)}")
-        await message.answer("❌ Hujjatni o'qishda xatolik yuz berdi.")
+        if prompt:
+            try:
+                await send_error_with_retry(
+                    chat_id=chat_id, message_id=message.message_id,
+                    user_id=user_id, prompt=prompt,
+                )
+            except Exception:
+                pass
+        else:
+            await message.answer("❌ Hujjatni o'qishda xatolik yuz berdi.")
         await _refund_quota(user_id, MESSAGE_COST_DOCUMENT, quota)
     finally:
         await state.clear()
@@ -915,7 +937,6 @@ async def handle_document(message: Message, state: FSMContext):
 # --------------------------------------------------
 # 5. VOICE HANDLER
 # --------------------------------------------------
-@router.message(F.voice)
 async def handle_voice(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -935,6 +956,7 @@ async def handle_voice(message: Message, state: FSMContext):
 
     voice_path = None
     generated_audio = None
+    user_text = None
 
     try:
         await bot.send_chat_action(chat_id, "typing")
@@ -984,7 +1006,16 @@ async def handle_voice(message: Message, state: FSMContext):
 
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await message.answer("❌ Xatolik yuz berdi.")
+        if user_text:
+            try:
+                await send_error_with_retry(
+                    chat_id=chat_id, message_id=message.message_id,
+                    user_id=user_id, prompt=user_text,
+                )
+            except Exception:
+                pass
+        else:
+            await message.answer("❌ Xatolik yuz berdi.")
         await _refund_quota(user_id, MESSAGE_COST_VOICE, quota)
     finally:
         try:

@@ -16,6 +16,7 @@ from config import (
     MESSAGE_COST_PHOTO,
     MESSAGE_COST_DOCUMENT,
     MESSAGE_COST_VOICE,
+    message_cost, pick_reasoning_effort,
 )
 from database import has_started, check_and_consume_quota, refund_quota
 from helpers import notify_watchers
@@ -305,7 +306,12 @@ else:
                 skip_ai = True
                 forced_text = "⚠️ Fayl hajmi juda katta. Iltimos, 5 MB gacha yuboring."
             else:
-                cost = _GUEST_CONTENT_COST.get(content_type, MESSAGE_COST_TEXT)
+                if content_type == "text":
+                    # Oddiy handlers_messages.py bilan bir xil mantiq: matn
+                    # murakkabligiga qarab reasoning darajasi (va narxi) tanlanadi.
+                    cost = message_cost("text", pick_reasoning_effort(clean_query))
+                else:
+                    cost = _GUEST_CONTENT_COST.get(content_type, MESSAGE_COST_TEXT)
                 try:
                     quota = await check_and_consume_quota(caller_user_id, cost)
                 except Exception as e:

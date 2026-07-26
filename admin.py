@@ -15,7 +15,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound
+from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 
 from keyboards import admin_keyboard
 from config import (
@@ -596,6 +596,19 @@ def register_admin_handlers(dp, bot: Bot):
                 except Exception:
                     logger.exception("DB deactivate error")
                 fail += 1
+            except TelegramRetryAfter as e:
+                # Telegram flood-control: shuncha soniya kutmasdan davom etsak,
+                # qolgan HAMMA xabar "xatolik" deb hisoblanib, aslida
+                # yetkazilmagan bo'lib qolardi. Ko'rsatilgan vaqtni kutib,
+                # aynan shu foydalanuvchiga bir marta qayta urinamiz.
+                logger.warning(f"⏳ Flood control: {e.retry_after}s kutilmoqda...")
+                await asyncio.sleep(e.retry_after + 0.5)
+                try:
+                    await bot.copy_message(chat_id=user_id, from_chat_id=src_chat_id, message_id=src_message_id)
+                    success += 1
+                except Exception as e2:
+                    logger.warning(f"⚠️ Flood-dan keyin ham xatolik: {user_id} - {e2}")
+                    fail += 1
             except Exception as e:
                 logger.warning(f"⚠️ Xatolik: {user_id} - {e}")
                 fail += 1
