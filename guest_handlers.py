@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html as html_lib
 import os
 import re
 import time
@@ -19,6 +20,7 @@ from config import (
     message_cost, pick_reasoning_effort,
 )
 from database import has_started, check_and_consume_quota, refund_quota
+from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE
 from helpers import notify_watchers
 from services import (
     get_gpt_reply,
@@ -46,13 +48,19 @@ _GUEST_CONTENT_COST = {
     "voice": MESSAGE_COST_VOICE,
 }
 
-# Placeholder ("o'ylayapman") xabari uchun content-type'ga mos matn.
-_GUEST_THINKING_TEXT = {
-    "text": "☁️ O'ylayapman...",
-    "photo": "🖼 Rasmni tahlil qilyapman...",
-    "document": "📄 Hujjatni o'qiyapman...",
-    "voice": "🎙 Ovozli xabarni tinglayapman...",
-}
+def _guest_status_text(content_type: str) -> str:
+    """content-type'ga mos status matni — handlers_messages.py dagi
+    STATUS_TEXTS_BY_TYPE bilan bir xil ro'yxatdan (birinchi fraza),
+    shunda "o'ylayapman" holati oddiy va guest rejimda bir xil ko'rinadi."""
+    return STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])[0]
+
+
+def _guest_thinking_html(content_type: str) -> str:
+    """Guest inline placeholder (answerGuestQuery) uchun tg-emoji bilan HTML —
+    handlers_messages.py dagi _thinking_html bilan bir xil emoji-id ishlatadi."""
+    emoji_id = EMOJI_ID_BY_TYPE.get(content_type, EMOJI_ID_BY_TYPE["text"])
+    safe_status = html_lib.escape(_guest_status_text(content_type))
+    return f'<tg-thinking><tg-emoji emoji-id="{emoji_id}">🔄</tg-emoji> <b>{safe_status}...</b></tg-thinking>'
 
 
 def _detect_guest_content_type(message: Message) -> str:
@@ -154,14 +162,15 @@ else:
 
         MUHIM TUZATISH: avvalgi versiyada bu yerga <tg-thinking>/<tg-emoji>
         kabi HTML-only teglar "markdown" maydoniga (tg-thinking hatto
-        yopilmagan holda) aralashtirib yuborilardi. Natijada: (1) parser
-        butun matnni formatlay olmay, xom "*" belgilari ko'rinib qolardi,
-        (2) guest javobi FAQAT BIR MARTA yuboriladi (draft/preview yo'q),
-        ya'ni "Savol tahlil qilinmoqda…" degan vaqtinchalik status
-        yakuniy, abadiy saqlanadigan xabarga abadiy yopishib qolardi —
-        bu API xatosi emas, mantiqiy xato edi. Kutish paytidagi holat
-        allaqachon _typing_ping_loop orqali ko'rsatiladi, shuning uchun
-        bu yerda faqat TOZA yakuniy javob yuboriladi.
+        yopilmagan holda) aralashtirib yuborilardi. Natijada parser butun
+        matnni formatlay olmay, xom "*" belgilari ko'rinib qolardi.
+
+        Bu funksiya faqat placeholder UMUMAN yuborilmagan holatlar uchun
+        (masalan skip_ai — /start yoki kredit bo'yicha bloklangan so'rov)
+        ishlatiladi — status ko'rsatish kerak bo'lgan asosiy AI oqimi endi
+        _answer_guest_query_placeholder + _edit_guest_inline_message
+        juftligi orqali ishlaydi (avval status, keyin shu xabarni tahrirlab
+        yakuniy javobga almashtirish).
         """
         if not BOT_TOKEN:
             return False
@@ -191,6 +200,73 @@ else:
                 return False
         except Exception as e:
             logger.debug(f"Guest rich-answer xatosi (fallbackka o'tamiz): {e}")
+            return False
+
+    async def _answer_guest_query_placeholder(guest_query_id: str, html_content: str) -> str | None:
+        """
+        AnswerGuestQuery'ni DARHOL status (thinking) matni bilan chaqiradi.
+
+        AnswerGuestQuery — inline query'ga javob berish kabi bitta martalik
+        chaqiruv, lekin natijada qaytgan `inline_message_id` orqali xabarni
+        keyinroq (AI javobi tayyor bo'lgach) editMessageText bilan tahrirlash
+        mumkin. Shu tufayli to'g'ridan-to'g'ri chatga yozib bo'lmaydigan guest
+        chatlarda ham "status → yakuniy javob" effektini olamiz: avval shu
+        funksiya bilan status yuboriladi, keyin _edit_guest_inline_message
+        bilan yakuniy javobga almashtiriladi.
+        """
+        if not BOT_TOKEN:
+            return None
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerGuestQuery"
+        payload = {
+            "guest_query_id": guest_query_id,
+            "result": {
+                "type": "article",
+                "id": str(guest_query_id),
+                "title": "AI javobi",
+                "input_message_content": {
+                    "rich_message": {
+                        "html": html_content,
+                        "skip_entity_detection": True,
+                    }
+                },
+            },
+        }
+        try:
+            session = await _get_http_session()
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 200 and data.get("ok"):
+                    return (data.get("result") or {}).get("inline_message_id")
+                logger.debug(f"Guest placeholder-answer rad etildi: {data}")
+                return None
+        except Exception as e:
+            logger.debug(f"Guest placeholder-answer xatosi: {e}")
+            return None
+
+    async def _edit_guest_inline_message(inline_message_id: str, markdown_text: str) -> bool:
+        """Placeholder sifatida yuborilgan guest inline xabarni yakuniy javobga tahrirlaydi."""
+        if not BOT_TOKEN:
+            return False
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+        payload = {
+            "inline_message_id": inline_message_id,
+            "rich_message": {
+                "markdown": markdown_text,
+                "skip_entity_detection": True,
+            },
+        }
+        try:
+            session = await _get_http_session()
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 200 and data.get("ok"):
+                    return True
+                logger.debug(f"Guest inline-edit rad etildi: {data}")
+                return False
+        except Exception as e:
+            logger.debug(f"Guest inline-edit xatosi: {e}")
             return False
 
     async def _extract_guest_query(message: Message) -> str:
@@ -341,7 +417,7 @@ else:
             try:
                 thinking_msg = await bot.send_message(
                     chat_id=caller_chat_id,
-                    text=_GUEST_THINKING_TEXT.get(content_type, "☁️ O'ylayapman..."),
+                    text=f"🔄 {_guest_status_text(content_type)}...",
                     reply_to_message_id=message.message_id,
                 )
             except Exception as e:
@@ -349,6 +425,18 @@ else:
                     f"Guest: placeholder yuborib bo'lmadi → answerGuestQuery ga o'tamiz: {e}"
                 )
                 thinking_msg = None
+
+        # Chatga to'g'ridan-to'g'ri yozib bo'lmadi (odatiy holat — bot bu
+        # chatda a'zo emas). Shunda ham status ko'rinishi uchun
+        # AnswerGuestQuery'ni DARHOL status matni bilan chaqiramiz va
+        # qaytgan inline_message_id'ni AI javobi tayyor bo'lgach tahrirlash
+        # uchun saqlab qolamiz — pastdagi "4. Fallback" bo'limi kabi
+        # AI javobi tugaguncha kutib, keyin bir martalik yubormaydi.
+        guest_inline_message_id: str | None = None
+        if not skip_ai and thinking_msg is None:
+            guest_inline_message_id = await _answer_guest_query_placeholder(
+                str(guest_query_id), _guest_thinking_html(content_type)
+            )
 
         # --------------------------------------------------
         # 2. AI javobni olish (agar /start yoki kredit bo'yicha
@@ -522,6 +610,22 @@ else:
                     f"Guest: edit_text ishlamadi → answerGuestQuery ga o'tamiz: {e}"
                 )
                 # edit ishlamasa, pastdagi answerGuestQuery fallbackka tushadi
+
+        # --------------------------------------------------
+        # 3b. Status placeholder AnswerGuestQuery orqali yuborilgan edi
+        # (chatga to'g'ridan-to'g'ri yozib bo'lmagani uchun) — endi o'sha
+        # inline xabarni yakuniy javobga tahrirlaymiz. DIQQAT: bu holatda
+        # pastdagi "4. Fallback" ishlatilmaydi, chunki AnswerGuestQuery
+        # allaqachon bitta marta (status bilan) chaqirilgan — inline
+        # query kabi, uni qayta chaqirib bo'lmaydi.
+        # --------------------------------------------------
+        if guest_inline_message_id is not None:
+            edited = await _edit_guest_inline_message(guest_inline_message_id, final_text)
+            if not edited:
+                logger.warning(
+                    f"[Guest] inline placeholder tahrirlab bo'lmadi (query_id={guest_query_id})"
+                )
+            return
 
         # --------------------------------------------------
         # 4. Fallback: answerGuestQuery (eski usul)
