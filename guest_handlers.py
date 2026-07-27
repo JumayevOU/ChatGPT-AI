@@ -512,6 +512,16 @@ else:
         except Exception:
             caller_chat_id = None
 
+        # DIAGNOSTIKA: caller_chat_id None bo'lsa, to'g'ridan-to'g'ri chatga
+        # yozib bo'lmaydi va premium tg-thinking draft (sendRichMessageDraft)
+        # umuman urinib ham ko'rilmaydi — kod to'g'ridan-to'g'ri AnswerGuestQuery
+        # (inline, faqat oddiy matn) yo'liga tushadi. Bu log shu holatni aniq
+        # tasdiqlaydi/rad etadi.
+        logger.info(
+            f"[Guest] query_id={guest_query_id} content_type={content_type} "
+            f"caller_chat_id={caller_chat_id!r} chat_type={message.chat.type!r}"
+        )
+
         skip_ai = False
         forced_text: str | None = None
 
