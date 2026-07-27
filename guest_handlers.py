@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import html as html_lib
 import os
 import re
 import time
@@ -20,7 +19,7 @@ from config import (
     message_cost, pick_reasoning_effort,
 )
 from database import has_started, check_and_consume_quota, refund_quota
-from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE
+from handlers_messages import STATUS_TEXTS_BY_TYPE, _format_elapsed
 from helpers import notify_watchers
 from services import (
     get_gpt_reply,
@@ -48,6 +47,18 @@ _GUEST_CONTENT_COST = {
     "voice": MESSAGE_COST_VOICE,
 }
 
+# DIQQAT: premium tg-emoji/<tg-thinking> animatsiyasi bu yerda ishlatilmaydi —
+# u faqat sendRichMessageDraft orqali, HAQIQIY chat_id'ga draft yozilganda
+# ishlaydigan Telegram xususiyati (handlers_messages.py dagi emoji_animator
+# shuni ishlatadi). Guest chatida bot a'zo emas, demak draft yozadigan
+# chat_id yo'q — shu sabab bu yerda oddiy matn + nuqta animatsiyasi
+# ishlatiladi (xuddi shu chat_id yo'q holatda handlers_messages.py o'zi ham
+# "fallback" rejimiga — oddiy matnga — o'tadi).
+_STATUS_ANIM_INTERVAL = 2.4
+_DOT_ANIM_INTERVAL = 0.5
+_STATUS_PING_INTERVAL = 1.2
+
+
 def _guest_status_text(content_type: str) -> str:
     """content-type'ga mos status matni — handlers_messages.py dagi
     STATUS_TEXTS_BY_TYPE bilan bir xil ro'yxatdan (birinchi fraza),
@@ -55,12 +66,36 @@ def _guest_status_text(content_type: str) -> str:
     return STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])[0]
 
 
-def _guest_thinking_html(content_type: str) -> str:
-    """Guest inline placeholder (answerGuestQuery) uchun tg-emoji bilan HTML —
-    handlers_messages.py dagi _thinking_html bilan bir xil emoji-id ishlatadi."""
-    emoji_id = EMOJI_ID_BY_TYPE.get(content_type, EMOJI_ID_BY_TYPE["text"])
-    safe_status = html_lib.escape(_guest_status_text(content_type))
-    return f'<tg-thinking><tg-emoji emoji-id="{emoji_id}">🔄</tg-emoji> <b>{safe_status}...</b></tg-thinking>'
+def _guest_status_frame(content_type: str, elapsed: float) -> str:
+    """Berilgan lahzadagi status matnini (aylanuvchi fraza + miltillovchi
+    nuqtalar + o'tgan vaqt) qaytaradi — handlers_messages.py dagi
+    emoji_animator'ning "fallback" (draft'siz) rejimi bilan bir xil ritmda."""
+    status_texts = STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])
+    status_index = int(elapsed // _STATUS_ANIM_INTERVAL) % len(status_texts)
+    dots = "." * (int(elapsed // _DOT_ANIM_INTERVAL) % 4 + 1)
+    return f"🔄 *{status_texts[status_index]}{dots}*\n{_format_elapsed(elapsed)}"
+
+
+async def _run_guest_status_animator(edit_fn, content_type: str, stop_event: asyncio.Event) -> None:
+    """AI javobini kutish paytida placeholder xabarni davriy yangilab,
+    "miltillab turadigan" status effektini beradi. `edit_fn(text)` chaqiruvchi
+    tomonidan beriladi — chatga to'g'ridan-to'g'ri edit yoki guest inline edit
+    bo'lishi mumkin, animator buning farqiga bormaydi."""
+    start_ts = time.monotonic()
+    last_text = None
+    while not stop_event.is_set():
+        elapsed = time.monotonic() - start_ts
+        text = _guest_status_frame(content_type, elapsed)
+        if text != last_text:
+            try:
+                await edit_fn(text)
+                last_text = text
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_STATUS_PING_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _detect_guest_content_type(message: Message) -> str:
@@ -231,30 +266,22 @@ else:
             logger.warning(f"Guest placeholder-answer xatosi ({list(rich_message)}): {e}")
             return None
 
-    async def _answer_guest_query_placeholder(guest_query_id: str, html_content: str, plain_text: str) -> str | None:
+    async def _answer_guest_query_placeholder(guest_query_id: str, plain_text: str) -> str | None:
         """
         AnswerGuestQuery'ni DARHOL status (thinking) matni bilan chaqiradi.
 
         AnswerGuestQuery — inline query'ga javob berish kabi bitta martalik
         chaqiruv, lekin natijada qaytgan `inline_message_id` orqali xabarni
-        keyinroq (AI javobi tayyor bo'lgach) editMessageText bilan tahrirlash
+        keyinroq (AI javobi tayyor bo'lgach, va shu orada davriy ravishda —
+        _run_guest_status_animator orqali) editMessageText bilan tahrirlash
         mumkin. Shu tufayli to'g'ridan-to'g'ri chatga yozib bo'lmaydigan guest
         chatlarda ham "status → yakuniy javob" effektini olamiz.
 
-        Uchta bosqichda urinadi (tg-thinking/tg-emoji guest/inline kontekstda
-        rad etilishi mumkinligi uchun — asosiy chat oqimidagi sendRichMessageDraft
-        bilan bir xil kafolat yo'q):
-          1) rich_message.html — tg-thinking/tg-emoji bilan chiroyli status
-          2) rich_message.markdown — oddiy formatlangan matn
-          3) aiogram'ning typed AnswerGuestQuery (InputTextMessageContent)
+        Ikki bosqichda urinadi:
+          1) rich_message.markdown (xom HTTP so'rov)
+          2) aiogram'ning typed AnswerGuestQuery (InputTextMessageContent)
         Birinchi muvaffaqiyatli bo'lgani ishlatiladi.
         """
-        inline_id = await _raw_answer_guest_query(
-            guest_query_id, {"html": html_content, "skip_entity_detection": True}
-        )
-        if inline_id:
-            return inline_id
-
         inline_id = await _raw_answer_guest_query(
             guest_query_id, {"markdown": plain_text, "skip_entity_detection": True}
         )
@@ -482,7 +509,6 @@ else:
         if not skip_ai and thinking_msg is None:
             guest_inline_message_id = await _answer_guest_query_placeholder(
                 str(guest_query_id),
-                _guest_thinking_html(content_type),
                 f"🔄 *{_guest_status_text(content_type)}...*",
             )
             if guest_inline_message_id is None:
@@ -490,6 +516,24 @@ else:
                     f"[Guest] status placeholder umuman yuborilmadi (query_id={guest_query_id}) — "
                     "yakuniy javob bitta martalik answerGuestQuery orqali yuboriladi."
                 )
+
+        # AI javobini kutish paytida status matnini "miltillatib" turadigan
+        # fon vazifasi — qaysi placeholder yuborilgan bo'lsa (chat ichiga
+        # to'g'ridan-to'g'ri yoki guest inline), o'shani davriy tahrirlaydi.
+        status_anim_task: asyncio.Task | None = None
+        status_anim_stop = asyncio.Event()
+        if thinking_msg is not None:
+            async def _edit_thinking_chat(text: str) -> None:
+                await thinking_msg.edit_text(text, parse_mode="Markdown")
+            status_anim_task = asyncio.create_task(
+                _run_guest_status_animator(_edit_thinking_chat, content_type, status_anim_stop)
+            )
+        elif guest_inline_message_id is not None:
+            async def _edit_thinking_inline(text: str) -> None:
+                await _edit_guest_inline_message(guest_inline_message_id, text)
+            status_anim_task = asyncio.create_task(
+                _run_guest_status_animator(_edit_thinking_inline, content_type, status_anim_stop)
+            )
 
         # --------------------------------------------------
         # 2. AI javobni olish (agar /start yoki kredit bo'yicha
@@ -570,6 +614,10 @@ else:
             except Exception as e:
                 logger.error(f"[Guest AI Error] query_id={guest_query_id}, type={content_type}, Error: {e}")
                 full_text = ""
+
+        if status_anim_task is not None:
+            status_anim_stop.set()
+            await status_anim_task
 
         raw_answer = full_text.replace("[NO_BUTTON]", "").strip()
         if not raw_answer:
