@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html as html_lib
 import os
 import re
 import time
@@ -19,7 +20,7 @@ from config import (
     message_cost, pick_reasoning_effort,
 )
 from database import has_started, check_and_consume_quota, refund_quota
-from handlers_messages import STATUS_TEXTS_BY_TYPE, _format_elapsed
+from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed, _send_rich_draft
 from helpers import notify_watchers
 from services import (
     get_gpt_reply,
@@ -47,16 +48,18 @@ _GUEST_CONTENT_COST = {
     "voice": MESSAGE_COST_VOICE,
 }
 
-# DIQQAT: premium tg-emoji/<tg-thinking> animatsiyasi bu yerda ishlatilmaydi —
-# u faqat sendRichMessageDraft orqali, HAQIQIY chat_id'ga draft yozilganda
-# ishlaydigan Telegram xususiyati (handlers_messages.py dagi emoji_animator
-# shuni ishlatadi). Guest chatida bot a'zo emas, demak draft yozadigan
-# chat_id yo'q — shu sabab bu yerda oddiy matn + nuqta animatsiyasi
-# ishlatiladi (xuddi shu chat_id yo'q holatda handlers_messages.py o'zi ham
-# "fallback" rejimiga — oddiy matnga — o'tadi).
+# Premium tg-emoji/<tg-thinking> FAQAT sendRichMessageDraft orqali, HAQIQIY
+# chat_id'ga draft yozilganda ishlaydi (handlers_messages.py dagi
+# emoji_animator shuni ishlatadi). Guest chaqiruvida bunday chat_id —
+# caller_chat_id — bo'lsa, xuddi shu premium ko'rinishga urinamiz
+# (_run_guest_chat_status_animator). Bo'lmasa (masalan faqat guest inline
+# javob mumkin bo'lgan holatda) — oddiy matn + nuqta animatsiyasiga
+# (_run_guest_status_animator) tushamiz.
 _STATUS_ANIM_INTERVAL = 2.4
 _DOT_ANIM_INTERVAL = 0.5
 _STATUS_PING_INTERVAL = 1.2
+_RICH_DRAFT_PING_INTERVAL = 0.6
+_RICH_DRAFT_FAILURE_LIMIT = 2
 
 
 def _guest_status_text(content_type: str) -> str:
@@ -94,6 +97,68 @@ async def _run_guest_status_animator(edit_fn, content_type: str, stop_event: asy
                 pass
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=_STATUS_PING_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+
+
+def _guest_thinking_html(content_type: str, elapsed: float) -> str:
+    """handlers_messages.py dagi (process_stream_draft ichidagi) _thinking_html
+    bilan bir xil — tg-thinking/tg-emoji premium status ko'rinishi."""
+    status_texts = STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])
+    emoji_id = EMOJI_ID_BY_TYPE.get(content_type, EMOJI_ID_BY_TYPE["text"])
+    status_index = int(elapsed // _STATUS_ANIM_INTERVAL) % len(status_texts)
+    dots = "." * (int(elapsed // _DOT_ANIM_INTERVAL) % 4 + 1)
+    safe_status = html_lib.escape(status_texts[status_index])
+    elapsed_label = html_lib.escape(_format_elapsed(elapsed))
+    return (
+        f'<tg-thinking><tg-emoji emoji-id="{emoji_id}">🔄</tg-emoji> '
+        f"<b>{safe_status}{dots}</b><br/>"
+        f"{elapsed_label}</tg-thinking>"
+    )
+
+
+async def _run_guest_chat_status_animator(
+    chat_id: int, draft_id: int, content_type: str, fallback_edit_fn, stop_event: asyncio.Event
+) -> None:
+    """Guest chaqiruvida caller_chat_id'ga to'g'ridan-to'g'ri yozish imkoni
+    bo'lganda — xuddi handlers_messages.py dagi emoji_animator kabi avval
+    premium tg-thinking draft bilan urinadi; ketma-ket rad etilsa
+    (RICH_DRAFT_FAILURE_LIMIT) oddiy matn tahrirlashga (fallback_edit_fn —
+    chat_fallback_msg yaratish/tahrirlash) butunlay o'tadi."""
+    start_ts = time.monotonic()
+    using_rich_draft = True
+    rich_draft_failures = 0
+    last_fallback_text = None
+    while not stop_event.is_set():
+        elapsed = time.monotonic() - start_ts
+        wait_time = _RICH_DRAFT_PING_INTERVAL
+
+        if using_rich_draft:
+            try:
+                result = await _send_rich_draft(
+                    chat_id, draft_id, html_content=_guest_thinking_html(content_type, elapsed)
+                )
+            except Exception:
+                result = None
+            if result is None:
+                rich_draft_failures += 1
+                if rich_draft_failures >= _RICH_DRAFT_FAILURE_LIMIT:
+                    using_rich_draft = False
+            else:
+                rich_draft_failures = 0
+
+        if not using_rich_draft:
+            wait_time = _STATUS_PING_INTERVAL
+            text = _guest_status_frame(content_type, elapsed)
+            if text != last_fallback_text:
+                try:
+                    await fallback_edit_fn(text)
+                    last_fallback_text = text
+                except Exception:
+                    pass
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_time)
         except asyncio.TimeoutError:
             pass
 
@@ -478,35 +543,52 @@ else:
                         )
 
         # --------------------------------------------------
-        # 1. ☁️ "O'ylayapman" placeholder xabarini yuborishga urinamiz (faqat
-        # AI chaqirilishi kerak bo'lgan holatlarda — /start yoki kredit
-        # bo'yicha bloklangan so'rovlarda bunga hojat yo'q). Content-type'ga
-        # mos matn ko'rsatiladi (masalan, hujjat uchun "Hujjatni o'qiyapman...").
-        # Agar chatga yozish imkoni bo'lmasa (bot a'zo emas, huquq yo'q
-        # va h.k.) — answerGuestQuery ga fallback qilamiz.
+        # 1. Kutish holatini ko'rsatamiz (faqat AI chaqirilishi kerak bo'lgan
+        # holatlarda — /start yoki kredit bo'yicha bloklangan so'rovlarda
+        # bunga hojat yo'q). Ikki yo'l bor:
+        #
+        #   A) caller_chat_id mavjud — o'sha chatga to'g'ridan-to'g'ri
+        #      premium tg-thinking DRAFT (sendRichMessageDraft) bilan
+        #      urinamiz, xuddi oddiy handlers_messages.py dagi
+        #      emoji_animator kabi. Draft — HAQIQIY xabar EMAS, ephemeral
+        #      ko'rsatkich; ketma-ket rad etilsagina (ichkarida
+        #      RICH_DRAFT_FAILURE_LIMIT) chat_fallback_msg degan HAQIQIY
+        #      placeholder xabar yuboriladi va shundan keyin oddiy matn
+        #      bilan tahrirlanadi.
+        #   B) caller_chat_id yo'q — AnswerGuestQuery DARHOL status matni
+        #      bilan chaqiriladi, keyin inline_message_id orqali
+        #      tahrirlanadi. Premium emoji bu yo'lda ishlamaydi — inline
+        #      xabarlar uchun chat_id yo'q, sendRichMessageDraft'ga hojat yo'q.
         # --------------------------------------------------
-        thinking_msg = None
-        if not skip_ai and caller_chat_id is not None:
-            try:
-                thinking_msg = await bot.send_message(
-                    chat_id=caller_chat_id,
-                    text=f"🔄 {_guest_status_text(content_type)}...",
-                    reply_to_message_id=message.message_id,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Guest: placeholder yuborib bo'lmadi → answerGuestQuery ga o'tamiz: {e}"
-                )
-                thinking_msg = None
-
-        # Chatga to'g'ridan-to'g'ri yozib bo'lmadi (odatiy holat — bot bu
-        # chatda a'zo emas). Shunda ham status ko'rinishi uchun
-        # AnswerGuestQuery'ni DARHOL status matni bilan chaqiramiz va
-        # qaytgan inline_message_id'ni AI javobi tayyor bo'lgach tahrirlash
-        # uchun saqlab qolamiz — pastdagi "4. Fallback" bo'limi kabi
-        # AI javobi tugaguncha kutib, keyin bir martalik yubormaydi.
+        chat_fallback_msg: Message | None = None
         guest_inline_message_id: str | None = None
-        if not skip_ai and thinking_msg is None:
+        status_anim_task: asyncio.Task | None = None
+        status_anim_stop = asyncio.Event()
+        use_chat_draft = not skip_ai and caller_chat_id is not None
+
+        if use_chat_draft:
+            async def _chat_fallback_edit(text: str) -> None:
+                nonlocal chat_fallback_msg
+                if chat_fallback_msg is None:
+                    try:
+                        chat_fallback_msg = await bot.send_message(
+                            chat_id=caller_chat_id,
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_to_message_id=message.message_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Guest: chat fallback xabarini yuborib bo'lmadi: {e}")
+                else:
+                    await chat_fallback_msg.edit_text(text, parse_mode="Markdown")
+
+            draft_id = abs(hash((caller_chat_id, message.message_id, time.time_ns()))) % 2_147_483_647 or 1
+            status_anim_task = asyncio.create_task(
+                _run_guest_chat_status_animator(
+                    caller_chat_id, draft_id, content_type, _chat_fallback_edit, status_anim_stop
+                )
+            )
+        elif not skip_ai:
             guest_inline_message_id = await _answer_guest_query_placeholder(
                 str(guest_query_id),
                 f"🔄 *{_guest_status_text(content_type)}...*",
@@ -516,24 +598,12 @@ else:
                     f"[Guest] status placeholder umuman yuborilmadi (query_id={guest_query_id}) — "
                     "yakuniy javob bitta martalik answerGuestQuery orqali yuboriladi."
                 )
-
-        # AI javobini kutish paytida status matnini "miltillatib" turadigan
-        # fon vazifasi — qaysi placeholder yuborilgan bo'lsa (chat ichiga
-        # to'g'ridan-to'g'ri yoki guest inline), o'shani davriy tahrirlaydi.
-        status_anim_task: asyncio.Task | None = None
-        status_anim_stop = asyncio.Event()
-        if thinking_msg is not None:
-            async def _edit_thinking_chat(text: str) -> None:
-                await thinking_msg.edit_text(text, parse_mode="Markdown")
-            status_anim_task = asyncio.create_task(
-                _run_guest_status_animator(_edit_thinking_chat, content_type, status_anim_stop)
-            )
-        elif guest_inline_message_id is not None:
-            async def _edit_thinking_inline(text: str) -> None:
-                await _edit_guest_inline_message(guest_inline_message_id, text)
-            status_anim_task = asyncio.create_task(
-                _run_guest_status_animator(_edit_thinking_inline, content_type, status_anim_stop)
-            )
+            else:
+                async def _edit_thinking_inline(text: str) -> None:
+                    await _edit_guest_inline_message(guest_inline_message_id, text)
+                status_anim_task = asyncio.create_task(
+                    _run_guest_status_animator(_edit_thinking_inline, content_type, status_anim_stop)
+                )
 
         # --------------------------------------------------
         # 2. AI javobni olish (agar /start yoki kredit bo'yicha
@@ -668,49 +738,72 @@ else:
         if caller_user_id is not None:
             notify_watchers(caller_user_id, message.from_user.username if message.from_user else None, "out", text=final_text)
 
-        # --------------------------------------------------
-        # 3. Agar placeholder yuborilgan bo'lsa — uni edit qilib,
-        # o'rniga yakuniy javobni qo'yamiz. Shu bilan placeholder
-        # yo'qolib, o'rniga javob paydo bo'ladi.
-        # --------------------------------------------------
-        if thinking_msg is not None:
+        # BONUS: ovozli xabarga ovozli javob ham qaytaramiz — lekin FAQAT
+        # to'g'ridan-to'g'ri chatga yozish imkoni bo'lganda. answerGuestQuery
+        # fallback rejimi faqat matnli natija qaytara oladi, audio biriktira
+        # olmaydi.
+        async def _send_voice_bonus() -> None:
+            if not (content_type == "voice" and ai_attempted):
+                return
+            generated_audio = None
             try:
-                await thinking_msg.edit_text(
-                    final_text,
-                    parse_mode="Markdown",
-                )
+                await bot.send_chat_action(caller_chat_id, "record_voice")
+            except Exception:
+                pass
+            try:
+                audio_filename = f"guest_reply_{caller_chat_id}_{int(time.time())}.mp3"
+                generated_audio = await text_to_speech(raw_answer, audio_filename)
+                if generated_audio and os.path.exists(generated_audio):
+                    await bot.send_voice(caller_chat_id, FSInputFile(generated_audio))
+            except Exception as e:
+                logger.debug(f"Guest: ovozli javob yuborilmadi: {e}")
+            finally:
+                try:
+                    if generated_audio and os.path.exists(generated_audio):
+                        os.remove(generated_audio)
+                except Exception:
+                    pass
 
-                # BONUS: ovozli xabarga ovozli javob ham qaytaramiz — lekin
-                # FAQAT to'g'ridan-to'g'ri chatga yozish imkoni bo'lganda
-                # (thinking_msg muvaffaqiyatli yuborilgan bo'lsa). answerGuestQuery
-                # fallback rejimi faqat matnli natija qaytara oladi, audio
-                # biriktira olmaydi.
-                if content_type == "voice" and ai_attempted:
-                    generated_audio = None
-                    try:
-                        await bot.send_chat_action(caller_chat_id, "record_voice")
-                    except Exception:
-                        pass
-                    try:
-                        audio_filename = f"guest_reply_{caller_chat_id}_{int(time.time())}.mp3"
-                        generated_audio = await text_to_speech(raw_answer, audio_filename)
-                        if generated_audio and os.path.exists(generated_audio):
-                            await bot.send_voice(caller_chat_id, FSInputFile(generated_audio))
-                    except Exception as e:
-                        logger.debug(f"Guest: ovozli javob yuborilmadi: {e}")
-                    finally:
-                        try:
-                            if generated_audio and os.path.exists(generated_audio):
-                                os.remove(generated_audio)
-                        except Exception:
-                            pass
-
+        # --------------------------------------------------
+        # 3. Agar chatga to'g'ridan-to'g'ri HAQIQIY placeholder xabar
+        # yuborilgan bo'lsa (rich draft ketma-ket rad etilib, chat_fallback_msg
+        # yaratilgan) — uni edit qilib, o'rniga yakuniy javobni qo'yamiz.
+        # --------------------------------------------------
+        if chat_fallback_msg is not None:
+            try:
+                await chat_fallback_msg.edit_text(final_text, parse_mode="Markdown")
+                await _send_voice_bonus()
                 return
             except Exception as e:
                 logger.debug(
                     f"Guest: edit_text ishlamadi → answerGuestQuery ga o'tamiz: {e}"
                 )
                 # edit ishlamasa, pastdagi answerGuestQuery fallbackka tushadi
+
+        # --------------------------------------------------
+        # 3a. Rich draft (premium tg-thinking) boshidan oxirigacha ishlagan
+        # bo'lsa — hech qachon HAQIQIY placeholder xabar kerak bo'lmagan
+        # (chat_fallback_msg hali ham None). Draft — ephemeral ko'rsatkich,
+        # tahrirlab bo'lmaydi — shuning uchun yakuniy javobni chatga YANGI
+        # xabar sifatida yuboramiz (Telegram draft'ni avtomatik yo'q qiladi).
+        # --------------------------------------------------
+        if use_chat_draft and chat_fallback_msg is None:
+            try:
+                await bot.send_message(
+                    chat_id=caller_chat_id,
+                    text=final_text,
+                    parse_mode="Markdown",
+                    reply_to_message_id=message.message_id,
+                )
+                await _send_voice_bonus()
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Guest: yakuniy javobni to'g'ridan-to'g'ri yuborib bo'lmadi: {e}"
+                )
+                # bu yerda ham muvaffaqiyatsiz bo'lsa — pastdagi
+                # answerGuestQuery fallbackka tushadi (guest_query_id hali
+                # ishlatilmagan, chunki bu butun yo'l uni chaqirmagan edi)
 
         # --------------------------------------------------
         # 3b. Status placeholder AnswerGuestQuery orqali yuborilgan edi
