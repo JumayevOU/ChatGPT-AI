@@ -196,27 +196,19 @@ else:
                 data = await resp.json(content_type=None)
                 if resp.status == 200 and data.get("ok"):
                     return True
-                logger.debug(f"Guest rich-answer rad etildi (fallbackka o'tamiz): {data}")
+                logger.warning(f"Guest rich-answer rad etildi (fallbackka o'tamiz): {data}")
                 return False
         except Exception as e:
-            logger.debug(f"Guest rich-answer xatosi (fallbackka o'tamiz): {e}")
+            logger.warning(f"Guest rich-answer xatosi (fallbackka o'tamiz): {e}")
             return False
 
-    async def _answer_guest_query_placeholder(guest_query_id: str, html_content: str) -> str | None:
-        """
-        AnswerGuestQuery'ni DARHOL status (thinking) matni bilan chaqiradi.
-
-        AnswerGuestQuery — inline query'ga javob berish kabi bitta martalik
-        chaqiruv, lekin natijada qaytgan `inline_message_id` orqali xabarni
-        keyinroq (AI javobi tayyor bo'lgach) editMessageText bilan tahrirlash
-        mumkin. Shu tufayli to'g'ridan-to'g'ri chatga yozib bo'lmaydigan guest
-        chatlarda ham "status → yakuniy javob" effektini olamiz: avval shu
-        funksiya bilan status yuboriladi, keyin _edit_guest_inline_message
-        bilan yakuniy javobga almashtiriladi.
-        """
+    async def _raw_answer_guest_query(guest_query_id: str, rich_message: dict) -> str | None:
+        """AnswerGuestQuery'ga xom rich_message payload bilan murojaat qiladi,
+        muvaffaqiyatli bo'lsa inline_message_id'ni qaytaradi. Xatolik WARNING
+        darajasida to'liq javob bilan logga yoziladi — sabab aniq ko'rinishi uchun
+        (avval DEBUG edi, standart INFO logging darajasida butunlay ko'rinmasdi)."""
         if not BOT_TOKEN:
             return None
-
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerGuestQuery"
         payload = {
             "guest_query_id": guest_query_id,
@@ -224,12 +216,7 @@ else:
                 "type": "article",
                 "id": str(guest_query_id),
                 "title": "AI javobi",
-                "input_message_content": {
-                    "rich_message": {
-                        "html": html_content,
-                        "skip_entity_detection": True,
-                    }
-                },
+                "input_message_content": {"rich_message": rich_message},
             },
         }
         try:
@@ -238,36 +225,95 @@ else:
                 data = await resp.json(content_type=None)
                 if resp.status == 200 and data.get("ok"):
                     return (data.get("result") or {}).get("inline_message_id")
-                logger.debug(f"Guest placeholder-answer rad etildi: {data}")
+                logger.warning(f"Guest placeholder-answer rad etildi ({list(rich_message)}): {data}")
                 return None
         except Exception as e:
-            logger.debug(f"Guest placeholder-answer xatosi: {e}")
+            logger.warning(f"Guest placeholder-answer xatosi ({list(rich_message)}): {e}")
+            return None
+
+    async def _answer_guest_query_placeholder(guest_query_id: str, html_content: str, plain_text: str) -> str | None:
+        """
+        AnswerGuestQuery'ni DARHOL status (thinking) matni bilan chaqiradi.
+
+        AnswerGuestQuery — inline query'ga javob berish kabi bitta martalik
+        chaqiruv, lekin natijada qaytgan `inline_message_id` orqali xabarni
+        keyinroq (AI javobi tayyor bo'lgach) editMessageText bilan tahrirlash
+        mumkin. Shu tufayli to'g'ridan-to'g'ri chatga yozib bo'lmaydigan guest
+        chatlarda ham "status → yakuniy javob" effektini olamiz.
+
+        Uchta bosqichda urinadi (tg-thinking/tg-emoji guest/inline kontekstda
+        rad etilishi mumkinligi uchun — asosiy chat oqimidagi sendRichMessageDraft
+        bilan bir xil kafolat yo'q):
+          1) rich_message.html — tg-thinking/tg-emoji bilan chiroyli status
+          2) rich_message.markdown — oddiy formatlangan matn
+          3) aiogram'ning typed AnswerGuestQuery (InputTextMessageContent)
+        Birinchi muvaffaqiyatli bo'lgani ishlatiladi.
+        """
+        inline_id = await _raw_answer_guest_query(
+            guest_query_id, {"html": html_content, "skip_entity_detection": True}
+        )
+        if inline_id:
+            return inline_id
+
+        inline_id = await _raw_answer_guest_query(
+            guest_query_id, {"markdown": plain_text, "skip_entity_detection": True}
+        )
+        if inline_id:
+            return inline_id
+
+        try:
+            sent = await bot(
+                AnswerGuestQuery(
+                    guest_query_id=guest_query_id,
+                    result=InlineQueryResultArticle(
+                        id=str(guest_query_id),
+                        title="AI javobi",
+                        input_message_content=InputTextMessageContent(
+                            message_text=plain_text,
+                            parse_mode="Markdown",
+                        ),
+                    ),
+                )
+            )
+            return sent.inline_message_id
+        except Exception as e:
+            logger.warning(f"Guest placeholder-answer (plain AnswerGuestQuery) xatosi: {e}")
             return None
 
     async def _edit_guest_inline_message(inline_message_id: str, markdown_text: str) -> bool:
-        """Placeholder sifatida yuborilgan guest inline xabarni yakuniy javobga tahrirlaydi."""
+        """Placeholder sifatida yuborilgan guest inline xabarni yakuniy javobga
+        tahrirlaydi. Avval rich markdown bilan, muvaffaqiyatsiz bo'lsa oddiy
+        `text` maydoni bilan urinadi (rich_message editMessageText'da ham
+        rad etilishi mumkin)."""
         if not BOT_TOKEN:
             return False
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-        payload = {
-            "inline_message_id": inline_message_id,
-            "rich_message": {
-                "markdown": markdown_text,
-                "skip_entity_detection": True,
-            },
-        }
-        try:
-            session = await _get_http_session()
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json(content_type=None)
-                if resp.status == 200 and data.get("ok"):
-                    return True
-                logger.debug(f"Guest inline-edit rad etildi: {data}")
+
+        async def _attempt(payload: dict) -> bool:
+            try:
+                session = await _get_http_session()
+                async with session.post(url, json=payload) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status == 200 and data.get("ok"):
+                        return True
+                    logger.warning(f"Guest inline-edit rad etildi: {data}")
+                    return False
+            except Exception as e:
+                logger.warning(f"Guest inline-edit xatosi: {e}")
                 return False
-        except Exception as e:
-            logger.debug(f"Guest inline-edit xatosi: {e}")
-            return False
+
+        if await _attempt({
+            "inline_message_id": inline_message_id,
+            "rich_message": {"markdown": markdown_text, "skip_entity_detection": True},
+        }):
+            return True
+
+        return await _attempt({
+            "inline_message_id": inline_message_id,
+            "text": markdown_text,
+            "parse_mode": "Markdown",
+        })
 
     async def _extract_guest_query(message: Message) -> str:
         """
@@ -421,7 +467,7 @@ else:
                     reply_to_message_id=message.message_id,
                 )
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     f"Guest: placeholder yuborib bo'lmadi → answerGuestQuery ga o'tamiz: {e}"
                 )
                 thinking_msg = None
@@ -435,8 +481,15 @@ else:
         guest_inline_message_id: str | None = None
         if not skip_ai and thinking_msg is None:
             guest_inline_message_id = await _answer_guest_query_placeholder(
-                str(guest_query_id), _guest_thinking_html(content_type)
+                str(guest_query_id),
+                _guest_thinking_html(content_type),
+                f"🔄 *{_guest_status_text(content_type)}...*",
             )
+            if guest_inline_message_id is None:
+                logger.warning(
+                    f"[Guest] status placeholder umuman yuborilmadi (query_id={guest_query_id}) — "
+                    "yakuniy javob bitta martalik answerGuestQuery orqali yuboriladi."
+                )
 
         # --------------------------------------------------
         # 2. AI javobni olish (agar /start yoki kredit bo'yicha
