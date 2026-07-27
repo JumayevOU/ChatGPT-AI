@@ -20,7 +20,7 @@ from config import (
     message_cost, pick_reasoning_effort,
 )
 from database import has_started, check_and_consume_quota, refund_quota
-from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed, _send_rich_draft
+from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed
 from helpers import notify_watchers
 from services import (
     get_gpt_reply,
@@ -118,13 +118,14 @@ def _guest_thinking_html(content_type: str, elapsed: float) -> str:
 
 
 async def _run_guest_chat_status_animator(
-    chat_id: int, draft_id: int, content_type: str, fallback_edit_fn, stop_event: asyncio.Event
+    send_draft_fn, content_type: str, fallback_edit_fn, stop_event: asyncio.Event
 ) -> None:
     """Guest chaqiruvida caller_chat_id'ga to'g'ridan-to'g'ri yozish imkoni
     bo'lganda — xuddi handlers_messages.py dagi emoji_animator kabi avval
-    premium tg-thinking draft bilan urinadi; ketma-ket rad etilsa
-    (RICH_DRAFT_FAILURE_LIMIT) oddiy matn tahrirlashga (fallback_edit_fn —
-    chat_fallback_msg yaratish/tahrirlash) butunlay o'tadi."""
+    premium tg-thinking draft bilan urinadi (send_draft_fn(html) — True/False
+    qaytaradi); ketma-ket rad etilsa (RICH_DRAFT_FAILURE_LIMIT) oddiy matn
+    tahrirlashga (fallback_edit_fn — chat_fallback_msg yaratish/tahrirlash)
+    butunlay o'tadi."""
     start_ts = time.monotonic()
     using_rich_draft = True
     rich_draft_failures = 0
@@ -135,12 +136,10 @@ async def _run_guest_chat_status_animator(
 
         if using_rich_draft:
             try:
-                result = await _send_rich_draft(
-                    chat_id, draft_id, html_content=_guest_thinking_html(content_type, elapsed)
-                )
+                ok = await send_draft_fn(_guest_thinking_html(content_type, elapsed))
             except Exception:
-                result = None
-            if result is None:
+                ok = False
+            if not ok:
                 rich_draft_failures += 1
                 if rich_draft_failures >= _RICH_DRAFT_FAILURE_LIMIT:
                     using_rich_draft = False
@@ -254,6 +253,34 @@ else:
         if text.count("```") % 2 != 0:
             return text + "\n```"
         return text
+
+    async def _raw_send_rich_draft(chat_id: int, draft_id: int, html_content: str) -> bool:
+        """sendRichMessageDraft'ga xom HTTP so'rov — handlers_messages.py dagi
+        _send_rich_draft/_telegram_api_request DEBUG darajasida logga yozadi
+        (asosiy botda har 0.6-2.4s'da chaqirilgani uchun shovqin bo'lmasin
+        deb), shu sabab bu yerda sabab ko'rinmay qolgan edi. Guest chaqiruvi
+        kamdan-kam va bu funksiya bir chaqiruvda ko'pi bilan 2 marta
+        ishlatiladi (RICH_DRAFT_FAILURE_LIMIT), shuning uchun WARNING
+        darajasida to'liq Telegram javobini yozib qo'yish xavfsiz."""
+        if not BOT_TOKEN:
+            return False
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessageDraft"
+        payload = {
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "rich_message": {"html": html_content, "skip_entity_detection": True},
+        }
+        try:
+            session = await _get_http_session()
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 200 and data.get("ok"):
+                    return True
+                logger.warning(f"Guest rich-draft rad etildi (oddiy matnga o'tamiz): {data}")
+                return False
+        except Exception as e:
+            logger.warning(f"Guest rich-draft xatosi (oddiy matnga o'tamiz): {e}")
+            return False
 
     async def _answer_guest_query_rich(guest_query_id: str, answer_text: str) -> bool:
         """
@@ -583,9 +610,13 @@ else:
                     await chat_fallback_msg.edit_text(text, parse_mode="Markdown")
 
             draft_id = abs(hash((caller_chat_id, message.message_id, time.time_ns()))) % 2_147_483_647 or 1
+
+            async def _send_draft(html_content: str) -> bool:
+                return await _raw_send_rich_draft(caller_chat_id, draft_id, html_content)
+
             status_anim_task = asyncio.create_task(
                 _run_guest_chat_status_animator(
-                    caller_chat_id, draft_id, content_type, _chat_fallback_edit, status_anim_stop
+                    _send_draft, content_type, _chat_fallback_edit, status_anim_stop
                 )
             )
         elif not skip_ai:
