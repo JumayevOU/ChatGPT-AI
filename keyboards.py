@@ -16,15 +16,11 @@ admin_keyboard = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="📄 Userlar ro'yxati"),
-        ],
-        [
-            KeyboardButton(text="🔍 Foydalanuvchini boshqarish"),
+            KeyboardButton(text="🔍 Foydalanuvchini boshqarish")
         ],
         [
             KeyboardButton(text="🛠 Texnik ta'til"),
-        ],
-        [
-            KeyboardButton(text="👁 Kuzatish"),
+            KeyboardButton(text="👁 Kuzatish")
         ],
     ], resize_keyboard=True, one_time_keyboard=False
 )
