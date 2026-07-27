@@ -72,11 +72,17 @@ def _guest_status_text(content_type: str) -> str:
 def _guest_status_frame(content_type: str, elapsed: float) -> str:
     """Berilgan lahzadagi status matnini (aylanuvchi fraza + miltillovchi
     nuqtalar + o'tgan vaqt) qaytaradi — handlers_messages.py dagi
-    emoji_animator'ning "fallback" (draft'siz) rejimi bilan bir xil ritmda."""
+    emoji_animator'ning "fallback" (draft'siz) rejimi bilan bir xil ritmda.
+
+    DIQQAT: bitta \\n YETARLI EMAS — guest javoblari answerGuestQuery/
+    editMessageText'ning `rich_message.markdown` maydoni orqali ketadi, u esa
+    oddiy eski parse_mode="Markdown"dan farqli, bitta \\n'ni bo'sh joy sifatida
+    yig'ishtiradi (CommonMark uslubidagi "soft break"). Haqiqiy qator
+    ko'chirish uchun \\n\\n (bo'sh qator) kerak."""
     status_texts = STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])
     status_index = int(elapsed // _STATUS_ANIM_INTERVAL) % len(status_texts)
     dots = "." * (int(elapsed // _DOT_ANIM_INTERVAL) % 4 + 1)
-    return f"🔄 *{status_texts[status_index]}{dots}*\n{_format_elapsed(elapsed)}"
+    return f"🔄 *{status_texts[status_index]}{dots}*\n\n{_format_elapsed(elapsed)}"
 
 
 async def _run_guest_status_animator(edit_fn, content_type: str, stop_event: asyncio.Event) -> None:
