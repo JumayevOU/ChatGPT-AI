@@ -448,11 +448,17 @@ MESSAGE_COST_PHOTO: int = 180        # rasm tahlili (vision)
 MESSAGE_COST_DOCUMENT: int = 80      # hujjat (PDF/DOCX) tahlili
 MESSAGE_COST_VOICE: int = 50         # ovozli xabar (STT + GPT + TTS)
 
-# Fayl yaratish/tahrirlash (sandbox.py orqali Python kod bajarish).
-# Eng qimmat amal: bitta so'rovda GPT bir necha marta kod yozib, bir necha
-# marta sandbox ishga tushishi mumkin. Narx bir MARTA yechiladi
-# (file_task_quota.FileTaskQuota), muvaffaqiyatsiz bo'lsa qaytariladi.
-MESSAGE_COST_FILE_TASK: int = 250
+# ── Fayl yaratish/tahrirlash uchun ALOHIDA kunlik sanoq ─────────────
+# Nega balldan alohida: bu eng qimmat amal (bitta prezentatsiya uchun GPT
+# 2-3 marta kod yozadi, reasoning tokenlar output narxida hisoblanadi).
+# Umumiy ball byudjetidan yechilganda 3 ta fayldan keyin foydalanuvchi
+# oddiy savol ham bera olmay qolardi va buni "bot buzildi" deb qabul
+# qilardi. Endi fayl limiti tugasa ham suhbat ishlashda davom etadi.
+#
+# Muvaffaqiyatsiz urinish hisoblanmaydi — file_task_quota.FileTaskQuota
+# sanoqni bir marta yechadi va fayl chiqmasa qaytarib beradi.
+# Premium hozircha cheksiz.
+DAILY_FILE_LIMIT_FREE: int = 2
 
 
 def message_cost(kind: str, effort: str = REASONING_EFFORT_DEFAULT) -> int:
@@ -463,8 +469,6 @@ def message_cost(kind: str, effort: str = REASONING_EFFORT_DEFAULT) -> int:
         return MESSAGE_COST_DOCUMENT
     if kind == "voice":
         return MESSAGE_COST_VOICE
-    if kind == "file_task":
-        return MESSAGE_COST_FILE_TASK
     if effort in ("medium", "high", "xhigh", "max"):
         return MESSAGE_COST_TEXT_DEEP
     return MESSAGE_COST_TEXT

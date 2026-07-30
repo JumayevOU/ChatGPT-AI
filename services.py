@@ -27,7 +27,6 @@ try:
     from config import (
         GPT_MODEL, MODEL_FALLBACKS, CONTEXT_WINDOW, OPENAI_API_KEY,
         REQUEST_TIMEOUT, CONCISE_INSTRUCTION, STRICT_MATH_RULES,
-        MESSAGE_COST_FILE_TASK,
         build_system_prompt, build_request_params, pick_reasoning_effort,
     )
 except ImportError:
@@ -39,7 +38,6 @@ except ImportError:
     MODEL_FALLBACKS = []
     REQUEST_TIMEOUT = 60.0
     CONTEXT_WINDOW = 12
-    MESSAGE_COST_FILE_TASK = 250
 
     def build_system_prompt() -> str:
         return "You are a helpful assistant."
@@ -860,9 +858,13 @@ async def _run_file_task(
         allowed = await quota.ensure_charged()
         if not allowed:
             return (
-                "XATOLIK: foydalanuvchining bugungi krediti tugagan, kod "
-                "bajarilmadi. Boshqa urinmang — foydalanuvchiga kredit "
-                "tugaganini muloyim tushuntiring."
+                "TO'XTA: foydalanuvchining bugungi fayl yaratish limiti "
+                "tugagan, kod bajarilmadi va tool boshqa chaqirilmaydi. "
+                "Javob sifatida FAQAT bitta qisqa jumla yozing (masalan "
+                "\"Kechirasiz, hozir bu faylni tayyorlab bera olmayman.\"). "
+                "Limit, kredit, tarif yoki premium haqida HECH NARSA "
+                "yozmang — tizim buni o'zi alohida chiroyli xabar bilan "
+                "ko'rsatadi."
             )
 
     logger.info(f"[FileTask] round={round_num}, kod uzunligi={len(code)}")
@@ -921,6 +923,7 @@ async def get_openai_reply(
     input_file_bytes: Optional[bytes] = None,
     input_filename: Optional[str] = None,
     output_files: Optional[list] = None,
+    file_quota_out: Optional[list] = None,
 ):
     system_prompt = f"{build_system_prompt()}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"
 
@@ -983,10 +986,14 @@ async def get_openai_reply(
     # bu None bo'ladi — u yerda hujjat yuborib bo'lmaydi.
     file_task_enabled = output_files is not None
     file_quota: Optional[FileTaskQuota] = (
-        FileTaskQuota(user_id, MESSAGE_COST_FILE_TASK)
+        FileTaskQuota(user_id)
         if (file_task_enabled and user_id is not None)
         else None
     )
+    # Chaqiruvchi (handler) limit holatini ko'ra olishi uchun — chiroyli
+    # "limit tugadi" xabarini modelning so'ziga tashlab qo'ymaymiz.
+    if file_quota is not None and file_quota_out is not None:
+        file_quota_out.append(file_quota)
     file_task_started = False
 
     while True:
@@ -1133,6 +1140,7 @@ async def get_gpt_reply(
     input_file_bytes: Optional[bytes] = None,
     input_filename: Optional[str] = None,
     output_files: Optional[list] = None,
+    file_quota_out: Optional[list] = None,
 ):
     async for chunk in get_openai_reply(
         chat_id,
@@ -1141,6 +1149,7 @@ async def get_gpt_reply(
         input_file_bytes=input_file_bytes,
         input_filename=input_filename,
         output_files=output_files,
+        file_quota_out=file_quota_out,
     ):
         yield chunk
 

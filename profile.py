@@ -2,8 +2,8 @@ from aiogram import types
 from datetime import datetime, timezone, timedelta
 from database import get_full_user_profile
 from config import (
-    DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
-    MESSAGE_COST_VOICE, MESSAGE_COST_DOCUMENT,
+    DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE, MESSAGE_COST_TEXT,
+    MESSAGE_COST_PHOTO, MESSAGE_COST_VOICE, MESSAGE_COST_DOCUMENT,
 )
 
 _FEATURE_COSTS = [
@@ -96,6 +96,40 @@ def _build_credit_section(daily_used: int, plan_type: str) -> str:
     return "\n".join(lines)
 
 
+def _build_file_section(files_used: int, plan_type: str) -> str:
+    """Fayl yaratish sanog'i — ball byudjetidan ALOHIDA ko'rsatiladi.
+
+    Ikkovini bitta bo'limga qo'shib yuborsak foydalanuvchi nima nimani
+    yeyayotganini tushunmay qoladi; alohida turgani "fayl tugadi, lekin
+    suhbat ishlaydi" degan asosiy g'oyani ham ko'rsatib turadi.
+    """
+    if plan_type != 'free':
+        return (
+            "📄 <b>Fayl yaratish va tahrirlash</b>\n"
+            "🔓 <b>Cheksiz</b> — kunlik chegara qo'llanilmaydi"
+        )
+
+    limit = DAILY_FILE_LIMIT_FREE
+    used = min(files_used, limit)
+    remaining = max(0, limit - used)
+    bar = _progress_bar(used, limit)
+
+    lines = [
+        "📄 <b>Fayl yaratish va tahrirlash</b>",
+        f"<code>{bar}</code>  <code>{used} / {limit}</code>",
+    ]
+    if remaining <= 0:
+        lines.append(
+            "\n⏳ Bugungi fayl limiti tugadi — ertaga soat <b>00:00</b> da yangilanadi."
+            "\n💬 Oddiy savollar hozir ham ishlaydi."
+            "\n💎 Premium'da <b>cheksiz</b>."
+        )
+    else:
+        lines.append(f"\n✅ Bugun yana <b>{remaining} ta</b> fayl yaratishingiz mumkin"
+                     "\n<i>(PPTX, PDF, Word, Excel, format o'girish)</i>")
+    return "\n".join(lines)
+
+
 async def handle_profile(message: types.Message):
     """Foydalanuvchi profilini shakllantirish va yuborish."""
     user_id = message.from_user.id
@@ -117,6 +151,8 @@ async def handle_profile(message: types.Message):
     last_seen = _beautify_date(profile_data.get('last_seen', ''))
 
     credit_section = _build_credit_section(daily_used, profile_data['plan_type'])
+    file_section = _build_file_section(
+        profile_data.get('daily_files_used', 0), profile_data['plan_type'])
 
     text = (
         f"🪪 <b>SHAXSIY KABINET</b>\n\n"
@@ -131,7 +167,8 @@ async def handle_profile(message: types.Message):
         f"├ ✉️ <b>Barcha xabarlar:</b> <code>{profile_data['total_messages']}</code>\n\n"
 
         f"{credit_section}\n\n"
-        
+
+        f"{file_section}\n\n"
     )
     
     await message.answer(text, parse_mode="HTML")

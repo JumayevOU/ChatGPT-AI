@@ -75,12 +75,13 @@ class FakeQuotaDB:
         self.charges = []
         self.refunds = []
 
-    async def check_and_consume_quota(self, user_id, cost):
-        self.charges.append((user_id, cost))
-        return {"allowed": self.allowed, "unlimited": self.unlimited}
+    async def check_and_consume_file_quota(self, user_id):
+        self.charges.append(user_id)
+        return {"allowed": self.allowed, "unlimited": self.unlimited,
+                "used": 1, "limit": 2}
 
-    async def refund_quota(self, user_id, cost):
-        self.refunds.append((user_id, cost))
+    async def refund_file_quota(self, user_id):
+        self.refunds.append(user_id)
 
 
 class FakeSandbox:
@@ -109,7 +110,8 @@ async def collect(gen):
 
 
 async def run_case(*, rounds, sandbox_results, output_files, user_id=7,
-                   quota_allowed=True, input_bytes=None, input_name=None):
+                   quota_allowed=True, input_bytes=None, input_name=None,
+                   quota_box=None):
     """Bitta ssenariyni izolyatsiya qilingan soxta muhitda ishga tushiradi."""
     captured_tools.clear()
     fake_db = FakeQuotaDB(allowed=quota_allowed)
@@ -120,25 +122,26 @@ async def run_case(*, rounds, sandbox_results, output_files, user_id=7,
         "open": services._open_response_stream,
         "sandbox": services.run_in_sandbox,
         "hist": services.safe_get_chat_history,
-        "check": file_task_quota.check_and_consume_quota,
-        "refund": file_task_quota.refund_quota,
+        "check": file_task_quota.check_and_consume_file_quota,
+        "refund": file_task_quota.refund_file_quota,
     }
     services._open_response_stream = make_fake_opener(rounds)
     services.run_in_sandbox = fake_sbx.run
     services.safe_get_chat_history = lambda *a, **k: _empty_history()
-    file_task_quota.check_and_consume_quota = fake_db.check_and_consume_quota
-    file_task_quota.refund_quota = fake_db.refund_quota
+    file_task_quota.check_and_consume_file_quota = fake_db.check_and_consume_file_quota
+    file_task_quota.refund_file_quota = fake_db.refund_file_quota
     try:
         chunks = await collect(services.get_openai_reply(
             1, "test so'rov", user_id=user_id, output_files=output_files,
             input_file_bytes=input_bytes, input_filename=input_name,
+            file_quota_out=quota_box,
         ))
     finally:
         services._open_response_stream = real["open"]
         services.run_in_sandbox = real["sandbox"]
         services.safe_get_chat_history = real["hist"]
-        file_task_quota.check_and_consume_quota = real["check"]
-        file_task_quota.refund_quota = real["refund"]
+        file_task_quota.check_and_consume_file_quota = real["check"]
+        file_task_quota.refund_file_quota = real["refund"]
 
     return chunks, fake_db, fake_sbx
 
@@ -168,7 +171,7 @@ async def main():
     assert "[CLEAR_TEXT]" in chunks, chunks
     assert "Tayyor!" in chunks, chunks
     assert out_files == [("a.pdf", b"%PDF-1.4")], out_files
-    assert db.charges == [(7, services.MESSAGE_COST_FILE_TASK)], db.charges
+    assert db.charges == [7], db.charges
     assert db.refunds == [], "muvaffaqiyatda qaytarilmasligi kerak"
     print("[1] muvaffaqiyatli fayl vazifasi OK")
 
@@ -190,7 +193,7 @@ async def main():
         output_files=out_files,
     )
     assert len(sbx.calls) == 2, f"ikki marta chaqirilishi kerak edi: {len(sbx.calls)}"
-    assert db.charges == [(7, services.MESSAGE_COST_FILE_TASK)], f"bir marta: {db.charges}"
+    assert db.charges == [7], f"bir marta: {db.charges}"
     assert db.refunds == [], "oxirida muvaffaqiyat bo'ldi — qaytarish yo'q"
     assert out_files == [("b.xlsx", b"PK\x03\x04")], out_files
     print("[2] xato -> avtomatik qayta urinish OK")
@@ -207,24 +210,29 @@ async def main():
         output_files=out_files,
     )
     assert out_files == [], out_files
-    assert db.refunds == [(7, services.MESSAGE_COST_FILE_TASK)], f"qaytarilishi kerak: {db.refunds}"
+    assert db.refunds == [7], f"qaytarilishi kerak: {db.refunds}"
     print("[3] to'liq muvaffaqiyatsizlik -> kvota qaytarildi OK")
 
-    # 4) Kredit tugagan -> sandbox UMUMAN chaqirilmaydi
+    # 4) Kunlik fayl limiti tugagan -> sandbox UMUMAN chaqirilmaydi va
+    #    handler chiroyli xabar chiqarishi uchun bayroq ko'tariladi
     out_files = []
+    quota_box = []
     chunks, db, sbx = await run_case(
         rounds=[
             [FakeEvent("response.output_item.added", item=file_call),
              FakeEvent("response.output_item.done", item=file_call)],
-            [FakeEvent("response.output_text.delta", delta="Kreditingiz tugagan")],
+            [FakeEvent("response.output_text.delta", delta="Kechirasiz")],
         ],
         sandbox_results=[],
         output_files=out_files,
         quota_allowed=False,
+        quota_box=quota_box,
     )
-    assert sbx.calls == [], "kredit tugaganda kod bajarilmasligi kerak"
+    assert sbx.calls == [], "limit tugaganda kod bajarilmasligi kerak"
     assert db.refunds == [], "hech narsa yechilmagan — qaytarish yo'q"
-    print("[4] kredit tugagan -> kod bajarilmadi OK")
+    assert quota_box and quota_box[0].limit_hit is True,         "handler limit xabarini chiqara olmaydi"
+    assert quota_box[0].limit == 2
+    print("[4] limit tugagan -> kod bajarilmadi, bayroq ko'tarildi OK")
 
     # 5) output_files=None (guest rejim) -> tool umuman biriktirilmaydi
     chunks, db, sbx = await run_case(

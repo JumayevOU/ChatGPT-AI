@@ -565,6 +565,51 @@ async def _refund_quota(user_id: int, cost: int, quota: dict | None = None) -> N
         logger.error(f"[Kvota] qaytarishda xatolik (user={user_id}): {e}")
 
 
+async def _send_file_quota_notice(message: Message, quota_box: list, produced_files: bool) -> None:
+    """Fayl yaratish limiti bo'yicha xabarni chiqaradi (kerak bo'lsa).
+
+    Bu xabar ATAYLAB modelning o'z so'zlariga tashlab qo'yilmagan: model
+    har safar boshqacha ifodalaydi, tarif shartlarini o'zicha o'ylab
+    topishi ham mumkin. services.py modelga faqat bitta qisqa uzr jumlasi
+    yozishni buyuradi, tafsilotni esa shu yerdan aniq matn bilan beramiz.
+    """
+    quota = quota_box[0] if quota_box else None
+    if quota is None:
+        return
+
+    if quota.limit_hit:
+        text = (
+            f"📄 <b>Bugungi fayl limiti tugadi</b>\n\n"
+            f"Bepul tarifda kuniga <b>{quota.limit} ta</b> fayl yaratish "
+            f"mumkin va bugungisi ishlatib bo'lindi.\n"
+            f"🕛 Yangi limit ertaga soat <b>00:00</b> da avtomatik yangilanadi.\n\n"
+            f"💎 <b>Premium</b>da fayl yaratish <b>cheksiz</b>:\n"
+            f"├ 📊 Prezentatsiya — PPTX\n"
+            f"├ 📄 Hujjat — PDF, Word\n"
+            f"├ 📈 Jadval va diagramma — Excel\n"
+            f"└ 🔄 Formatdan formatga o'girish\n\n"
+            f"💬 Oddiy savollar hozir ham ishlaydi — bemalol yozavering.\n\n"
+            f"👤 Batafsil ma'lumot uchun <b>/profile</b> tugmasini bosing!"
+        )
+    elif produced_files and quota.remaining == 0:
+        # Konversiya uchun eng qulay payt: fayl endigina qo'lida.
+        text = (
+            f"ℹ️ Bu bugungi <b>oxirgi bepul faylingiz</b> edi.\n"
+            f"🕛 Ertaga soat <b>00:00</b> da yana <b>{quota.limit} ta</b> beriladi.\n"
+            f"💎 Premium'da cheksiz — <b>/profile</b>"
+        )
+    else:
+        return
+
+    try:
+        await message.answer(text, parse_mode="HTML")
+    except Exception:
+        try:
+            await message.answer(text)
+        except Exception:
+            pass
+
+
 _FEATURE_LABELS: dict[str, tuple[str, int]] = {
     "text": ("<b>✉️ Matnli xabar</b>", MESSAGE_COST_TEXT),
     "photo": ("<b>🖼 Rasm tahlili</b>", MESSAGE_COST_PHOTO),
@@ -926,12 +971,15 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
             pending["ts"] = time.time()   # ketma-ket so'rovlar uchun oynani uzaytiramiz
 
         output_files: list = []
+        file_quota_box: list = []
         stream_gen = get_gpt_reply(chat_id, prompt_text, user_id=user_id,
-                                   output_files=output_files, **file_kwargs)
+                                   output_files=output_files,
+                                   file_quota_out=file_quota_box, **file_kwargs)
         full_reply = await process_stream_draft(last_message, stream_gen)
 
         if output_files:
             await _send_output_files(chat_id, output_files)
+        await _send_file_quota_notice(last_message, file_quota_box, bool(output_files))
 
         if full_reply:
             notify_watchers(user_id, last_message.from_user.username, "out", text=full_reply)
@@ -1103,17 +1151,20 @@ async def handle_document(message: Message, state: FSMContext):
         # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
         prompt = f"{body}\n\nFoydalanuvchi so'rovi: {caption}"
         output_files: list = []
+        file_quota_box: list = []
         stream_gen = get_gpt_reply(
             chat_id, prompt,
             user_id=user_id,
             input_file_bytes=file_bytes,
             input_filename=file_name,
             output_files=output_files,
+            file_quota_out=file_quota_box,
         )
         full_reply = await process_stream_draft(message, stream_gen, content_type="document")
 
         if output_files:
             await _send_output_files(chat_id, output_files)
+        await _send_file_quota_notice(message, file_quota_box, bool(output_files))
 
         if full_reply:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply)
@@ -1191,11 +1242,15 @@ async def handle_voice(message: Message, state: FSMContext):
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
         output_files: list = []
-        stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id, output_files=output_files)
+        file_quota_box: list = []
+        stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id,
+                                   output_files=output_files,
+                                   file_quota_out=file_quota_box)
         full_reply_text = await process_stream_draft(message, stream_gen, content_type="voice")
 
         if output_files:
             await _send_output_files(chat_id, output_files)
+        await _send_file_quota_notice(message, file_quota_box, bool(output_files))
 
         if full_reply_text:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply_text)

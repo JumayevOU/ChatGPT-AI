@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  
-from config import GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT
+from config import GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -693,6 +693,12 @@ async def ensure_profile_columns():
             # Muddat o'tsa, check_and_consume_quota() foydalanuvchini avtomatik
             # free'ga tushiradi (kunlik limit auto-reset qanday ishlasa, shunday).
             "ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ",
+            # Fayl yaratish/tahrirlash uchun ALOHIDA kunlik sanoq — ball
+            # byudjetidan mustaqil, shuning uchun fayl limiti tugagach ham
+            # oddiy suhbat ishlashda davom etadi. daily_usage_date bilan
+            # bir xil naqsh: sana farq qilsa hisob avtomatik nolanadi.
+            "ADD COLUMN IF NOT EXISTS daily_files_used INTEGER DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS daily_files_date DATE DEFAULT (NOW() AT TIME ZONE 'Asia/Tashkent')::DATE",
         ]
         for col in columns:
             try:
@@ -732,6 +738,10 @@ async def get_full_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
         raw_daily_used = user_row.get('daily_requests_used', 0) or 0
         daily_used = 0 if usage_date != today_tashkent else raw_daily_used
 
+        files_date = user_row.get('daily_files_date')
+        raw_files_used = user_row.get('daily_files_used', 0) or 0
+        daily_files_used = 0 if files_date != today_tashkent else raw_files_used
+
         return {
             'user_id': user_row['user_id'],
             'username': user_row.get('username') or "Mavjud emas",
@@ -742,6 +752,7 @@ async def get_full_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
             'current_model': GPT_MODEL_DISPLAY_NAME,
             'media_analysis_active': user_row.get('media_analysis_active', True),
             'daily_requests_used': daily_used,
+            'daily_files_used': daily_files_used,
             'total_tokens_used': total_tokens or 0,
             'total_messages': msg_count or 0,
             'created_at': user_row.get('created_at'),
@@ -856,6 +867,108 @@ async def refund_quota(user_id: int, cost: int) -> None:
             await conn.execute(
                 'UPDATE users SET daily_requests_used = $2 WHERE user_id = $1',
                 user_id, new_used,
+            )
+
+
+@with_db_retry()
+async def check_and_consume_file_quota(user_id: int) -> Dict[str, Any]:
+    """
+    Fayl yaratish/tahrirlash uchun kunlik SANOQ (ball tizimidan alohida).
+
+    check_and_consume_quota() bilan bir xil naqsh: `FOR UPDATE` qulfi,
+    Toshkent kuni bo'yicha avtomatik nolanish, admin/superadmin va premium
+    uchun cheklovsiz. Farqi — ball emas, dona hisoblanadi va tugagani
+    suhbatga ta'sir qilmaydi.
+
+    Qaytaradi: {'allowed': bool, 'used': int, 'limit': int, 'unlimited': bool}
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+
+    today_tashkent = datetime.now(TASHKENT_TZ).date()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                '''
+                SELECT
+                    u.plan_type,
+                    u.premium_until,
+                    u.daily_files_used,
+                    u.daily_files_date,
+                    u.is_banned,
+                    EXISTS(SELECT 1 FROM admins WHERE user_id = $1) AS is_admin,
+                    EXISTS(SELECT 1 FROM superadmins WHERE user_id = $1) AS is_superadmin
+                FROM users u
+                WHERE u.user_id = $1
+                FOR UPDATE
+                ''',
+                user_id,
+            )
+
+            if row is None or row['is_admin'] or row['is_superadmin']:
+                return {'allowed': True, 'used': 0, 'limit': DAILY_FILE_LIMIT_FREE, 'unlimited': True}
+
+            if row['is_banned']:
+                return {'allowed': False, 'banned': True, 'used': 0, 'limit': 0, 'unlimited': False}
+
+            plan_type = row['plan_type'] or 'free'
+            premium_until = row['premium_until']
+            if (plan_type != 'free' and premium_until is not None
+                    and premium_until <= datetime.now(timezone.utc)):
+                # Muddati o'tgan premium — ball kvotasidagi kabi darhol
+                # free'ga tushiramiz (alohida cron shart emas).
+                await conn.execute(
+                    "UPDATE users SET plan_type = 'free', premium_until = NULL WHERE user_id = $1",
+                    user_id,
+                )
+                plan_type = 'free'
+
+            if plan_type != 'free':
+                # ponytail: premium hozircha cheksiz, keyin bu yerga
+                # DAILY_FILE_LIMIT_PREMIUM qo'yiladi.
+                return {'allowed': True, 'used': 0, 'limit': 0, 'unlimited': True}
+
+            used = row['daily_files_used'] or 0
+            if row['daily_files_date'] != today_tashkent:
+                used = 0  # yangi Toshkent kuni
+
+            if used + 1 > DAILY_FILE_LIMIT_FREE:
+                return {'allowed': False, 'used': used, 'limit': DAILY_FILE_LIMIT_FREE, 'unlimited': False}
+
+            await conn.execute(
+                'UPDATE users SET daily_files_used = $2, daily_files_date = $3 WHERE user_id = $1',
+                user_id, used + 1, today_tashkent,
+            )
+            return {'allowed': True, 'used': used + 1, 'limit': DAILY_FILE_LIMIT_FREE, 'unlimited': False}
+
+
+@with_db_retry()
+async def refund_file_quota(user_id: int) -> None:
+    """Fayl chiqmagan bo'lsa sanoqni qaytaradi (urinish bekor hisoblanadi).
+
+    refund_quota() bilan bir xil ehtiyot chorasi: agar hisob boshqa kunga
+    tegishli bo'lsa hech narsa qilinmaydi, aks holda ertangi kun balansi
+    buzilardi.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+
+    today_tashkent = datetime.now(TASHKENT_TZ).date()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                'SELECT daily_files_used, daily_files_date FROM users WHERE user_id = $1 FOR UPDATE',
+                user_id,
+            )
+            if row is None or row['daily_files_date'] != today_tashkent:
+                return
+            await conn.execute(
+                'UPDATE users SET daily_files_used = $2 WHERE user_id = $1',
+                user_id, max(0, (row['daily_files_used'] or 0) - 1),
             )
 
 
