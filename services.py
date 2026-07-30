@@ -551,6 +551,69 @@ _TOOLS = [
     }
 ]
 
+# Hujjat DIZAYNI bo'yicha qo'llanma. Bu tool tavsifining bir qismi bo'ladi
+# (config.py'dagi umumiy SYSTEM promptga EMAS) — chunki u faqat fayl bilan
+# ishlaydigan oqimlarda kerak, va tool ro'yxati barqaror bo'lgani uchun
+# prompt caching orqali deyarli tekinga tushadi.
+#
+# Sabab: bu qo'llanmasiz model juda oddiy, "oq fon + qora matn" hujjatlar
+# yasaydi (bitta katta xat boshiga tiqilgan "•" belgilari bilan). Quyidagi
+# qoidalar sinovdan o'tgan — python-pptx + matplotlib bilan haqiqatan ham
+# professional ko'rinishdagi natija beradi.
+_DOC_DESIGN_GUIDE = (
+    "═══ HUJJAT DIZAYNI — MAJBURIY ═══\n"
+    "Foydalanuvchi hujjat/taqdimot so'raganda natija PROFESSIONAL "
+    "ko'rinishda bo'lishi SHART. Oddiy oq fonli, faqat qora matnli natija "
+    "QABUL QILINMAYDI.\n\n"
+    "1) FORMATNI TO'G'RI TANLANG:\n"
+    "   - 'prezentatsiya', 'taqdimot', 'slayd' → PPTX (python-pptx), "
+    "16:9 (13.333 x 7.5 dyuym). PDF QILMANG, chunki PPTX tahrirlanadi.\n"
+    "   - 'hisobot', 'hujjat', 'ariza', 'xat' → DOCX (python-docx).\n"
+    "   - 'jadval', 'ro'yxat', 'hisob-kitob' → XLSX (openpyxl).\n"
+    "   - PDF faqat foydalanuvchi ANIQ 'PDF' desa (reportlab).\n\n"
+    "2) RANG SXEMASI: mavzuga mos 1 ta asosiy + 1 ta urg'u rangi tanlang "
+    "va butun hujjatda izchil ishlating (masalan aviakompaniya uchun ko'k "
+    "#005BAA + to'q sariq #E88B00; moliya uchun to'q yashil; tibbiyot "
+    "uchun ko'k-yashil). Neytral: #0A1F33 matn, #5A6B7B ikkilamchi matn, "
+    "#F2F6FA och fon.\n\n"
+    "3) SLAYD TURLARINI ARALASHTIRING (hammasi bir xil bo'lmasin):\n"
+    "   - Sarlavha slaydi: BUTUN slayd asosiy rangga bo'yalgan, katta oq "
+    "sarlavha (44-54pt) + kichik ochroq izoh.\n"
+    "   - Infografika: 3-4 ta 'stat karta' — och fonli to'rtburchak, "
+    "ustida rangli chiziq, ichida KATTA raqam (36-44pt, asosiy rangda) "
+    "va ostida kichik izoh (12-14pt).\n"
+    "   - Diagramma slaydi: chap tomonda och fonli ustun (matn), o'ngda "
+    "diagramma rasmi.\n"
+    "   - Vaqt chizig'i: to'q fon, gorizontal chiziq, ustida rangli "
+    "doiralar + yil + voqea.\n"
+    "   - Xulosa: to'q yoki rangli fon, qisqa kuchli gap.\n\n"
+    "4) DIAGRAMMA (kamida 1 ta bo'lsin, ma'lumot bo'lsa): matplotlib "
+    "bilan chizing → PNG qilib saqlang (dpi=200, transparent=True, "
+    "bbox_inches='tight') → slaydga add_picture bilan qo'ying. Donut "
+    "diagramma uchun wedgeprops=dict(width=0.42, edgecolor='white', "
+    "linewidth=2). Diagrammani ish papkasiga saqlang (output/ ga EMAS — "
+    "u yerga faqat yakuniy hujjat tushsin).\n\n"
+    "5) TIPOGRAFIYA: sarlavha 40-54pt qalin, slayd sarlavhasi 30-34pt "
+    "qalin, matn 13-16pt. Bir slaydda 40 SO'ZDAN OSHMASIN.\n\n"
+    "6) RO'YXATLAR: har bir band ALOHIDA xat boshi (paragraph) bo'lsin. "
+    "Bandlarni ';' bilan bitta xat boshiga tiqib qo'ymang — bu eng "
+    "ko'p uchraydigan xato.\n\n"
+    "7) TEXNIK: shakllarda s.line.fill.background() (chegara chizig'ini "
+    "olib tashlaydi) va s.shadow.inherit = False (keraksiz soyani "
+    "o'chiradi) ishlating.\n\n"
+    "8) RASM: sandbox internetga chiqmaydi, shuning uchun tayyor "
+    "fotosurat YUKLAB OLIB BO'LMAYDI. Buning o'rniga rangli bloklar, "
+    "diagrammalar, katta tipografika va geometrik shakllardan "
+    "foydalaning. Foydalanuvchi 'rasm qo'sh' desa — nega qo'sha "
+    "olmasligingizni qisqa tushuntiring va o'zi rasm yuborsa "
+    "joylashtira olishingizni ayting.\n\n"
+    "9) TIL: fayl mazmuni foydalanuvchi so'ragan tilda bo'lsin. "
+    "O'zbekcha matnda 'ʻ' (U+02BB) belgisi ishlatiladi — PPTX/DOCX "
+    "buni muammosiz ko'rsatadi. reportlab PDF'da esa Helvetica bu "
+    "belgini qo'llab-quvvatlamaydi, shuning uchun PDF'da oddiy "
+    "apostrof (') ishlating."
+)
+
 # Fayl yaratish/tahrirlash tool'i — `_TOOLS`dan ALOHIDA saqlanadi, chunki u
 # faqat natijani yetkazib bera oladigan oqimlarda (output_files ro'yxati
 # berilganda) biriktiriladi. Guest rejimda, masalan, biriktirilmaydi —
@@ -590,7 +653,8 @@ _FILE_TASK_TOOL = {
         "qiling), natijani ko'ring, keyin ikkinchi chaqiriqda haqiqiy "
         "o'zgartirishni bajaring — bu tool bir xabar davomida bir necha "
         "marta chaqirilishi mumkin. Kod xato bersa, xato matnini o'qib "
-        "tuzating va qayta chaqiring."
+        "tuzating va qayta chaqiring.\n\n"
+        + _DOC_DESIGN_GUIDE
     ),
     "parameters": {
         "type": "object",
