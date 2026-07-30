@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramRetryAfter
 
-from config import (
+from core.config import (
     BOT_TOKEN, CONTEXT_WINDOW,
     TEXT_MERGE_INSTANT_THRESHOLD, TEXT_MERGE_WAIT, TEXT_MERGE_MAX_PARTS,
     TEXT_MERGE_MAX_CHARS, MAX_TEXT_LENGTH,
@@ -20,15 +20,15 @@ from config import (
     MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE,
     message_cost, pick_reasoning_effort,
 )
-from loader import logger, bot
-from database import (
+from core.loader import logger, bot
+from db.database import (
     save_user, log_user_activity, is_admin, is_superadmin,
     check_and_consume_quota, refund_quota, is_banned,
 )
-from keyboards import admin_keyboard
-from helpers import process_daily_pin, notify_watchers, send_error_with_retry
-from memory import get_text_merge_lock, text_merge_buffers, clear_text_merge_buffer
-from services import (
+from core.keyboards import admin_keyboard
+from handlers.helpers import process_daily_pin, notify_watchers, send_error_with_retry
+from core.memory import get_text_merge_lock, text_merge_buffers, clear_text_merge_buffer
+from services.ai import (
     safe_update_history, get_gpt_reply,
     speech_to_text, text_to_speech, get_vision_reply, extract_text_from_document,
     clear_chat_history, get_youtube_summary, safe_get_chat_history,
@@ -570,7 +570,7 @@ async def _send_file_quota_notice(message: Message, quota_box: list, produced_fi
 
     Bu xabar ATAYLAB modelning o'z so'zlariga tashlab qo'yilmagan: model
     har safar boshqacha ifodalaydi, tarif shartlarini o'zicha o'ylab
-    topishi ham mumkin. services.py modelga faqat bitta qisqa uzr jumlasi
+    topishi ham mumkin. services/ai.py modelga faqat bitta qisqa uzr jumlasi
     yozishni buyuradi, tafsilotni esa shu yerdan aniq matn bilan beramiz.
     """
     quota = quota_box[0] if quota_box else None
@@ -937,7 +937,7 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         # MUHIM TUZATISH (kontekst/xotira yo'qolish bug'i):
         #
         # Avvalgi versiyada foydalanuvchi xabari AI'dan javob olishdan
-        # OLDIN saqlanardi. Natijada get_openai_reply() (services.py)
+        # OLDIN saqlanardi. Natijada get_openai_reply() (services/ai.py)
         # tarixni DB'dan o'qiganda o'sha SO'NGGI xabarni (masalan "Hop")
         # allaqachon tarix ichida topib olardi va keyin uni YANA bir
         # marta — bu safar CONCISE_INSTRUCTION + STRICT_MATH_RULES kabi
@@ -951,7 +951,7 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         #      qabul qilardi.
         #
         # Tuzatish: (a) CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerda
-        # umuman qo'shilmaydi — ular services.py'da SYSTEM promptga
+        # umuman qo'shilmaydi — ular services/ai.py'da SYSTEM promptga
         # allaqachon qo'shiladi, shuning uchun takrorlash shart emas;
         # (b) foydalanuvchi xabari tarixga FAQAT AI javobi muvaffaqiyatli
         # qaytgandan KEYIN, assistant javobi bilan BIRGALIKDA yoziladi —
@@ -1039,7 +1039,7 @@ async def handle_photo(message: Message, state: FSMContext):
         caption = message.caption if message.caption else "Bu rasmda nimalar borligini to'liq tushuntirib ber."
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
-        # get_vision_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
+        # get_vision_reply() ularni SYSTEM promptga o'zi qo'shadi (services/ai.py).
         # Tarix esa javob muvaffaqiyatli olingandan keyin, birgalikda saqlanadi.
         stream_gen = get_vision_reply(chat_id, base64_image, caption)
         full_reply = await process_stream_draft(message, stream_gen, content_type="photo")
@@ -1148,7 +1148,7 @@ async def handle_document(message: Message, state: FSMContext):
             body = f"{file_note}\n\nFayl mazmunidan namuna:\n{extracted_text}"
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
-        # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
+        # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services/ai.py).
         prompt = f"{body}\n\nFoydalanuvchi so'rovi: {caption}"
         output_files: list = []
         file_quota_box: list = []
@@ -1240,7 +1240,7 @@ async def handle_voice(message: Message, state: FSMContext):
         await message.reply(f"🗣 <b>Siz:</b> \"{user_text}\"", parse_mode="HTML")
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
-        # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
+        # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services/ai.py).
         output_files: list = []
         file_quota_box: list = []
         stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id,

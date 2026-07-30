@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  
-from config import GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE
+from core.config import GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")

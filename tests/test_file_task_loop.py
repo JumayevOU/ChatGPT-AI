@@ -5,13 +5,20 @@ shunda haqiqiy tarmoq chaqiruvisiz, dispatch mantiqi (tool tanlash,
 nomга qarab yo'naltirish, [STATUS]/[CLEAR_TEXT] signallari, kvota
 yechilishi va qaytarilishi) to'liq sinaladi.
 
-Ishga tushirish: python test_file_task_loop.py
+Ishga tushirish: python tests/test_file_task_loop.py
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import json
 import types
 
-import services
+from services import ai as services
 
 
 # ── Soxta OpenAI oqimi ────────────────────────────────────────────
@@ -95,7 +102,7 @@ class FakeSandbox:
 
 
 def sandbox_result(success=True, files=None, traceback="", stdout="ok"):
-    from sandbox import SandboxResult
+    from services.sandbox import SandboxResult
     return SandboxResult(
         success=success, stdout=stdout, traceback=traceback,
         output_files=files if files is not None else [],
@@ -117,7 +124,7 @@ async def run_case(*, rounds, sandbox_results, output_files, user_id=7,
     fake_db = FakeQuotaDB(allowed=quota_allowed)
     fake_sbx = FakeSandbox(sandbox_results)
 
-    import file_task_quota
+    from services import file_task_quota
     real = {
         "open": services._open_response_stream,
         "sandbox": services.run_in_sandbox,

@@ -1,12 +1,19 @@
 """
 refund_quota() uchun qo'lda ishga tushiriladigan tekshiruv (framework yo'q).
-Ishga tushirish: python test_refund_quota.py
+Ishga tushirish: python tests/test_refund_quota.py
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-import database
+from db import database
 
 
 class FakeConn:

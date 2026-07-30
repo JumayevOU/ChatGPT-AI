@@ -3,9 +3,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from loader import logger, bot
-import database
-from memory import store_failed_request
+from core.loader import logger, bot
+from db import database
+from core.memory import store_failed_request
 
 def make_retry_keyboard(chat_id: int, attempts: int = 0):
     kb = InlineKeyboardMarkup(inline_keyboard=[

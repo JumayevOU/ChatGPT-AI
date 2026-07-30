@@ -1,7 +1,7 @@
 from aiogram import types
 from datetime import datetime, timezone, timedelta
-from database import get_full_user_profile
-from config import (
+from db.database import get_full_user_profile
+from core.config import (
     DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE, MESSAGE_COST_TEXT,
     MESSAGE_COST_PHOTO, MESSAGE_COST_VOICE, MESSAGE_COST_DOCUMENT,
 )

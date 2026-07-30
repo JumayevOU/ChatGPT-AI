@@ -1,15 +1,22 @@
 """extract_text_from_document() uchun qo'lda ishga tushiriladigan tekshiruv.
-Ishga tushirish: python test_extract.py
+Ishga tushirish: python tests/test_extract.py
 
 Nega kerak: Excel/PPTX uchun o'quvchi bo'lmaganda kod faylni oddiy UTF-8
 matn sifatida "dekodlab", GPT'ga ma'nosiz binar chiqindi yuborardi. Model
 esa haqli ravishda "buzilgan binar matn yuborilgan, tahrirlay olmayman"
 deb javob berardi — foydalanuvchi aynan shuni ko'rgan edi.
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import io
 
-from services import extract_text_from_document, _looks_binary
+from services.ai import extract_text_from_document, _looks_binary
 
 
 def make_xlsx():

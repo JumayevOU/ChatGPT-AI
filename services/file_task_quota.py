@@ -9,7 +9,7 @@ BIR MARTA to'laydi. Fayl umuman chiqmasa, urinish bekor hisoblanadi.
 Hisob ball byudjetidan ALOHIDA (config.DAILY_FILE_LIMIT_FREE) — shuning
 uchun kunlik fayl limiti tugagach ham oddiy suhbat ishlashda davom etadi.
 """
-from database import check_and_consume_file_quota, refund_file_quota
+from db.database import check_and_consume_file_quota, refund_file_quota
 
 
 class FileTaskQuota:

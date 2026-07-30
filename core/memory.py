@@ -17,7 +17,7 @@ user_last_action_ts:  Dict[int, float]           = {}
 # --------------------------------------------------
 # Telegram uzun xabarni (>4096 belgi) bir necha qismga bo'lib yuboradi.
 # Bu bufer o'sha qismlarni chat_id bo'yicha yig'ib turadi va ular BITTA
-# so'rov sifatida qayta ishlanishini ta'minlaydi (handlers_messages.py
+# so'rov sifatida qayta ishlanishini ta'minlaydi (handlers/messages.py
 # ichidagi handle_text / _process_merged_text bilan birga ishlaydi).
 #
 # Struktura (har bir chat_id uchun):

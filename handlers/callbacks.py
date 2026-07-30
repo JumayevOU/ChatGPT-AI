@@ -1,17 +1,17 @@
 import time
 import asyncio
 from aiogram.types import CallbackQuery
-from config import MAX_MANUAL_RETRIES, MAX_AUTO_RETRIES, AUTO_BACKOFFS, USER_COOLDOWN
-from loader import logger, bot
-from memory import (
+from core.config import MAX_MANUAL_RETRIES, MAX_AUTO_RETRIES, AUTO_BACKOFFS, USER_COOLDOWN
+from core.loader import logger, bot
+from core.memory import (
     failed_requests, user_last_action_ts,
     set_ongoing, is_ongoing, release_ongoing,
     clear_failed_request
 )
-from services import get_gpt_reply, safe_update_history
-from helpers import make_retry_keyboard
+from services.ai import get_gpt_reply, safe_update_history
+from handlers.helpers import make_retry_keyboard
 
-from handlers_messages import process_stream_draft
+from handlers.messages import process_stream_draft
 
 # --------------------------------------------------
 # 1. RETRY HANDLER (Qayta urinish)

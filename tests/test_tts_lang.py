@@ -1,19 +1,26 @@
 """TTS til aniqlash va ovoz tanlash tekshiruvi.
-Ishga tushirish: python test_tts_lang.py
+Ishga tushirish: python tests/test_tts_lang.py
 
 Nega kerak: ovoz "uz-UZ-MadinaNeural" da qattiq belgilangan edi, ruscha
 matn berilganda Edge umuman audio qaytarmasdi ("No audio was received")
 va foydalanuvchi ovozli javobsiz qolardi.
 
 Tarmoqqa chiqadigan qism (haqiqiy sintez) faqat --live bilan ishlaydi:
-    python test_tts_lang.py --live
+    python tests/test_tts_lang.py --live
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import os
 import sys
 import tempfile
 
-from services import (
+from services.ai import (
     detect_speech_lang, clean_text_for_speech, text_to_speech, _TTS_VOICES,
 )
 
@@ -90,4 +97,4 @@ if __name__ == "__main__":
         print("\ntts_lang: barcha tekshiruvlar o'tdi (jonli sintez bilan).")
     else:
         print("\ntts_lang: barcha tekshiruvlar o'tdi (3/3). "
-              "Jonli sintez uchun: python test_tts_lang.py --live")
+              "Jonli sintez uchun: python tests/test_tts_lang.py --live")

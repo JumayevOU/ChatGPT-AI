@@ -6,7 +6,7 @@ from typing import List, Dict
 # KONFIGURATSIYA
 # --------------------------------------------------
 try:
-    from config import SYSTEM_PROMPT, CONTEXT_WINDOW
+    from core.config import SYSTEM_PROMPT, CONTEXT_WINDOW
 except ImportError:
     SYSTEM_PROMPT   = "Siz foydali yordamchisiz."
     CONTEXT_WINDOW  = 12

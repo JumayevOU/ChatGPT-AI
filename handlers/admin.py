@@ -17,12 +17,12 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 
-from keyboards import admin_keyboard
-from config import (
+from core.keyboards import admin_keyboard
+from core.config import (
     DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
     MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE,
 )
-import database as database_module
+from db import database as database_module
 
 from zoneinfo import ZoneInfo  # Python 3.9+
 

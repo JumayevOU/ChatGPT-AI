@@ -1,9 +1,16 @@
 """file_task_quota.FileTaskQuota uchun qo'lda ishga tushiriladigan tekshiruv.
-Ishga tushirish: python test_file_task_quota.py
+Ishga tushirish: python tests/test_file_task_quota.py
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
-import file_task_quota
+from services import file_task_quota
 
 
 class FakeQuota:

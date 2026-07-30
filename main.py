@@ -2,23 +2,23 @@ import asyncio
 from aiogram import types, F, Router
 from aiogram.filters import CommandStart
 from aiogram.methods import DeleteWebhook
-from loader import dp, bot, logger
-from database import create_db_pool, create_users_table, create_history_table
-import database
-import admin as admin_module
-from helpers import ensure_pin_column, notify_inactive_users
-from handlers_messages import (
+from core.loader import dp, bot, logger
+from db.database import create_db_pool, create_users_table, create_history_table
+from db import database
+from handlers import admin as admin_module
+from handlers.helpers import ensure_pin_column, notify_inactive_users
+from handlers.messages import (
     handle_start, handle_text, handle_photo, handle_document, handle_voice,
     router as generating_state_router,
 )
-from handlers_callbacks import handle_retry_callback
-from utils.history import init_db
-from memory import start_cleanup_task
+from handlers.callbacks import handle_retry_callback
+from db.history import init_db
+from core.memory import start_cleanup_task
 from aiogram.filters import Command
-from profile import handle_profile
-from database import ensure_profile_columns
+from handlers.profile import handle_profile
+from db.database import ensure_profile_columns
 
-from guest_handlers import router as guest_router
+from handlers.guest import router as guest_router
 
 general_router = Router(name="general")
 

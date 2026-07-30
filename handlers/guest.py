@@ -10,8 +10,8 @@ import aiohttp
 from aiogram import Router
 from aiogram.types import Message, FSInputFile
 
-from loader import bot, logger
-from config import (
+from core.loader import bot, logger
+from core.config import (
     BOT_TOKEN,
     MESSAGE_COST_TEXT,
     MESSAGE_COST_PHOTO,
@@ -19,10 +19,10 @@ from config import (
     MESSAGE_COST_VOICE,
     message_cost, pick_reasoning_effort,
 )
-from database import has_started, check_and_consume_quota, refund_quota
-from handlers_messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed
-from helpers import notify_watchers
-from services import (
+from db.database import has_started, check_and_consume_quota, refund_quota
+from handlers.messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed
+from handlers.helpers import notify_watchers
+from services.ai import (
     get_gpt_reply,
     get_vision_reply,
     extract_text_from_document,
@@ -35,12 +35,12 @@ router = Router()
 
 MAX_GUEST_REPLY_LEN = 3800
 
-# Oddiy handlers_messages.py dagi handle_document bilan bir xil chegara —
+# Oddiy handlers/messages.py dagi handle_document bilan bir xil chegara —
 # guest oqimida ham 5 MB dan katta fayllarni rad etamiz.
 GUEST_DOCUMENT_MAX_SIZE = 5 * 1024 * 1024
 
-# Har bir content-type uchun kunlik kvota narxi (config.py dagi bir xil
-# konstantalar — handlers_messages.py bilan mos kelishi uchun).
+# Har bir content-type uchun kunlik kvota narxi (core/config.py dagi bir xil
+# konstantalar — handlers/messages.py bilan mos kelishi uchun).
 _GUEST_CONTENT_COST = {
     "text": MESSAGE_COST_TEXT,
     "photo": MESSAGE_COST_PHOTO,
@@ -49,7 +49,7 @@ _GUEST_CONTENT_COST = {
 }
 
 # Premium tg-emoji/<tg-thinking> FAQAT sendRichMessageDraft orqali, HAQIQIY
-# chat_id'ga draft yozilganda ishlaydi (handlers_messages.py dagi
+# chat_id'ga draft yozilganda ishlaydi (handlers/messages.py dagi
 # emoji_animator shuni ishlatadi). Guest chaqiruvida bunday chat_id —
 # caller_chat_id — bo'lsa, xuddi shu premium ko'rinishga urinamiz
 # (_run_guest_chat_status_animator). Bo'lmasa (masalan faqat guest inline
@@ -63,7 +63,7 @@ _RICH_DRAFT_FAILURE_LIMIT = 2
 
 
 def _guest_status_text(content_type: str) -> str:
-    """content-type'ga mos status matni — handlers_messages.py dagi
+    """content-type'ga mos status matni — handlers/messages.py dagi
     STATUS_TEXTS_BY_TYPE bilan bir xil ro'yxatdan (birinchi fraza),
     shunda "o'ylayapman" holati oddiy va guest rejimda bir xil ko'rinadi."""
     return STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])[0]
@@ -71,7 +71,7 @@ def _guest_status_text(content_type: str) -> str:
 
 def _guest_status_frame(content_type: str, elapsed: float) -> str:
     """Berilgan lahzadagi status matnini (aylanuvchi fraza + miltillovchi
-    nuqtalar + o'tgan vaqt) qaytaradi — handlers_messages.py dagi
+    nuqtalar + o'tgan vaqt) qaytaradi — handlers/messages.py dagi
     emoji_animator'ning "fallback" (draft'siz) rejimi bilan bir xil ritmda.
 
     DIQQAT: bitta \\n YETARLI EMAS — guest javoblari answerGuestQuery/
@@ -113,7 +113,7 @@ async def _run_guest_status_animator(edit_fn, content_type: str, stop_event: asy
 
 
 def _guest_thinking_html(content_type: str, elapsed: float) -> str:
-    """handlers_messages.py dagi (process_stream_draft ichidagi) _thinking_html
+    """handlers/messages.py dagi (process_stream_draft ichidagi) _thinking_html
     bilan bir xil — tg-thinking/tg-emoji premium status ko'rinishi."""
     status_texts = STATUS_TEXTS_BY_TYPE.get(content_type, STATUS_TEXTS_BY_TYPE["text"])
     emoji_id = EMOJI_ID_BY_TYPE.get(content_type, EMOJI_ID_BY_TYPE["text"])
@@ -132,7 +132,7 @@ async def _run_guest_chat_status_animator(
     send_draft_fn, content_type: str, fallback_edit_fn, stop_event: asyncio.Event
 ) -> None:
     """Guest chaqiruvida caller_chat_id'ga to'g'ridan-to'g'ri yozish imkoni
-    bo'lganda — xuddi handlers_messages.py dagi emoji_animator kabi avval
+    bo'lganda — xuddi handlers/messages.py dagi emoji_animator kabi avval
     premium tg-thinking draft bilan urinadi (send_draft_fn(html) — True/False
     qaytaradi); ketma-ket rad etilsa (RICH_DRAFT_FAILURE_LIMIT) oddiy matn
     tahrirlashga (fallback_edit_fn — chat_fallback_msg yaratish/tahrirlash)
@@ -176,7 +176,7 @@ async def _run_guest_chat_status_animator(
 def _detect_guest_content_type(message: Message) -> str:
     """Guest chaqiruv xabarining content-type'ini aniqlaydi.
 
-    Oddiy handlers_messages.py dagi F.photo/F.document/F.voice filtrlariga
+    Oddiy handlers/messages.py dagi F.photo/F.document/F.voice filtrlariga
     mos keladi, faqat bu yerda bitta universal handler (`guest_message`)
     ichida qo'lda tekshiriladi, chunki Guest Mode barcha content-type'lar
     uchun bitta yagona update turi orqali keladi.
@@ -266,7 +266,7 @@ else:
         return text
 
     async def _raw_send_rich_draft(chat_id: int, draft_id: int, html_content: str) -> bool:
-        """sendRichMessageDraft'ga xom HTTP so'rov — handlers_messages.py dagi
+        """sendRichMessageDraft'ga xom HTTP so'rov — handlers/messages.py dagi
         _send_rich_draft/_telegram_api_request DEBUG darajasida logga yozadi
         (asosiy botda har 0.6-2.4s'da chaqirilgani uchun shovqin bo'lmasin
         deb), shu sabab bu yerda sabab ko'rinmay qolgan edi. Guest chaqiruvi
@@ -477,7 +477,7 @@ else:
 
         v2 TUZATISH: avvalgi versiyada faqat matnli so'rovlar ishlardi.
         Endi content-type aniqlanadi va rasm/hujjat/ovoz uchun ham xuddi
-        oddiy handlers_messages.py dagi pipeline'lar ishlatiladi:
+        oddiy handlers/messages.py dagi pipeline'lar ishlatiladi:
           photo    → get_vision_reply()               (vision)
           document → extract_text_from_document() + get_gpt_reply()
           voice    → speech_to_text() + get_gpt_reply()
@@ -569,7 +569,7 @@ else:
                 forced_text = "⚠️ Fayl hajmi juda katta. Iltimos, 5 MB gacha yuboring."
             else:
                 if content_type == "text":
-                    # Oddiy handlers_messages.py bilan bir xil mantiq: matn
+                    # Oddiy handlers/messages.py bilan bir xil mantiq: matn
                     # murakkabligiga qarab reasoning darajasi (va narxi) tanlanadi.
                     cost = message_cost("text", pick_reasoning_effort(clean_query))
                 else:
@@ -597,7 +597,7 @@ else:
         #
         #   A) caller_chat_id mavjud — o'sha chatga to'g'ridan-to'g'ri
         #      premium tg-thinking DRAFT (sendRichMessageDraft) bilan
-        #      urinamiz, xuddi oddiy handlers_messages.py dagi
+        #      urinamiz, xuddi oddiy handlers/messages.py dagi
         #      emoji_animator kabi. Draft — HAQIQIY xabar EMAS, ephemeral
         #      ko'rsatkich; ketma-ket rad etilsagina (ichkarida
         #      RICH_DRAFT_FAILURE_LIMIT) chat_fallback_msg degan HAQIQIY
@@ -660,12 +660,12 @@ else:
         # --------------------------------------------------
         # 2. AI javobni olish (agar /start yoki kredit bo'yicha
         # bloklanmagan bo'lsa). Content-type'ga qarab tegishli pipeline
-        # tanlanadi — xuddi handlers_messages.py dagi handle_photo/
+        # tanlanadi — xuddi handlers/messages.py dagi handle_photo/
         # handle_document/handle_voice bilan bir xil mantiq.
         # --------------------------------------------------
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_gpt_reply()/get_vision_reply() ularni SYSTEM promptga o'zi
-        # qo'shadi (services.py). Ularni user matniga yana qo'shish faqat
+        # qo'shadi (services/ai.py). Ularni user matniga yana qo'shish faqat
         # asosiy savolni "ko'mib" tashlaydi va token isrof qiladi.
         full_text = ""
         recognized_text: str | None = None
@@ -695,7 +695,7 @@ else:
                     # Guest rejimda fayl bilan ishlash tool'i mavjud emas
                     # (bu yerda hujjat qaytarib bo'lmaydi), shuning uchun
                     # o'qib bo'lmagan formatda halol ravishda rad etamiz.
-                    # [BINARY] — services.py binar faylni shu marker bilan
+                    # [BINARY] — services/ai.py binar faylni shu marker bilan
                     # belgilaydi; uni promptga qo'shib yuborish mumkin emas.
                     if (
                         not extracted_text

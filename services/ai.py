@@ -20,11 +20,11 @@ if shutil.which("ffmpeg"):
 else:
     AudioSegment.converter = "ffmpeg.exe"
 
-from file_task_quota import FileTaskQuota
-from sandbox import run_in_sandbox
+from services.file_task_quota import FileTaskQuota
+from services.sandbox import run_in_sandbox
 
 try:
-    from config import (
+    from core.config import (
         GPT_MODEL, MODEL_FALLBACKS, CONTEXT_WINDOW, OPENAI_API_KEY,
         REQUEST_TIMEOUT, CONCISE_INSTRUCTION, STRICT_MATH_RULES,
         build_system_prompt, build_request_params, pick_reasoning_effort,
@@ -48,8 +48,8 @@ except ImportError:
     def pick_reasoning_effort(text: str, force_deep: bool = False) -> str:
         return "low"
 
-from loader import openai_client, logger
-from utils.history import update_chat_history
+from core.loader import openai_client, logger
+from db.history import update_chat_history
 
 # ─────────────────────────────────────────────────────────────
 # YORDAMCHI: TARIX FUNKSIYALARI
@@ -57,7 +57,7 @@ from utils.history import update_chat_history
 
 async def clear_chat_history(chat_id: int):
     try:
-        from utils.history import clear_history
+        from db.history import clear_history
         await clear_history(chat_id)
     except Exception as e:
         logger.error(f"Xotirani tozalashda xatolik: {e}")
@@ -74,7 +74,7 @@ async def safe_update_history(chat_id: int, content: str, role: str = "user"):
 
 async def safe_get_chat_history(chat_id: int, limit: int = CONTEXT_WINDOW) -> List[Dict[str, str]]:
     try:
-        from utils.history import get_chat_history
+        from db.history import get_chat_history
         hist = await get_chat_history(chat_id, limit=limit)
         return hist[-limit:] if isinstance(hist, list) else []
     except Exception as e:
@@ -488,7 +488,7 @@ async def _open_response_stream(stack: AsyncExitStack, candidate_models: List[st
     """
     `candidate_models` ro'yxatini ketma-ket sinaydi — asosiy model 404
     (mavjud emas) yoki 429 (limitga yetgan) qaytarsa, keyingi zaxira
-    modelga o'tadi (config.py'dagi MODEL_FALLBACKS). Muvaffaqiyatli ochilgan
+    modelga o'tadi (core/config.py'dagi MODEL_FALLBACKS). Muvaffaqiyatli ochilgan
     oqimni (uni yopish `stack` orqali kafolatlanadi) va qaysi model
     ishlaganini qaytaradi.
     """
@@ -629,7 +629,7 @@ _TOOLS = [
 ]
 
 # Hujjat DIZAYNI bo'yicha qo'llanma. Bu tool tavsifining bir qismi bo'ladi
-# (config.py'dagi umumiy SYSTEM promptga EMAS) — chunki u faqat fayl bilan
+# (core/config.py'dagi umumiy SYSTEM promptga EMAS) — chunki u faqat fayl bilan
 # ishlaydigan oqimlarda kerak, va tool ro'yxati barqaror bo'lgani uchun
 # prompt caching orqali deyarli tekinga tushadi.
 #
@@ -957,7 +957,7 @@ async def get_openai_reply(
 
     messages.append({"role": "user", "content": message_text})
 
-    # Reasoning effort xabar murakkabligiga qarab tanlanadi (config.py:
+    # Reasoning effort xabar murakkabligiga qarab tanlanadi (core/config.py:
     # pick_reasoning_effort) — soddasiga tez/arzon, murakkabiga chuqurroq.
     base_params = build_request_params(user_text=message_text, model=model)
     initial_model = base_params.pop("model")

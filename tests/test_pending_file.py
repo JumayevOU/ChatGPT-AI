@@ -1,14 +1,21 @@
 """Fayl + alohida xabardagi ko'rsatma birlashishini tekshiradi.
-Ishga tushirish: python test_pending_file.py
+Ishga tushirish: python tests/test_pending_file.py
 
 Ssenariy: foydalanuvchi boshlig'idan kelgan faylni botga UZATADI (uzatilgan
 faylga izoh yozib bo'lmaydi), keyin alohida xabar bilan "31.12.99 ni 0 qil"
 deb yozadi. Bot ikkalasini bitta so'rov sifatida ko'rishi kerak.
 """
+
+# Testlar `python tests/test_x.py` bilan ishga tushiriladi — bunda
+# sys.path'ga tests/ papkasi tushadi, loyiha ildizi emas. Paketlar
+# (core, db, handlers, services) topilishi uchun ildizni qo'shamiz.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import time
 
-import handlers_messages as hm
+from handlers import messages as hm
 
 
 async def main():

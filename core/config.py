@@ -433,7 +433,7 @@ MAX_TEXT_LENGTH: int = 60000
 #  8) KUNLIK FOYDALANISH LIMITI (DAILY USAGE LIMIT)
 # ═══════════════════════════════════════════════════════════════
 # 'free' rejimidagi foydalanuvchilar uchun kunlik ball byudjeti. Har kuni
-# 00:00 da (Toshkent vaqti) nolanadi — database.py'dagi check_and_consume_quota().
+# 00:00 da (Toshkent vaqti) nolanadi — db/database.py'dagi check_and_consume_quota().
 # Admin va superadmin'ga bu limit tegmaydi.
 #
 # ⚠️  DIQQAT: Luna arzon ($1 input / $6 output per 1M token), LEKIN reasoning

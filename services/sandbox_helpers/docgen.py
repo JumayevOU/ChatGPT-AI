@@ -132,7 +132,7 @@ def hex_rgb(h):
 
 
 if __name__ == "__main__":
-    # Qo'lda ishga tushiriladigan tekshiruv: python docgen.py
+    # Qo'lda ishga tushiriladigan tekshiruv: python services/sandbox_helpers/docgen.py
     from reportlab.lib.pagesizes import landscape
     from reportlab.lib.units import inch
     from reportlab.pdfgen import canvas

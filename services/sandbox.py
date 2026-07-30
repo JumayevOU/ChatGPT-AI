@@ -1,7 +1,7 @@
 """GPT yozgan Python kodini izolyatsiya qilingan holda bajaradi.
 
 Bu modul FAQAT kod bajarish bilan shug'ullanadi — Telegram yoki OpenAI
-haqida hech narsa bilmaydi. Chaqiruvchi (services.py) kodni va (bo'lsa)
+haqida hech narsa bilmaydi. Chaqiruvchi (services/ai.py) kodni va (bo'lsa)
 kirish faylini beradi, natijada muvaffaqiyat/xato va yaratilgan fayllar
 ro'yxatini oladi.
 
@@ -252,7 +252,7 @@ def _kill_process_tree(proc) -> None:
 
 if __name__ == "__main__":
     async def _demo():
-        """Qo'lda ishga tushiriladigan tekshiruv: `python sandbox.py`"""
+        """Qo'lda ishga tushiriladigan tekshiruv: `python services/sandbox.py`"""
         # 1) Oddiy fayl yaratish
         r = await run_in_sandbox(
             "with open('output/result.txt', 'w', encoding='utf-8') as f:\n"
