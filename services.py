@@ -1214,15 +1214,116 @@ async def speech_to_text(file_path: str) -> str:
             pass
 
 
+# ─────────────────────────────────────────────────────────────
+# TTS: TIL ANIQLASH VA OVOZ TANLASH
+#
+# Ilgari ovoz qattiq "uz-UZ-MadinaNeural" edi. Ruscha matn o'zbek
+# ovoziga berilganda Edge umuman audio qaytarmaydi va foydalanuvchi
+# javobsiz qoladi — loglardagi "No audio was received" aynan shu.
+# Endi javob matnining tili aniqlanib, o'sha tilning ONA TILI
+# so'zlovchisi ovozi tanlanadi (aksentsiz, tabiiy talaffuz).
+# ─────────────────────────────────────────────────────────────
+
+# Har bir til uchun (ovoz, tezlik). Tezlik alohida: o'zbek ovozi
+# sekinlashtirilmasa tez va tushunarsiz eshitiladi, rus/ingliz ona tili
+# ovozlari esa tabiiy tezligida eng aniq chiqadi — sekinlashtirilsa
+# sun'iy "cho'zilgan" bo'lib qoladi.
+_TTS_VOICES = {
+    "uz": ("uz-UZ-MadinaNeural", "-10%"),
+    "ru": ("ru-RU-SvetlanaNeural", "+0%"),
+    "en": ("en-US-JennyNeural", "+0%"),
+}
+# Tanlangan ovoz ishlamay qolsa — ko'p tilli zaxira ovoz.
+_TTS_FALLBACK_VOICE = "en-US-AvaMultilingualNeural"
+
+# O'zbek kirillchasini rus tilidan ajratadigan harflar (rus alifbosida yo'q).
+_UZ_CYRILLIC_MARKERS = set("ўғқҳЎҒҚҲ")
+
+# Lotin yozuvida tilni ajratish uchun eng keng tarqalgan xizmat so'zlari.
+_UZ_WORDS = {
+    "va", "bu", "uchun", "bilan", "ham", "emas", "yoki", "lekin", "kerak",
+    "mumkin", "qilish", "bo", "boladi", "bolsa", "siz", "men", "biz", "ta",
+    "yil", "keyin", "juda", "faqat", "yana", "qanday", "nima", "bor", "yoq",
+    "shu", "har", "eng", "agar", "deb", "kabi", "hamda", "ushbu",
+}
+_EN_WORDS = {
+    "the", "and", "is", "are", "to", "of", "in", "it", "you", "for", "with",
+    "that", "this", "on", "as", "be", "at", "or", "your", "can", "will",
+    "have", "from", "not", "but", "they", "was", "we", "an", "by", "if",
+}
+
+
+def detect_speech_lang(text: str) -> str:
+    """Matn tilini aniqlaydi: 'uz', 'ru' yoki 'en'.
+
+    Ataylab yengil evristika — TTS uchun bizga faqat uchta variantdan
+    bittasi kerak, tashqi kutubxona qo'shish ortiqcha bo'lardi.
+    """
+    if not text:
+        return "uz"
+
+    cyrillic = sum(1 for ch in text if "Ѐ" <= ch <= "ӿ")
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+
+    if cyrillic > latin:
+        # O'zbek kirillchasi ham bo'lishi mumkin — unga xos harflar bilan
+        # ajratamiz (rus alifbosida ў/ғ/қ/ҳ yo'q).
+        return "uz" if _UZ_CYRILLIC_MARKERS & set(text) else "ru"
+
+    words = set(re.findall(r"[a-z']+", text.lower()))
+    uz_score = len(words & _UZ_WORDS)
+    en_score = len(words & _EN_WORDS)
+    # O'zbek lotinchasiga xos apostrofli harflar (oʻ, gʻ) kuchli belgi.
+    if re.search(r"[oOgG][ʻ'`]", text):
+        uz_score += 2
+    if en_score > uz_score:
+        return "en"
+    return "uz"
+
+
+_MD_MARKERS_RE = re.compile(r"[*_#>`~|]+")
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # emoji, bayroqlar, piktogrammalar
+    "☀-➿"           # turli belgilar va dingbatlar
+    "⬀-⯿"           # strelka/geometrik belgilar
+    "←-⇿"           # strelkalar
+    "️"                  # variation selector
+    "‍"                  # zero-width joiner
+    "]"
+)
+
+
+def clean_text_for_speech(text: str) -> str:
+    """Ovozga berishdan oldin matnni tozalaydi.
+
+    Belgilar (markdown yulduzchalari, emoji, HTML teglar) ovozda
+    "yulduzcha", "reshotka" bo'lib o'qilib, javobni tushunarsiz qiladi.
+    """
+    text = text.replace("`", "'")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("$$", "").replace("$", "")
+    text = _EMOJI_RE.sub("", text)
+    text = _MD_MARKERS_RE.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 async def text_to_speech(text: str, filename: str) -> str:
-    text = text.replace("'", "'").replace("`", "'")
-    clean_text_for_speech = re.sub(r'<[^>]+>', '', text)
-    clean_text_for_speech = clean_text_for_speech.replace("$$", "").replace("$", "")
-    VOICE = "uz-UZ-MadinaNeural"
-    try:
-        communicate = edge_tts.Communicate(clean_text_for_speech, VOICE, rate="-10%")
-        await communicate.save(filename)
-        return filename
-    except Exception as e:
-        logger.error(f"TTS xatosi: {e}")
+    speech_text = clean_text_for_speech(text)
+    if not speech_text:
         return None
+
+    lang = detect_speech_lang(speech_text)
+    voice, rate = _TTS_VOICES.get(lang, _TTS_VOICES["uz"])
+    logger.info(f"[TTS] til={lang} ovoz={voice}")
+
+    for attempt_voice, attempt_rate in ((voice, rate), (_TTS_FALLBACK_VOICE, "+0%")):
+        try:
+            communicate = edge_tts.Communicate(speech_text, attempt_voice, rate=attempt_rate)
+            await communicate.save(filename)
+            return filename
+        except Exception as e:
+            logger.warning(f"TTS xatosi (ovoz={attempt_voice}): {e}")
+
+    logger.error("TTS: hech qanday ovoz bilan audio olinmadi")
+    return None
