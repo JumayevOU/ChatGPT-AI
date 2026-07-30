@@ -1,5 +1,39 @@
 # Fayl bilan ishlash (Advanced Data Analysis) — dizayn
 
+> **HOLAT: amalga oshirildi (2026-07-28).** Bitta muhim arxitektura
+> o'zgarishi bilan: E2B o'rniga kod bot konteynerining O'ZIDA, tozalangan
+> muhit + resurs chegaralari bilan bajariladi (`sandbox.py`). Sabab va
+> xavfsizlik oqibatlari pastda, "Amalga oshirishdagi og'ish" bo'limida.
+
+## Amalga oshirishdagi og'ish — E2B o'rniga mahalliy izolyatsiya
+
+Rejalashtirilganda sandbox E2B (tashqi xizmat) bo'lishi kerak edi. Amalda
+u ishlatilmadi, chunki: (a) E2B hisobi va qo'lda quriladigan custom
+template talab qilinadi — bu "push qilgan zahoti ishlasin" talabiga zid;
+(b) har bajarilish uchun tashqi xizmatga to'lov va bog'liqlik qo'shiladi.
+
+O'rniga `sandbox.py` kodni bot konteynerining ichida, alohida jarayon
+sifatida bajaradi. Nima himoyalangan:
+
+| Talab | Holat | Qanday |
+|---|---|---|
+| #6 CPU/RAM/timeout chegaralari | ✅ | `RLIMIT_CPU/AS/FSIZE/NPROC` + 60s qattiq timeout |
+| #7 faqat vaqtinchalik papka | ✅ | `tempfile.mkdtemp()`, cwd o'sha yerda, oxirida `rmtree` |
+| #8 tizim fayllariga kirish taqiqlansin | ⚠️ qisman | Muhit o'zgaruvchilari TOZALANADI (BOT_TOKEN / OPENAI_API_KEY / DATABASE_URL bola-jarayonga umuman uzatilmaydi — test bilan tasdiqlangan). Lekin fayl tizimi o'qish uchun ochiq qoladi. |
+| #9 kirish fayli sandbox ichiga | ✅ | `input.<kengaytma>` sifatida ish papkasiga yoziladi |
+| #10 natija fayllar qaytarilsin | ✅ | `output/` papkasidan o'qib, Telegram'ga yuboriladi |
+| #11 vaqtinchalik fayllar o'chirilsin | ✅ | `finally: shutil.rmtree(...)` — xato/timeoutda ham |
+| #4 Docker izolyatsiyasi | ❌ | Railway'da Docker-in-Docker mavjud emas |
+| #5 internetga chiqmasin | ❌ | Namespace/konteynersiz bloklab bo'lmaydi |
+
+**Qolgan xavf va nega u qabul qilinadigan darajada:** GPT yozgan kod (agar
+prompt-injection orqali buzilsa) tarmoqqa chiqishi mumkin. Lekin muhit
+tozalangani uchun o'g'irlanadigan sir yo'q, timeout esa har qanday
+suiiste'molni 60 soniya bilan cheklaydi. Agar keyinchalik to'liq
+izolyatsiya kerak bo'lsa — `sandbox.run_in_sandbox()` funksiyasining
+imzosi o'zgarmagan holda ichini E2B yoki alohida VPS'dagi Docker bilan
+almashtirish yetarli (chaqiruvchi kod umuman tegilmaydi).
+
 ## Maqsad
 
 Botga ChatGPT Plus'dagi "Advanced Data Analysis" (Code Interpreter) ga o'xshash

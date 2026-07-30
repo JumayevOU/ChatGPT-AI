@@ -448,6 +448,12 @@ MESSAGE_COST_PHOTO: int = 180        # rasm tahlili (vision)
 MESSAGE_COST_DOCUMENT: int = 80      # hujjat (PDF/DOCX) tahlili
 MESSAGE_COST_VOICE: int = 50         # ovozli xabar (STT + GPT + TTS)
 
+# Fayl yaratish/tahrirlash (sandbox.py orqali Python kod bajarish).
+# Eng qimmat amal: bitta so'rovda GPT bir necha marta kod yozib, bir necha
+# marta sandbox ishga tushishi mumkin. Narx bir MARTA yechiladi
+# (file_task_quota.FileTaskQuota), muvaffaqiyatsiz bo'lsa qaytariladi.
+MESSAGE_COST_FILE_TASK: int = 250
+
 
 def message_cost(kind: str, effort: str = REASONING_EFFORT_DEFAULT) -> int:
     """Xabar turi va reasoning darajasiga qarab ball narxini qaytaradi."""
@@ -457,6 +463,8 @@ def message_cost(kind: str, effort: str = REASONING_EFFORT_DEFAULT) -> int:
         return MESSAGE_COST_DOCUMENT
     if kind == "voice":
         return MESSAGE_COST_VOICE
+    if kind == "file_task":
+        return MESSAGE_COST_FILE_TASK
     if effort in ("medium", "high", "xhigh", "max"):
         return MESSAGE_COST_TEXT_DEEP
     return MESSAGE_COST_TEXT

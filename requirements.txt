@@ -12,3 +12,16 @@ youtube-transcript-api
 ddgs
 aiosqlite
 python-docx
+
+# Fayl yaratish/tahrirlash uchun (sandbox.py ichida GPT yozgan kod
+# ishlatadi). Sandbox oldindan o'rnatilgan kutubxonalarga tayanadi —
+# runtime'da pip install qilinmaydi.
+openpyxl
+xlrd
+pandas
+python-pptx
+reportlab
+pypdf
+matplotlib
+beautifulsoup4
+lxml

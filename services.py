@@ -20,10 +20,14 @@ if shutil.which("ffmpeg"):
 else:
     AudioSegment.converter = "ffmpeg.exe"
 
+from file_task_quota import FileTaskQuota
+from sandbox import run_in_sandbox
+
 try:
     from config import (
         GPT_MODEL, MODEL_FALLBACKS, CONTEXT_WINDOW, OPENAI_API_KEY,
         REQUEST_TIMEOUT, CONCISE_INSTRUCTION, STRICT_MATH_RULES,
+        MESSAGE_COST_FILE_TASK,
         build_system_prompt, build_request_params, pick_reasoning_effort,
     )
 except ImportError:
@@ -35,6 +39,7 @@ except ImportError:
     MODEL_FALLBACKS = []
     REQUEST_TIMEOUT = 60.0
     CONTEXT_WINDOW = 12
+    MESSAGE_COST_FILE_TASK = 250
 
     def build_system_prompt() -> str:
         return "You are a helpful assistant."
@@ -546,6 +551,60 @@ _TOOLS = [
     }
 ]
 
+# Fayl yaratish/tahrirlash tool'i — `_TOOLS`dan ALOHIDA saqlanadi, chunki u
+# faqat natijani yetkazib bera oladigan oqimlarda (output_files ro'yxati
+# berilganda) biriktiriladi. Guest rejimda, masalan, biriktirilmaydi —
+# u yerda hujjat yuborib bo'lmaydi, shuning uchun tool'ni ko'rsatish faqat
+# behuda kod bajarilishiga olib kelardi.
+_FILE_TASK_TOOL = {
+    "type": "function",
+    "name": "run_python_sandbox",
+    "description": (
+        "Fayl YARATISH yoki foydalanuvchi yuborgan faylni TAHRIRLASH kerak "
+        "bo'lganda Python kodi yozib, shu tool orqali bajaring. Masalan: "
+        "matndan PDF/Word/Excel yaratish, Excel katakchalarini o'zgartirish, "
+        "CSV'ni saralash yoki filtrlash, diagramma (grafik) chizish, "
+        "hujjatlarni birlashtirish, ZIP arxiv yasash, formatdan formatga "
+        "o'girish.\n\n"
+        "QACHON ISHLATMASLIK KERAK: agar foydalanuvchi shunchaki fayl "
+        "haqida savol bersa yoki mazmunini so'rasa — bu tool KERAK EMAS, "
+        "oddiy matnli javob bering.\n\n"
+        "MUHIT:\n"
+        "- Kod joriy papkada (cwd) ishlaydi. Foydalanuvchi fayl yuborgan "
+        "bo'lsa, u shu papkada `input.<kengaytma>` nomi bilan turadi "
+        "(masalan input.xlsx, input.csv, input.pdf).\n"
+        "- Natija fayl(lar)ini ALBATTA `output/` papkasiga yozing — faqat "
+        "o'sha papkadagi fayllar foydalanuvchiga yuboriladi.\n"
+        "- Fayl nomini mazmunli qo'ying (masalan output/hisobot.pdf).\n"
+        "- Mavjud kutubxonalar: pandas, openpyxl, xlrd, python-docx, "
+        "python-pptx, pypdf, reportlab, matplotlib, PyMuPDF (fitz), "
+        "beautifulsoup4, lxml va standart kutubxona (json, csv, zipfile, "
+        "sqlite3, xml, re). Internetga chiqish YO'Q — hech narsa yuklab "
+        "olmang va pip install qilmang.\n"
+        "- Kirill/lotin matn uchun faylni har doim encoding='utf-8' bilan "
+        "yozing. PDF'da o'zbekcha harflar kerak bo'lsa, reportlab'ning "
+        "o'rnatilgan Helvetica shrifti lotin harflarini qo'llab-quvvatlaydi.\n"
+        "- Kod tugagach print() bilan qisqacha nima qilganingizni yozing.\n\n"
+        "Fayl tuzilishini bilmasangiz, avval uni tekshiradigan qisqa kod "
+        "yuboring (masalan sheet nomlari va birinchi qatorlarni print "
+        "qiling), natijani ko'ring, keyin ikkinchi chaqiriqda haqiqiy "
+        "o'zgartirishni bajaring — bu tool bir xabar davomida bir necha "
+        "marta chaqirilishi mumkin. Kod xato bersa, xato matnini o'qib "
+        "tuzating va qayta chaqiring."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Bajariladigan to'liq Python kodi.",
+            },
+        },
+        "required": ["code"],
+    },
+    "strict": False,
+}
+
 _SYNTHESIS_SYSTEM = """QAT'IY BUYRUQ — ANIQ VA CHUQUR JAVOB YOZ:
 
 0. TIL — ENG MUHIM QOIDA: Yakuniy javobni albatta foydalanuvchining ASL savoli
@@ -578,7 +637,75 @@ _SYNTHESIS_SYSTEM = """QAT'IY BUYRUQ — ANIQ VA CHUQUR JAVOB YOZ:
 5. SANA/VAQT: Agar ma'lumot eskirgan bo'lsa yoki aniq sana topilmasa — buni ham ayt."""
 
 
-async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_MODEL):
+async def _run_file_task(
+    code: str,
+    *,
+    quota: Optional[FileTaskQuota],
+    input_file_bytes: Optional[bytes],
+    input_filename: Optional[str],
+    output_files: Optional[list],
+    round_num: int,
+) -> str:
+    """run_python_sandbox tool chaqiruvini bajaradi.
+
+    Kvotani (bir marta) yechadi, kodni sandbox'da ishga tushiradi va
+    natijani GPT tushunadigan matn sifatida qaytaradi. Yaratilgan
+    fayllarni chaqiruvchining `output_files` ro'yxatiga qo'shadi.
+    """
+    if quota is not None:
+        allowed = await quota.ensure_charged()
+        if not allowed:
+            return (
+                "XATOLIK: foydalanuvchining bugungi krediti tugagan, kod "
+                "bajarilmadi. Boshqa urinmang — foydalanuvchiga kredit "
+                "tugaganini muloyim tushuntiring."
+            )
+
+    logger.info(f"[FileTask] round={round_num}, kod uzunligi={len(code)}")
+    result = await run_in_sandbox(code, input_file_bytes, input_filename)
+
+    if not result.success:
+        logger.info(f"[FileTask] round={round_num} XATO: {result.traceback[:200]}")
+        return (
+            f"XATO — kod bajarilmadi:\n{result.traceback[:3000]}\n\n"
+            "Kodni tuzatib qayta chaqiring."
+        )
+
+    if not result.output_files:
+        return (
+            f"Kod xatosiz bajarildi, LEKIN `output/` papkasida hech qanday "
+            f"fayl yo'q.\nSTDOUT:\n{result.stdout[:1500]}\n\n"
+            "Agar bu tekshiruv (inspeksiya) qadami bo'lsa — davom eting va "
+            "endi haqiqiy faylni yarating. Agar fayl yaratmoqchi bo'lgan "
+            "bo'lsangiz — uni `output/` papkasiga yozganingizga ishonch "
+            "hosil qiling."
+        )
+
+    if quota is not None:
+        quota.mark_success()
+    if output_files is not None:
+        output_files.extend(result.output_files)
+
+    names = ", ".join(f"{n} ({len(b)} bayt)" for n, b in result.output_files)
+    logger.info(f"[FileTask] round={round_num} muvaffaqiyat: {names}")
+    return (
+        f"BAJARILDI. Fayllar yaratildi va foydalanuvchiga avtomatik "
+        f"yuboriladi: {names}\nSTDOUT:\n{result.stdout[:1500]}\n\n"
+        "Endi foydalanuvchiga nima qilganingizni QISQA (1-2 gap) tushuntiring. "
+        "Faylni qanday yuklab olishni tushuntirmang — u allaqachon biriktirilgan."
+    )
+
+
+async def get_openai_reply(
+    chat_id: int,
+    message_text: str,
+    *,
+    model: str = GPT_MODEL,
+    user_id: Optional[int] = None,
+    input_file_bytes: Optional[bytes] = None,
+    input_filename: Optional[str] = None,
+    output_files: Optional[list] = None,
+):
     system_prompt = f"{build_system_prompt()}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"
 
     messages: list = []
@@ -622,6 +749,18 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
     synthesis_injected = False
     resolved_model: Optional[str] = None
 
+    # Fayl tool'i faqat natijani yetkaza oladigan oqimlarda biriktiriladi
+    # (chaqiruvchi `output_files` ro'yxatini bergan bo'lsa). Guest rejimda
+    # bu None bo'ladi — u yerda hujjat yuborib bo'lmaydi.
+    file_task_enabled = output_files is not None
+    active_tools = [*_TOOLS, _FILE_TASK_TOOL] if file_task_enabled else _TOOLS
+    file_quota: Optional[FileTaskQuota] = (
+        FileTaskQuota(user_id, MESSAGE_COST_FILE_TASK)
+        if (file_task_enabled and user_id is not None)
+        else None
+    )
+    file_task_started = False
+
     while True:
         # MUHIM: qidiruv 1-2 bosqichda tugasa ham (model ko'proq tool
         # so'ramasa), keyingi chaqiruvda hali ham `tools` biriktirilgan
@@ -634,7 +773,7 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
         call_kwargs = dict(base_params)
         call_kwargs.update(input=messages, instructions=system_prompt, store=False)
         if attach_tools:
-            call_kwargs.update(tools=_TOOLS, tool_choice="auto")
+            call_kwargs.update(tools=active_tools, tool_choice="auto")
 
         candidate_models = [resolved_model] if resolved_model else [initial_model, *MODEL_FALLBACKS]
 
@@ -651,9 +790,14 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
                         yield event.delta
                     elif et == "response.output_item.added" and getattr(event.item, "type", None) == "function_call":
                         got_function_call = True
-                        if not search_performed:
-                            # Kontent emas — faqat "band" animatsiyasiga signal:
-                            # qidiruv (sekundlab davom etadigan tarmoq so'rovi) boshlanmoqda.
+                        # Kontent emas — faqat "band" animatsiyasiga signal:
+                        # qidiruv yoki fayl vazifasi (sekundlab davom etadi)
+                        # boshlanmoqda.
+                        if getattr(event.item, "name", None) == "run_python_sandbox":
+                            if not file_task_started:
+                                yield "[STATUS]file_task"
+                                file_task_started = True
+                        elif not search_performed:
                             yield "[STATUS]search"
                             search_performed = True
                     elif et == "response.output_item.done" and getattr(event.item, "type", None) == "function_call":
@@ -665,9 +809,13 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
             raise
 
         if not got_function_call:
+            if file_quota is not None:
+                await file_quota.refund_if_unused()
             if final_response.status == "incomplete":
                 logger.warning(f"GPT javobi incomplete tugadi: {final_response.incomplete_details}")
             return
+
+        file_task_ran = False
 
         for call_item in pending_calls:
             try:
@@ -675,20 +823,31 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
             except Exception:
                 args = {}
 
-            primary_query = args.get("primary_query", "")
-            extra_queries = args.get("extra_queries", [])
-
-            if primary_query:
-                logger.info(
-                    f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
-                )
-                search_result = await multi_source_deep_search(
-                    primary_query=primary_query,
-                    extra_queries=extra_queries if extra_queries else None,
-                    fetch_pages=3,
+            if call_item.name == "run_python_sandbox":
+                file_task_ran = True
+                tool_output = await _run_file_task(
+                    args.get("code", ""),
+                    quota=file_quota,
+                    input_file_bytes=input_file_bytes,
+                    input_filename=input_filename,
+                    output_files=output_files,
+                    round_num=tool_round + 1,
                 )
             else:
-                search_result = "Qidiruv so'rovi bo'sh bo'lgani uchun bajarilmadi."
+                primary_query = args.get("primary_query", "")
+                extra_queries = args.get("extra_queries", [])
+
+                if primary_query:
+                    logger.info(
+                        f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
+                    )
+                    tool_output = await multi_source_deep_search(
+                        primary_query=primary_query,
+                        extra_queries=extra_queries if extra_queries else None,
+                        fetch_pages=3,
+                    )
+                else:
+                    tool_output = "Qidiruv so'rovi bo'sh bo'lgani uchun bajarilmadi."
 
             messages.append({
                 "type": "function_call",
@@ -699,8 +858,22 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
             messages.append({
                 "type": "function_call_output",
                 "call_id": call_item.call_id,
-                "output": search_result,
+                "output": tool_output,
             })
+
+        if file_task_ran:
+            # Tool'dan OLDIN yozilgan oraliq matn ("Hozir tayyorlab
+            # beraman...") yakuniy javobga yopishib qolmasligi uchun
+            # ekranni tozalaymiz — yakuniy javob toza boshlanadi.
+            yield "[CLEAR_TEXT]"
+
+            # `_SYNTHESIS_SYSTEM` faqat INTERNET QIDIRUVI natijalarini
+            # formatlash uchun (manbalar ro'yxati, emoji, kamida 3-5 xat
+            # boshi). Fayl vazifasida u mutlaqo noo'rin — javob qisqa
+            # bo'lishi kerak, chunki asosiy natija biriktirilgan faylning
+            # o'zi. Shuning uchun uni qo'shmasdan keyingi bosqichga o'tamiz.
+            tool_round += 1
+            continue
 
         if not synthesis_injected:
             # Birinchi qidiruv natijasi endigina qo'shildi — shu joydan
@@ -714,8 +887,23 @@ async def get_openai_reply(chat_id: int, message_text: str, *, model: str = GPT_
         tool_round += 1
 
 
-async def get_gpt_reply(chat_id: int, user_message: str):
-    async for chunk in get_openai_reply(chat_id, user_message):
+async def get_gpt_reply(
+    chat_id: int,
+    user_message: str,
+    *,
+    user_id: Optional[int] = None,
+    input_file_bytes: Optional[bytes] = None,
+    input_filename: Optional[str] = None,
+    output_files: Optional[list] = None,
+):
+    async for chunk in get_openai_reply(
+        chat_id,
+        user_message,
+        user_id=user_id,
+        input_file_bytes=input_file_bytes,
+        input_filename=input_filename,
+        output_files=output_files,
+    ):
         yield chunk
 
 # ─────────────────────────────────────────────────────────────

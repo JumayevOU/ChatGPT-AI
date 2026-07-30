@@ -1,5 +1,21 @@
 # File Sandbox (Advanced Data Analysis) Implementation Plan
 
+> **HOLAT: BAJARILDI (2026-07-28).** Bu reja tarixiy hujjat sifatida
+> saqlanadi. Amalda ikkita og'ish bo'ldi:
+>
+> 1. **E2B ishlatilmadi** — kod bot konteynerining o'zida, tozalangan
+>    muhit + RLIMIT chegaralari bilan bajariladi (`sandbox.py`). Sabab va
+>    xavfsizlik tahlili spec faylining boshida. Shu sababli Task 1'dagi
+>    `E2B_API_KEY`/`e2b` paketi va butun Task 7 (E2B template) BEKOR
+>    QILINDI — o'rniga `requirements.txt`ga fayl kutubxonalari
+>    (openpyxl, pandas, reportlab, matplotlib va h.k.) qo'shildi.
+> 2. **Testlar rejadagidan ko'proq** — `test_file_task_loop.py` qo'shildi
+>    (tool-loop dispatch, kvota, qayta urinish, guest-rejim gating va
+>    internet_search regressiyasi uchun 7 ta ssenariy).
+>
+> Yakuniy holat uchun kodning o'ziga qarang: `sandbox.py`,
+> `file_task_quota.py`, `services.py`, `handlers_messages.py`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the bot the ability to edit uploaded files and generate brand-new files (Excel, Word, PDF, CSV, ZIP, etc.) by having GPT write Python code that runs in an isolated E2B sandbox on our own infrastructure — OpenAI never executes code or sees the file after upload.

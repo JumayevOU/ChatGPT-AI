@@ -7,7 +7,7 @@ import html as html_lib
 
 import aiohttp
 from aiogram import Router
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramRetryAfter
@@ -219,6 +219,38 @@ async def _edit_message_fallback(message: Message, text: str):
             return None
 
 
+# Telegram bot API'ning hujjat yuborishdagi qattiq chegarasi.
+MAX_TELEGRAM_DOCUMENT_SIZE = 50 * 1024 * 1024
+
+
+async def _send_output_files(chat_id: int, output_files: list) -> None:
+    """run_python_sandbox yaratgan fayllarni foydalanuvchiga yuboradi.
+
+    Bitta fayldagi xato qolganlarini to'xtatmaydi va jim qolmaydi —
+    foydalanuvchi nima bo'lganini biladi.
+    """
+    for filename, content in output_files:
+        if len(content) > MAX_TELEGRAM_DOCUMENT_SIZE:
+            logger.warning(f"Natija fayl juda katta: {filename} ({len(content)} bayt)")
+            try:
+                await bot.send_message(
+                    chat_id,
+                    f"⚠️ «{filename}» fayli 50 MB Telegram chegarasidan katta "
+                    "bo'lgani uchun yuborib bo'lmadi.",
+                )
+            except Exception:
+                pass
+            continue
+        try:
+            await bot.send_document(chat_id, BufferedInputFile(content, filename=filename))
+        except Exception as e:
+            logger.warning(f"Natija faylni yuborib bo'lmadi ({filename}): {e}")
+            try:
+                await bot.send_message(chat_id, f"⚠️ «{filename}» faylini yuborishda xatolik yuz berdi.")
+            except Exception:
+                pass
+
+
 STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
     "text": [
         "Ma'lumotlar tahlil qilinmoqda",
@@ -250,6 +282,12 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
         "Eng so'nggi ma'lumotlar tekshirilmoqda",
         "Natijalar tahlil qilinmoqda",
     ],
+    "file_task": [
+        "Vazifa tahlil qilinmoqda",
+        "Kod tayyorlanmoqda",
+        "Fayl ustida ishlanmoqda",
+        "Natija shakllantirilmoqda",
+    ],
 }
 
 EMOJI_ID_BY_TYPE: dict[str, str] = {
@@ -258,6 +296,9 @@ EMOJI_ID_BY_TYPE: dict[str, str] = {
     "document": "5818955300463447293",
     "voice": "5947042989145590769",
     "search": "5821388137443626414",
+    # Fayl vazifasi uchun hujjat emojisi qayta ishlatiladi — alohida premium
+    # emoji ID kerak bo'lsa, BotFather'dan olib shu yerga qo'yish yetarli.
+    "file_task": "5818955300463447293",
 }
 
 
@@ -395,21 +436,29 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
 
             if chunk.startswith("[STATUS]"):
                 # Kontent emas — bu faqat "band" animatsiyasiga signal.
-                # Animatsiya TO'XTATILMAYDI, chunki qidiruv hali davom
-                # etyapti (ekran "muzlab qolmasligi" uchun).
-                if "search" in chunk:
+                # Animatsiya TO'XTATILMAYDI, chunki qidiruv/fayl vazifasi
+                # hali davom etyapti (ekran "muzlab qolmasligi" uchun).
+                if "file_task" in chunk:
+                    active_type = "file_task"
+                elif "search" in chunk:
                     active_type = "search"
                 continue
 
-            if not stop_animation.is_set():
-                stop_animation.set()
-
+            # [CLEAR_TEXT] — kontent EMAS, boshqaruv signali: shu paytgacha
+            # yig'ilgan oraliq matnni tashlab yuborish kerak. Shuning uchun u
+            # animatsiyani TO'XTATMASLIGI kerak — aks holda ko'p bosqichli
+            # vazifada (masalan fayl ustida ikkinchi marta kod ishlayotganda)
+            # ekran bo'sh holatda muzlab qolardi. Animatsiyani faqat haqiqiy
+            # matn kelganda to'xtatamiz (pastda).
             if "[CLEAR_TEXT]" in chunk:
                 full_text = ""
                 chunk_buffer = ""
                 chunk = chunk.replace("[CLEAR_TEXT]", "")
                 if not chunk:
                     continue
+
+            if not stop_animation.is_set():
+                stop_animation.set()
 
             full_text += chunk
             chunk_buffer += chunk
@@ -762,8 +811,12 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         # joriy xabarni o'z ichiga olmaydi va u faqat BIR MARTA, toza
         # holda "user" turi sifatida qo'shiladi.
         # ══════════════════════════════════════════════════════════════
-        stream_gen = get_gpt_reply(chat_id, merged_text)
+        output_files: list = []
+        stream_gen = get_gpt_reply(chat_id, merged_text, user_id=user_id, output_files=output_files)
         full_reply = await process_stream_draft(last_message, stream_gen)
+
+        if output_files:
+            await _send_output_files(chat_id, output_files)
 
         if full_reply:
             notify_watchers(user_id, last_message.from_user.username, "out", text=full_reply)
@@ -892,13 +945,23 @@ async def handle_document(message: Message, state: FSMContext):
         else:
             extracted_text = extracted
 
-        if not extracted_text or extracted_text.startswith("[XATOLIK]"):
-            await message.answer("⚠️ Hujjatdan matnni ajratib olib bo'lmadi. Boshqa formatda yuborib ko'ring yoki fayl bo'sh emasligiga ishonch hosil qiling.")
-            await _refund_quota(user_id, MESSAGE_COST_DOCUMENT, quota)
-            await state.clear()
-            return
-
         caption = message.caption if message.caption else "Shu hujjatning qisqacha mazmunini yozib ber."
+
+        # MUHIM: matnni ajratib bo'lmasa ham TO'XTAMAYMIZ. `.xls`, `.zip`
+        # kabi binar formatlarda extract_text_from_document() ma'nosiz
+        # belgilar qaytaradi (yoki umuman uddalay olmaydi), LEKIN
+        # run_python_sandbox tool'i faylning xom baytlari bilan ishlaydi va
+        # uni openpyxl/pandas orqali to'g'ri ocha oladi. Avval bu yerda
+        # erta `return` bor edi — aynan shu sabab foydalanuvchi `.xls`
+        # yuborganda bot "faylning o'zi emas, texnik matn yuborilgan" deb
+        # rad etardi.
+        if not extracted_text or extracted_text.startswith("[XATOLIK]"):
+            logger.info(f"[Hujjat] matn ajratilmadi ({file_name}) — sandbox'ga tayanamiz")
+            extracted_text = (
+                "(Bu formatdan matn ajratib bo'lmadi — bu binar fayl. "
+                "Uning mazmuni bilan ishlash uchun run_python_sandbox tool'ini "
+                "ishlating: fayl u yerda input faylida mavjud.)"
+            )
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
@@ -906,8 +969,18 @@ async def handle_document(message: Message, state: FSMContext):
             f"Hujjat matni ({file_name}):\n{extracted_text}\n\n"
             f"Foydalanuvchi so'rovi: {caption}"
         )
-        stream_gen = get_gpt_reply(chat_id, prompt)
+        output_files: list = []
+        stream_gen = get_gpt_reply(
+            chat_id, prompt,
+            user_id=user_id,
+            input_file_bytes=file_bytes,
+            input_filename=file_name,
+            output_files=output_files,
+        )
         full_reply = await process_stream_draft(message, stream_gen, content_type="document")
+
+        if output_files:
+            await _send_output_files(chat_id, output_files)
 
         if full_reply:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply)
@@ -981,8 +1054,12 @@ async def handle_voice(message: Message, state: FSMContext):
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
-        stream_gen = get_gpt_reply(chat_id, user_text)
+        output_files: list = []
+        stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id, output_files=output_files)
         full_reply_text = await process_stream_draft(message, stream_gen, content_type="voice")
+
+        if output_files:
+            await _send_output_files(chat_id, output_files)
 
         if full_reply_text:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply_text)
