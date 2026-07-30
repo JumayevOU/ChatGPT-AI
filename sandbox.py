@@ -14,8 +14,8 @@ IZOLYATSIYA (nima himoyalangan va nima yo'q — ochiq-oydin):
     o'ldiriladi.
   ✓ CPU / xotira / fayl hajmi / jarayon soni chegaralari (Linux'da
     RLIMIT orqali; Windows'da bu chegaralar ishlamaydi, faqat timeout).
-  ✓ `python -I` (izolyatsiya rejimi) — PYTHONPATH va foydalanuvchi
-    site-packages e'tiborga olinmaydi.
+  ✓ `python -s -E` — PYTHONPATH va foydalanuvchi site-packages
+    e'tiborga olinmaydi.
   ✗ Tarmoq BLOKLANMAGAN. Haqiqiy konteyner/namespace izolyatsiyasisiz
     (Railway'da Docker-in-Docker mavjud emas) buni ta'minlab bo'lmaydi.
     Xavf cheklangan, chunki muhit tozalangani uchun o'g'irlanadigan
@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 SANDBOX_TIMEOUT = 60           # soniya — kod bajarilishining qattiq chegarasi
 MAX_OUTPUT_FILES = 10          # bittada qaytariladigan fayllar soni chegarasi
 MAX_OUTPUT_FILE_SIZE = 45 * 1024 * 1024   # Telegram 50 MB — biroz zaxira bilan
+
+# Har bajarilishda ish papkasiga ko'chiriladigan yordamchi modullar.
+# GPT yozgan kod ularni `import docgen` kabi to'g'ridan-to'g'ri ishlatadi.
+# Sabab: matn kengligini o'lchash/o'rash kabi ishlarni modelga qoldirsak,
+# u koordinatalarni taxminan qo'yadi va matn sahifadan chiqib ketadi yoki
+# boshqa blok ustiga tushadi. Bu yerda esa sinovdan o'tgan kod ishlaydi.
+_HELPERS_DIR = Path(__file__).parent / "sandbox_helpers"
 
 try:
     import resource  # POSIX-only (Railway = Linux). Windows'da yo'q.
@@ -158,6 +165,10 @@ async def run_in_sandbox(
         output_dir.mkdir(exist_ok=True)
         (work_dir / ".cache").mkdir(exist_ok=True)
 
+        if _HELPERS_DIR.is_dir():
+            for helper in _HELPERS_DIR.glob("*.py"):
+                shutil.copy2(helper, work_dir / helper.name)
+
         if input_file_bytes is not None and input_filename:
             ext = input_filename.rsplit(".", 1)[-1].lower() if "." in input_filename else "bin"
             # Kengaytmani tozalaymiz — yo'l bilan o'ynashning oldini olish uchun.
@@ -166,8 +177,12 @@ async def run_in_sandbox(
 
         (work_dir / "script.py").write_text(code, encoding="utf-8")
 
+        # `-s -E`: foydalanuvchi site-packages va muhit o'zgaruvchilari
+        # e'tiborga olinmaydi. `-I` ISHLATILMAYDI, chunki u skript papkasini
+        # ham sys.path'dan olib tashlaydi va yordamchi `docgen` moduli
+        # import qilinmay qoladi.
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "script.py",
+            sys.executable, "-s", "-E", "script.py",
             cwd=str(work_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

@@ -571,6 +571,47 @@ _DOC_DESIGN_GUIDE = (
     "   - 'hisobot', 'hujjat', 'ariza', 'xat' → DOCX (python-docx).\n"
     "   - 'jadval', 'ro'yxat', 'hisob-kitob' → XLSX (openpyxl).\n"
     "   - PDF faqat foydalanuvchi ANIQ 'PDF' desa (reportlab).\n\n"
+
+    "1a) PDF UCHUN `docgen` MODULINI ISHLATING — MAJBURIY. Ish papkasida "
+    "tayyor `docgen` moduli bor (import docgen). U shrift va matn "
+    "o'lchamlarini o'z ustiga oladi — ENG KO'P UCHRAYDIGAN IKKI XATONI "
+    "(■ kvadratlar va matnning sahifadan chiqib ketishi) shu hal qiladi:\n"
+    "     import docgen\n"
+    "     REG, BOLD = docgen.register_fonts()   # oʻzbekcha ʻ ni qoʻllaydi\n"
+    "     BLUE = docgen.hex_rgb('#005BAA')\n"
+    "     # bir qatorli matn — sigʻmasa shrift avtomatik kichrayadi:\n"
+    "     docgen.draw_fitted(c, '1992', x, y, w, font=BOLD, size=38,\n"
+    "                        color=BLUE, align='center')\n"
+    "     # koʻp qatorli matn — avtomatik oʻraladi, PASTKI y ni qaytaradi:\n"
+    "     y2 = docgen.draw_para(c, uzun_matn, x, y, w, font=REG, size=12)\n"
+    "     # keyingi blokni y2 dan PASTDA boshlang — ustma-ust tushmaydi!\n"
+    "     # gorizontal ustunlar uchun masshtab (yorliqqa joy qoldiradi):\n"
+    "     k = docgen.bar_scale([9, 6, 15], maxw=4*inch, reserve=0.5*inch)\n"
+    "   Boshqa funksiyalar: docgen.fit(), docgen.wrap(), "
+    "docgen.para_height() (blokni joylashdan oldin balandligini bilish).\n"
+    "   Helvetica ISHLATMANG — unda 'ʻ' yo'q va ■ bo'lib chiqadi.\n\n"
+
+    "1b) PPTX/DOCX uchun shrift: 'Arial', 'Calibri', 'Segoe UI' yoki "
+    "'Tahoma'. 'Verdana' ISHLATMANG — unda 'ʻ' yo'q. Matn qutisiga "
+    "tf.word_wrap = True qo'ying, qutini matnga yetadigan qilib "
+    "kengaytiring va uzun matnda shriftni kichraytiring.\n\n"
+
+    "1c) BLOKLAR USTMA-UST TUSHMASIN: har bir blokdan keyin keyingisining "
+    "y koordinatasini HISOBLANG (draw_para qaytargan y yoki "
+    "para_height()). Koordinatalarni taxminan qo'ymang — matn quyidagi "
+    "karta yoki diagramma ustiga chiqib ketadi.\n\n"
+
+    "1d) IERARXIYA — stat kartada RAQAM katta, IZOH kichik. Teskarisi XATO:\n"
+    "   ✓ '1992' 36-40pt qalin asosiy rangda, ostida 'Tashkil topgan' "
+    "12-13pt kulrang\n"
+    "   ✗ '1992' kichik, 'Tashkil topgan' katta — bu XATO va sig'maydi\n"
+    "   Izoh 1-2 so'zdan oshmasin.\n\n"
+
+    "1e) VERTIKAL KOMPOZITSIYA: kontent slaydning faqat o'rta tasmasiga "
+    "tiqilib, yuqori va past qismi bo'sh qolmasin. Sarlavha yuqoridan "
+    "~0.8 dyuym, asosiy blok balandlikning 55-70%ini egallasin, pastda "
+    "kolontitul. Bo'sh joy ataylab va muvozanatli bo'lsin.\n\n"
+
     "2) RANG SXEMASI: mavzuga mos 1 ta asosiy + 1 ta urg'u rangi tanlang "
     "va butun hujjatda izchil ishlating (masalan aviakompaniya uchun ko'k "
     "#005BAA + to'q sariq #E88B00; moliya uchun to'q yashil; tibbiyot "
@@ -600,18 +641,17 @@ _DOC_DESIGN_GUIDE = (
     "ko'p uchraydigan xato.\n\n"
     "7) TEXNIK: shakllarda s.line.fill.background() (chegara chizig'ini "
     "olib tashlaydi) va s.shadow.inherit = False (keraksiz soyani "
-    "o'chiradi) ishlating.\n\n"
-    "8) RASM: sandbox internetga chiqmaydi, shuning uchun tayyor "
+    "o'chiradi) ishlating. Matn va fon o'rtasida kuchli kontrast bo'lsin — "
+    "och fonda och kulrang matn o'qilmaydi.\n\n"
+    "8) BELGILAR: ✈ kabi emoji shakl ichida mayda va noaniq chiqadi — "
+    "ular o'rniga rangli doira/to'rtburchak va matn yorliqlaridan "
+    "foydalaning.\n\n"
+    "9) RASM: sandbox internetga chiqmaydi, shuning uchun tayyor "
     "fotosurat YUKLAB OLIB BO'LMAYDI. Buning o'rniga rangli bloklar, "
     "diagrammalar, katta tipografika va geometrik shakllardan "
     "foydalaning. Foydalanuvchi 'rasm qo'sh' desa — nega qo'sha "
     "olmasligingizni qisqa tushuntiring va o'zi rasm yuborsa "
-    "joylashtira olishingizni ayting.\n\n"
-    "9) TIL: fayl mazmuni foydalanuvchi so'ragan tilda bo'lsin. "
-    "O'zbekcha matnda 'ʻ' (U+02BB) belgisi ishlatiladi — PPTX/DOCX "
-    "buni muammosiz ko'rsatadi. reportlab PDF'da esa Helvetica bu "
-    "belgini qo'llab-quvvatlamaydi, shuning uchun PDF'da oddiy "
-    "apostrof (') ishlating."
+    "joylashtira olishingizni ayting."
 )
 
 # Fayl yaratish/tahrirlash tool'i — `_TOOLS`dan ALOHIDA saqlanadi, chunki u
@@ -807,8 +847,17 @@ async def get_openai_reply(
     base_params = build_request_params(user_text=message_text, model=model)
     initial_model = base_params.pop("model")
 
-    MAX_TOOL_ROUNDS = 3
-    tool_round = 0
+    # Qidiruv va fayl vazifasi uchun ALOHIDA byudjet. Avval ikkalasi bitta
+    # 3 bosqichli hisobni bo'lishardi — natijada "qidirib, keyin hujjat
+    # yasa" so'rovida qidiruv bosqichlarni yeb qo'yib, faylni yaratishga
+    # urinish yetmay qolardi va foydalanuvchi javob olsa-da, FAYLSIZ qolardi.
+    MAX_SEARCH_ROUNDS = 3
+    MAX_FILE_ROUNDS = 3
+    MAX_TOTAL_ROUNDS = 6   # cheksiz siklga qarshi umumiy xavfsizlik chegarasi
+
+    search_rounds = 0
+    file_rounds = 0
+    total_rounds = 0
     search_performed = False
     synthesis_injected = False
     resolved_model: Optional[str] = None
@@ -817,7 +866,6 @@ async def get_openai_reply(
     # (chaqiruvchi `output_files` ro'yxatini bergan bo'lsa). Guest rejimda
     # bu None bo'ladi — u yerda hujjat yuborib bo'lmaydi.
     file_task_enabled = output_files is not None
-    active_tools = [*_TOOLS, _FILE_TASK_TOOL] if file_task_enabled else _TOOLS
     file_quota: Optional[FileTaskQuota] = (
         FileTaskQuota(user_id, MESSAGE_COST_FILE_TASK)
         if (file_task_enabled and user_id is not None)
@@ -829,14 +877,18 @@ async def get_openai_reply(
         # MUHIM: qidiruv 1-2 bosqichda tugasa ham (model ko'proq tool
         # so'ramasa), keyingi chaqiruvda hali ham `tools` biriktirilgan
         # bo'lishi mumkin (model xohlasa yana qidirishi mumkin) — shuning
-        # uchun _SYNTHESIS_SYSTEM'ni faqat MAX_TOOL_ROUNDS'da MAJBURIY
-        # yakuniy bosqichga emas, birinchi qidiruv natijasi qaytgan zahoti
-        # (pastda) bir marta qo'shamiz — u qachon javob bersa ham ishlaydi.
-        attach_tools = tool_round < MAX_TOOL_ROUNDS
+        # uchun _SYNTHESIS_SYSTEM'ni majburiy yakuniy bosqichga emas,
+        # birinchi qidiruv natijasi qaytgan zahoti (pastda) bir marta
+        # qo'shamiz — u qachon javob bersa ham ishlaydi.
+        active_tools = []
+        if search_rounds < MAX_SEARCH_ROUNDS:
+            active_tools.extend(_TOOLS)
+        if file_task_enabled and file_rounds < MAX_FILE_ROUNDS:
+            active_tools.append(_FILE_TASK_TOOL)
 
         call_kwargs = dict(base_params)
         call_kwargs.update(input=messages, instructions=system_prompt, store=False)
-        if attach_tools:
+        if active_tools and total_rounds < MAX_TOTAL_ROUNDS:
             call_kwargs.update(tools=active_tools, tool_choice="auto")
 
         candidate_models = [resolved_model] if resolved_model else [initial_model, *MODEL_FALLBACKS]
@@ -880,6 +932,7 @@ async def get_openai_reply(
             return
 
         file_task_ran = False
+        search_ran = False
 
         for call_item in pending_calls:
             try:
@@ -895,15 +948,16 @@ async def get_openai_reply(
                     input_file_bytes=input_file_bytes,
                     input_filename=input_filename,
                     output_files=output_files,
-                    round_num=tool_round + 1,
+                    round_num=file_rounds + 1,
                 )
             else:
+                search_ran = True
                 primary_query = args.get("primary_query", "")
                 extra_queries = args.get("extra_queries", [])
 
                 if primary_query:
                     logger.info(
-                        f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={tool_round + 1}"
+                        f"[SEARCH] primary='{primary_query}' extra={extra_queries} round={search_rounds + 1}"
                     )
                     tool_output = await multi_source_deep_search(
                         primary_query=primary_query,
@@ -925,6 +979,12 @@ async def get_openai_reply(
                 "output": tool_output,
             })
 
+        if search_ran:
+            search_rounds += 1
+        if file_task_ran:
+            file_rounds += 1
+        total_rounds += 1
+
         if file_task_ran:
             # Tool'dan OLDIN yozilgan oraliq matn ("Hozir tayyorlab
             # beraman...") yakuniy javobga yopishib qolmasligi uchun
@@ -936,7 +996,6 @@ async def get_openai_reply(
             # boshi). Fayl vazifasida u mutlaqo noo'rin — javob qisqa
             # bo'lishi kerak, chunki asosiy natija biriktirilgan faylning
             # o'zi. Shuning uchun uni qo'shmasdan keyingi bosqichga o'tamiz.
-            tool_round += 1
             continue
 
         if not synthesis_injected:
@@ -947,8 +1006,6 @@ async def get_openai_reply(
             messages.append({"role": "developer", "content": _SYNTHESIS_SYSTEM})
             yield "[CLEAR_TEXT]"
             synthesis_injected = True
-
-        tool_round += 1
 
 
 async def get_gpt_reply(

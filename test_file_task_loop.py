@@ -280,7 +280,39 @@ async def main():
     assert db.charges == [], "qidiruvda fayl kvotasi yechilmasligi kerak"
     print("[7] internet_search regressiyasi yo'q OK")
 
-    print("\nfile_task_loop: barcha tekshiruvlar o'tdi (7/7).")
+    # 8) REGRESSIYA: qidiruv fayl vazifasining byudjetini YEB QO'YMASLIGI
+    #    kerak. Avval ikkalasi bitta 3-bosqichli hisobni bo'lishardi va
+    #    "qidirib, keyin hujjat yasa" so'rovida fayl yaratishga urinish
+    #    yetmay qolib, foydalanuvchi FAYLSIZ javob olardi.
+    services.multi_source_deep_search = lambda **k: _fake_search()
+    try:
+        out_files = []
+        rounds = [
+            # 3 ta qidiruv bosqichi — qidiruv byudjetini to'liq yeydi
+            *[[FakeEvent("response.output_item.added", item=search_call),
+               FakeEvent("response.output_item.done", item=search_call)] for _ in range(3)],
+            # keyin fayl vazifasi — hali ham ISHLASHI kerak
+            [FakeEvent("response.output_item.added", item=file_call),
+             FakeEvent("response.output_item.done", item=file_call)],
+            [FakeEvent("response.output_text.delta", delta="tayyor")],
+        ]
+        chunks, db, sbx = await run_case(
+            rounds=rounds,
+            sandbox_results=[sandbox_result(files=[("d.pdf", b"%PDF")])],
+            output_files=out_files,
+        )
+    finally:
+        services.multi_source_deep_search = real_search
+
+    assert len(sbx.calls) == 1, f"qidiruvdan keyin fayl tool'i ishlashi kerak edi: {len(sbx.calls)}"
+    assert out_files == [("d.pdf", b"%PDF")], f"fayl yaratilmadi: {out_files}"
+    # 4-chaqiriqda qidiruv byudjeti tugagan, lekin fayl tool'i hali biriktirilgan
+    names_4 = [t["name"] for t in (captured_tools[3] or [])]
+    assert "run_python_sandbox" in names_4, names_4
+    assert "internet_search" not in names_4, f"qidiruv byudjeti tugashi kerak edi: {names_4}"
+    print("[8] qidiruv fayl byudjetini yemaydi OK")
+
+    print("\nfile_task_loop: barcha tekshiruvlar o'tdi (8/8).")
 
 
 async def _fake_search():
