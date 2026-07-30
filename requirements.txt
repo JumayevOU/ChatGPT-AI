@@ -18,6 +18,8 @@ python-docx
 # runtime'da pip install qilinmaydi.
 openpyxl
 xlrd
+xlwt
+xlutils
 pandas
 python-pptx
 reportlab

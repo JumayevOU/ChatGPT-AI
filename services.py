@@ -381,14 +381,93 @@ def _extract_text_from_document_sync(file_bytes: bytes, filename: str) -> str:
         doc = docx.Document(BytesIO(file_bytes))
         text = "\n".join([para.text for para in doc.paragraphs])
 
+    elif ext in ['xlsx', 'xlsm', 'xls']:
+        # Excel. DIQQAT: bularsiz fayl pastdagi `else` shoxiga tushib,
+        # UTF-8 sifatida "dekodlanardi" va natijada GPT'ga ma'nosiz binar
+        # chiqindi "Hujjat matni" nomi ostida yuborilardi. Model esa
+        # haqli ravishda "buzilgan binar matn yuborilgan" deb javob berardi.
+        text = _read_spreadsheet(file_bytes, ext)
+
+    elif ext in ['pptx']:
+        from io import BytesIO
+        from pptx import Presentation
+        prs = Presentation(BytesIO(file_bytes))
+        parts = []
+        for i, slide in enumerate(prs.slides, 1):
+            texts = [
+                sh.text_frame.text.strip()
+                for sh in slide.shapes
+                if sh.has_text_frame and sh.text_frame.text.strip()
+            ]
+            if texts:
+                parts.append(f"--- Slayd {i} ---\n" + "\n".join(texts))
+        text = "\n\n".join(parts)
+
     else:
-        # Qolgan barcha formatlar (txt, csv, json, kod fayllari, va h.k.) uchun
-        # Ularni oddiy UTF-8 matn sifatida o'qishga harakat qilamiz
-        # errors='ignore' parametri binar (noma'lum) fayllar botni qatirmasligini ta'minlaydi
+        # Qolgan formatlar (txt, csv, json, kod fayllari, va h.k.) —
+        # oddiy matn sifatida o'qishga harakat qilamiz.
         text = file_bytes.decode('utf-8', errors='ignore')
+        if _looks_binary(text):
+            # Binar fayl matn sifatida o'qilmaydi. Chiqindini GPT'ga
+            # yubormaymiz — chaqiruvchi buni ko'rib, faylni sandbox
+            # orqali ishlashini bildiradi.
+            return "[BINARY]"
 
     # AI xotirasi to'lib qolmasligi uchun barcha fayllarga umumiy belgi cheklovi
     return text[:15000]
+
+
+def _looks_binary(text: str) -> bool:
+    """Dekodlangan matn aslida binar chiqindi ekanini aniqlaydi.
+
+    Binar fayl `errors='ignore'` bilan dekodlanganda bo'sh emas, lekin
+    ichida ko'p boshqaruv belgilari bo'ladi. Shu nisbatga qarab hukm
+    qilamiz.
+    """
+    if not text:
+        return True
+    sample = text[:4000]
+    weird = sum(1 for ch in sample if not (ch.isprintable() or ch.isspace()))
+    return weird / len(sample) > 0.15
+
+
+def _read_spreadsheet(file_bytes: bytes, ext: str) -> str:
+    """Excel faylidan o'qiladigan ko'rinishdagi qisqa xulosa tayyorlaydi.
+
+    Butun jadvalni emas, har varaqdan bosh qismini beradi — GPT'ga
+    strukturani (ustun nomlari, qiymat ko'rinishi) tushunish uchun shu
+    yetarli, tokenlar esa behuda sarflanmaydi.
+    """
+    from io import BytesIO
+
+    MAX_ROWS, MAX_COLS = 25, 15
+    out = []
+
+    def fmt(rows, title):
+        out.append(f"--- {title} ---")
+        for row in rows:
+            cells = ["" if c is None else str(c) for c in row[:MAX_COLS]]
+            out.append(" | ".join(cells))
+
+    if ext == 'xls':
+        import xlrd
+        book = xlrd.open_workbook(file_contents=file_bytes)
+        for sheet in book.sheets():
+            rows = [sheet.row_values(r) for r in range(min(MAX_ROWS, sheet.nrows))]
+            fmt(rows, f"Varaq '{sheet.name}' ({sheet.nrows} qator x {sheet.ncols} ustun)")
+    else:
+        import openpyxl
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= MAX_ROWS:
+                    break
+                rows.append(row)
+            fmt(rows, f"Varaq '{ws.title}' ({ws.max_row} qator x {ws.max_column} ustun)")
+        wb.close()
+
+    return "\n".join(out)
 
 
 async def extract_text_from_document(file_bytes: bytes, filename: str) -> str:
@@ -679,11 +758,24 @@ _FILE_TASK_TOOL = {
         "- Natija fayl(lar)ini ALBATTA `output/` papkasiga yozing — faqat "
         "o'sha papkadagi fayllar foydalanuvchiga yuboriladi.\n"
         "- Fayl nomini mazmunli qo'ying (masalan output/hisobot.pdf).\n"
-        "- Mavjud kutubxonalar: pandas, openpyxl, xlrd, python-docx, "
+        "- Mavjud kutubxonalar: pandas, openpyxl (.xlsx o'qish/yozish), "
+        "xlrd (.xls O'QISH), xlwt + xlutils (.xls YOZISH), python-docx, "
         "python-pptx, pypdf, reportlab, matplotlib, PyMuPDF (fitz), "
         "beautifulsoup4, lxml va standart kutubxona (json, csv, zipfile, "
         "sqlite3, xml, re). Internetga chiqish YO'Q — hech narsa yuklab "
-        "olmang va pip install qilmang.\n"
+        "olmang va pip install qilmang. Ro'yxatda YO'Q kutubxonani "
+        "import qilmang.\n"
+        "- ESKI .xls FAYLNI TAHRIRLASH: openpyxl uni OCHA OLMAYDI. To'g'ri "
+        "yo'l — xlrd bilan o'qib, xlutils.copy bilan nusxa olib, xlwt "
+        "bilan yozish:\n"
+        "     import xlrd\n"
+        "     from xlutils.copy import copy as xl_copy\n"
+        "     rb = xlrd.open_workbook('input.xls', formatting_info=True)\n"
+        "     wb = xl_copy(rb)\n"
+        "     ws = wb.get_sheet(0)\n"
+        "     ws.write(qator, ustun, yangi_qiymat)\n"
+        "     wb.save('output/natija.xls')\n"
+        "  (formatting_info=True ishlamasa, uni olib tashlab qayta uring.)\n"
         "- Kirill/lotin matn uchun faylni har doim encoding='utf-8' bilan "
         "yozing. PDF'da o'zbekcha harflar kerak bo'lsa, reportlab'ning "
         "o'rnatilgan Helvetica shrifti lotin harflarini qo'llab-quvvatlaydi.\n"
@@ -749,6 +841,7 @@ async def _run_file_task(
     input_filename: Optional[str],
     output_files: Optional[list],
     round_num: int,
+    rounds_left: int = 99,
 ) -> str:
     """run_python_sandbox tool chaqiruvini bajaradi.
 
@@ -768,11 +861,23 @@ async def _run_file_task(
     logger.info(f"[FileTask] round={round_num}, kod uzunligi={len(code)}")
     result = await run_in_sandbox(code, input_file_bytes, input_filename)
 
+    # Model bosqichlar tugayotganini BILISHI kerak — aks holda oxirgi
+    # urinishni ham tekshiruvga sarflab, keyin "menda bunday vosita yo'q"
+    # deb noto'g'ri javob yozadi.
+    warn = ""
+    if rounds_left <= 1:
+        warn = (
+            "\n\nDIQQAT: bu SO'NGGI urinish edi, tool boshqa chaqirilmaydi. "
+            "Agar fayl yaratilmagan bo'lsa — foydalanuvchiga muammoni "
+            "aniq va qisqa tushuntiring ('vosita yo'q' DEMANG, chunki "
+            "vosita bor edi)."
+        )
+
     if not result.success:
         logger.info(f"[FileTask] round={round_num} XATO: {result.traceback[:200]}")
         return (
             f"XATO — kod bajarilmadi:\n{result.traceback[:3000]}\n\n"
-            "Kodni tuzatib qayta chaqiring."
+            "Kodni tuzatib qayta chaqiring." + warn
         )
 
     if not result.output_files:
@@ -782,7 +887,7 @@ async def _run_file_task(
             "Agar bu tekshiruv (inspeksiya) qadami bo'lsa — davom eting va "
             "endi haqiqiy faylni yarating. Agar fayl yaratmoqchi bo'lgan "
             "bo'lsangiz — uni `output/` papkasiga yozganingizga ishonch "
-            "hosil qiling."
+            "hosil qiling." + warn
         )
 
     if quota is not None:
@@ -852,8 +957,12 @@ async def get_openai_reply(
     # yasa" so'rovida qidiruv bosqichlarni yeb qo'yib, faylni yaratishga
     # urinish yetmay qolardi va foydalanuvchi javob olsa-da, FAYLSIZ qolardi.
     MAX_SEARCH_ROUNDS = 3
-    MAX_FILE_ROUNDS = 3
-    MAX_TOTAL_ROUNDS = 6   # cheksiz siklga qarshi umumiy xavfsizlik chegarasi
+    # Fayl uchun 4: model odatda birinchi bosqichni fayl tuzilishini
+    # TEKSHIRISHGA sarflaydi (bu to'g'ri xatti-harakat), keyin yozadi va
+    # xato bo'lsa 1-2 marta tuzatadi. 3 ta bo'lganda tekshiruv + bitta
+    # xato butun byudjetni yeb qo'yardi.
+    MAX_FILE_ROUNDS = 4
+    MAX_TOTAL_ROUNDS = 8   # cheksiz siklga qarshi umumiy xavfsizlik chegarasi
 
     search_rounds = 0
     file_rounds = 0
@@ -949,6 +1058,7 @@ async def get_openai_reply(
                     input_filename=input_filename,
                     output_files=output_files,
                     round_num=file_rounds + 1,
+                    rounds_left=MAX_FILE_ROUNDS - file_rounds,
                 )
             else:
                 search_ran = True

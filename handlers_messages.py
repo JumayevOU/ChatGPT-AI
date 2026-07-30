@@ -947,28 +947,43 @@ async def handle_document(message: Message, state: FSMContext):
 
         caption = message.caption if message.caption else "Shu hujjatning qisqacha mazmunini yozib ber."
 
-        # MUHIM: matnni ajratib bo'lmasa ham TO'XTAMAYMIZ. `.xls`, `.zip`
-        # kabi binar formatlarda extract_text_from_document() ma'nosiz
-        # belgilar qaytaradi (yoki umuman uddalay olmaydi), LEKIN
-        # run_python_sandbox tool'i faylning xom baytlari bilan ishlaydi va
-        # uni openpyxl/pandas orqali to'g'ri ocha oladi. Avval bu yerda
-        # erta `return` bor edi — aynan shu sabab foydalanuvchi `.xls`
-        # yuborganda bot "faylning o'zi emas, texnik matn yuborilgan" deb
-        # rad etardi.
-        if not extracted_text or extracted_text.startswith("[XATOLIK]"):
+        # MUHIM: matnni ajratib bo'lmasa ham TO'XTAMAYMIZ. Binar formatlarda
+        # matn o'qilmasligi mumkin, LEKIN run_python_sandbox tool'i faylning
+        # XOM BAYTLARI bilan ishlaydi va uni openpyxl/pandas orqali to'g'ri
+        # ocha oladi.
+        unreadable = (
+            not extracted_text
+            or extracted_text.startswith("[XATOLIK]")
+            or extracted_text.startswith("[BINARY]")
+        )
+        if unreadable:
             logger.info(f"[Hujjat] matn ajratilmadi ({file_name}) — sandbox'ga tayanamiz")
-            extracted_text = (
-                "(Bu formatdan matn ajratib bo'lmadi — bu binar fayl. "
-                "Uning mazmuni bilan ishlash uchun run_python_sandbox tool'ini "
-                "ishlating: fayl u yerda input faylida mavjud.)"
+
+        # DIQQAT: modelga faylning sandbox ichida MAVJUDLIGINI aniq aytish
+        # SHART. Aks holda u ko'rgan narsasi (matn ko'rinishi yoki uning
+        # yo'qligi) asosida "menga faylning o'zi emas, matni yuborilgan"
+        # deb xulosa qilib, tahrirlashdan bosh tortadi — foydalanuvchi
+        # aynan shu javobni olgan edi.
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "bin"
+        file_note = (
+            f"[FAYL BIRIKTIRILGAN] Foydalanuvchi «{file_name}» faylini yubordi. "
+            f"Fayl run_python_sandbox tool'i ichida `input.{ext}` yo'lida XOM "
+            f"HOLDA mavjud — uni o'qish, tahrirlash yoki boshqa formatga "
+            f"o'girish uchun o'sha tool'ni ishlating. Faylni qayta so'ramang."
+        )
+
+        if unreadable:
+            body = (
+                f"{file_note}\n\n"
+                "Bu format matn sifatida o'qilmadi (binar fayl), shuning uchun "
+                "mazmunini ko'rish uchun ham tool'dan foydalaning."
             )
+        else:
+            body = f"{file_note}\n\nFayl mazmunidan namuna:\n{extracted_text}"
 
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_openai_reply() ularni SYSTEM promptga o'zi qo'shadi (services.py).
-        prompt = (
-            f"Hujjat matni ({file_name}):\n{extracted_text}\n\n"
-            f"Foydalanuvchi so'rovi: {caption}"
-        )
+        prompt = f"{body}\n\nFoydalanuvchi so'rovi: {caption}"
         output_files: list = []
         stream_gen = get_gpt_reply(
             chat_id, prompt,

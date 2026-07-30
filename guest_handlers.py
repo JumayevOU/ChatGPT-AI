@@ -692,11 +692,20 @@ else:
                     await bot.download_file(file.file_path, buf)
                     extracted_text = await extract_text_from_document(buf.getvalue(), file_name)
 
-                    if not extracted_text or extracted_text.startswith("[XATOLIK]"):
+                    # Guest rejimda fayl bilan ishlash tool'i mavjud emas
+                    # (bu yerda hujjat qaytarib bo'lmaydi), shuning uchun
+                    # o'qib bo'lmagan formatda halol ravishda rad etamiz.
+                    # [BINARY] — services.py binar faylni shu marker bilan
+                    # belgilaydi; uni promptga qo'shib yuborish mumkin emas.
+                    if (
+                        not extracted_text
+                        or extracted_text.startswith("[XATOLIK]")
+                        or extracted_text.startswith("[BINARY]")
+                    ):
                         full_text = (
-                            "⚠️ Hujjatdan matnni ajratib olib bo'lmadi. Boshqa "
-                            "formatda yuborib ko'ring yoki fayl bo'sh emasligiga "
-                            "ishonch hosil qiling."
+                            "⚠️ Bu fayl formatidan matnni ajratib olib bo'lmadi. "
+                            "Fayl ustida amal bajarish uchun botni to'g'ridan-to'g'ri "
+                            "ochib, faylni o'sha yerga yuboring."
                         )
                     else:
                         prompt = (
