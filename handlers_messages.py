@@ -667,6 +667,101 @@ async def handle_start(message: Message, state: FSMContext):
 # --------------------------------------------------
 # 2. TEXT HANDLER (YouTube + Web Search)
 # --------------------------------------------------
+# --------------------------------------------------
+# YUBORILGAN FAYLNI ESLAB QOLISH
+#
+# Telegram'da UZATILGAN (forward) faylga izoh (caption) yozib bo'lmaydi.
+# Shuning uchun foydalanuvchi odatda avval faylni, keyin ALOHIDA xabar
+# qilib ko'rsatmani yuboradi ("bu yerdagi 31.12.99 ni 0 qil"). Ilgari bu
+# ikki xabar mustaqil ishlanardi: fayl ko'rsatmasiz kelib qisqacha
+# mazmun olardi, ko'rsatma esa faylsiz kelib "qaysi fayl?" bo'lib qolardi.
+#
+# Ikki bosqichli yechim:
+#   1) Izohsiz fayl kelsa, javob berishdan oldin _INSTRUCTION_WAIT soniya
+#      ko'rsatma kutiladi — odatdagi holat shu yerda hal bo'ladi.
+#   2) Fayl yana _PENDING_FILE_TTL davomida eslab qolinadi, shuning uchun
+#      keyinroq yozilgan ("endi buni PDF qilib ber") so'rovga ham o'sha
+#      fayl avtomatik biriktiriladi.
+# --------------------------------------------------
+_PENDING_FILE_TTL = 10 * 60    # keyingi matnli xabarlarga biriktirish oynasi
+_INSTRUCTION_WAIT = 12.0       # izohsiz fayldan keyin ko'rsatmani kutish
+_PENDING_FILE_MAX = 30         # ponytail: RAM chegarasi, kerak bo'lsa Redis'ga ko'chiriladi
+_pending_files: dict[int, dict] = {}
+
+
+def _prune_pending_files() -> None:
+    now = time.time()
+    for cid in [c for c, r in _pending_files.items()
+                if now - r.get("ts", 0) > _PENDING_FILE_TTL]:
+        _pending_files.pop(cid, None)
+    while len(_pending_files) > _PENDING_FILE_MAX:
+        oldest = min(_pending_files, key=lambda c: _pending_files[c].get("ts", 0))
+        _pending_files.pop(oldest, None)
+
+
+def clear_pending_file(chat_id: int) -> None:
+    _pending_files.pop(chat_id, None)
+
+
+def _get_pending_file(chat_id: int) -> dict | None:
+    _prune_pending_files()
+    rec = _pending_files.get(chat_id)
+    return rec if rec and rec.get("bytes") else None
+
+
+def _remember_file(chat_id: int, file_bytes: bytes, file_name: str) -> None:
+    _prune_pending_files()
+    rec = _pending_files.setdefault(chat_id, {})
+    rec.update({"ts": time.time(), "bytes": file_bytes, "name": file_name})
+
+
+def _capture_instruction(chat_id: int, text: str) -> bool:
+    """Fayl ko'rsatma kutayotgan bo'lsa, matnni unga uzatadi.
+
+    True qaytsa — bu xabar fayl bilan BIRGA ishlanadi, shuning uchun
+    handle_text uni alohida so'rov sifatida ishlamasligi kerak.
+    """
+    rec = _pending_files.get(chat_id)
+    event = rec.get("event") if rec else None
+    if event is None or event.is_set():
+        return False
+    rec["instruction"] = text
+    event.set()
+    return True
+
+
+async def _wait_for_instruction(chat_id: int) -> str | None:
+    rec = _pending_files.get(chat_id)
+    event = rec.get("event") if rec else None
+    if event is None:
+        return None
+    try:
+        await asyncio.wait_for(event.wait(), _INSTRUCTION_WAIT)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        rec.pop("event", None)
+    return rec.pop("instruction", None)
+
+
+def pending_file_note(file_name: str, *, earlier: bool = False) -> str:
+    """Modelga faylning sandbox ichida MAVJUDLIGINI aniq aytadigan izoh.
+
+    Busiz model ko'rgan narsasi (matn ko'rinishi yoki uning yo'qligi)
+    asosida "menga faylning o'zi emas, matni yuborilgan" deb xulosa
+    qilib, tahrirlashdan bosh tortadi.
+    """
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "bin"
+    qachon = "avval " if earlier else ""
+    return (
+        f"[FAYL BIRIKTIRILGAN] Foydalanuvchi {qachon}«{file_name}» faylini "
+        f"yubordi. Fayl run_python_sandbox tool'i ichida `input.{ext}` "
+        f"yo'lida XOM HOLDA mavjud — uni o'qish, tahrirlash yoki boshqa "
+        f"formatga o'girish uchun o'sha tool'ni ishlating. Faylni qayta "
+        f"so'ramang."
+    )
+
+
 async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -674,6 +769,7 @@ async def handle_text(message: Message, state: FSMContext):
 
     if text_str.lower() in ["/new", "/clear", "yangi suhbat"]:
         clear_text_merge_buffer(chat_id)
+        clear_pending_file(chat_id)
         await clear_chat_history(chat_id)
         chat_last_interaction[chat_id] = time.time()
         await message.answer("🧹 Xotira tozalandi! Mutlaqo yangi mavzuda suhbatlashishimiz mumkin.")
@@ -681,6 +777,13 @@ async def handle_text(message: Message, state: FSMContext):
 
     track_user_activity(user_id, message.from_user.username, "text_message")
     asyncio.create_task(process_daily_pin(message))
+
+    # Hozirgina izohsiz fayl kelgan bo'lsa, bu xabar — o'sha fayl uchun
+    # ko'rsatma. Uni handle_document kutib turibdi, shu yerda to'xtaymiz.
+    if _capture_instruction(chat_id, message.text):
+        notify_watchers(user_id, message.from_user.username, "in", text=message.text)
+        logger.info(f"[Hujjat] ko'rsatma alohida xabardan olindi: chat={chat_id}")
+        return
 
     lock = get_text_merge_lock(chat_id)
     async with lock:
@@ -811,8 +914,20 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         # joriy xabarni o'z ichiga olmaydi va u faqat BIR MARTA, toza
         # holda "user" turi sifatida qo'shiladi.
         # ══════════════════════════════════════════════════════════════
+        # Yaqinda fayl yuborilgan bo'lsa, uni shu so'rovga ham biriktiramiz —
+        # "endi buni PDF qilib ber" kabi davomiy so'rovlar shu bilan ishlaydi.
+        pending = _get_pending_file(chat_id)
+        prompt_text, file_kwargs = merged_text, {}
+        if pending:
+            prompt_text = (f"{pending_file_note(pending['name'], earlier=True)}"
+                           f"\n\nFoydalanuvchi so'rovi: {merged_text}")
+            file_kwargs = {"input_file_bytes": pending["bytes"],
+                           "input_filename": pending["name"]}
+            pending["ts"] = time.time()   # ketma-ket so'rovlar uchun oynani uzaytiramiz
+
         output_files: list = []
-        stream_gen = get_gpt_reply(chat_id, merged_text, user_id=user_id, output_files=output_files)
+        stream_gen = get_gpt_reply(chat_id, prompt_text, user_id=user_id,
+                                   output_files=output_files, **file_kwargs)
         full_reply = await process_stream_draft(last_message, stream_gen)
 
         if output_files:
@@ -924,7 +1039,13 @@ async def handle_document(message: Message, state: FSMContext):
         await _send_limit_reached_message(message, quota, feature="document")
         return
 
-    await state.set_state(GeneratingState.generating)
+    # Izohsiz fayl — ko'rsatma keyingi xabarda kelishi mumkin. Buni
+    # YUKLAB OLISHDAN OLDIN belgilab qo'yamiz, aks holda yuklash paytida
+    # kelgan xabar alohida so'rov bo'lib ketadi. GeneratingState ham
+    # hozircha o'rnatilmaydi — u busy_handler'ni yoqib, aynan o'sha
+    # ko'rsatmani "iltimos kuting" javobi bilan yutib yuborardi.
+    if not message.caption:
+        _pending_files[chat_id] = {"ts": time.time(), "event": asyncio.Event()}
 
     try:
         await bot.send_chat_action(chat_id, "upload_document")
@@ -945,7 +1066,15 @@ async def handle_document(message: Message, state: FSMContext):
         else:
             extracted_text = extracted
 
-        caption = message.caption if message.caption else "Shu hujjatning qisqacha mazmunini yozib ber."
+        _remember_file(chat_id, file_bytes, file_name)
+
+        caption = message.caption
+        if not caption:
+            caption = await _wait_for_instruction(chat_id)
+        if not caption:
+            caption = "Shu hujjatning qisqacha mazmunini yozib ber."
+
+        await state.set_state(GeneratingState.generating)
 
         # MUHIM: matnni ajratib bo'lmasa ham TO'XTAMAYMIZ. Binar formatlarda
         # matn o'qilmasligi mumkin, LEKIN run_python_sandbox tool'i faylning
@@ -959,18 +1088,7 @@ async def handle_document(message: Message, state: FSMContext):
         if unreadable:
             logger.info(f"[Hujjat] matn ajratilmadi ({file_name}) — sandbox'ga tayanamiz")
 
-        # DIQQAT: modelga faylning sandbox ichida MAVJUDLIGINI aniq aytish
-        # SHART. Aks holda u ko'rgan narsasi (matn ko'rinishi yoki uning
-        # yo'qligi) asosida "menga faylning o'zi emas, matni yuborilgan"
-        # deb xulosa qilib, tahrirlashdan bosh tortadi — foydalanuvchi
-        # aynan shu javobni olgan edi.
-        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "bin"
-        file_note = (
-            f"[FAYL BIRIKTIRILGAN] Foydalanuvchi «{file_name}» faylini yubordi. "
-            f"Fayl run_python_sandbox tool'i ichida `input.{ext}` yo'lida XOM "
-            f"HOLDA mavjud — uni o'qish, tahrirlash yoki boshqa formatga "
-            f"o'girish uchun o'sha tool'ni ishlating. Faylni qayta so'ramang."
-        )
+        file_note = pending_file_note(file_name)
 
         if unreadable:
             body = (
@@ -1019,6 +1137,9 @@ async def handle_document(message: Message, state: FSMContext):
             await message.answer("❌ Hujjatni o'qishda xatolik yuz berdi.")
         await _refund_quota(user_id, MESSAGE_COST_DOCUMENT, quota)
     finally:
+        # Osilib qolgan "ko'rsatma kutilmoqda" bayrog'i keyingi xabarlarni
+        # javobsiz yutib yuborardi — har qanday holatda tozalaymiz.
+        _pending_files.get(chat_id, {}).pop("event", None)
         await state.clear()
 
 
