@@ -20,7 +20,9 @@ from core.config import (
     message_cost, pick_reasoning_effort,
 )
 from db.database import has_started, check_and_consume_quota, refund_quota
-from handlers.messages import STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed
+from handlers.messages import (
+    STATUS_TEXTS_BY_TYPE, EMOJI_ID_BY_TYPE, _format_elapsed, track_user_activity,
+)
 from handlers.helpers import notify_watchers
 from services.ai import (
     get_gpt_reply,
@@ -580,7 +582,19 @@ else:
                     logger.error(f"[Guest Kvota] tekshiruvda xatolik (user={caller_user_id}): {e}")
                     quota = {"allowed": True}
 
-                if not quota.get("allowed", True):
+                if quota.get("allowed", True):
+                    # Guest mode faolligi ALOHIDA tur bilan yoziladi
+                    # ("guest_text_message" va h.k.). Ilgari bu yerda hech
+                    # narsa yozilmasdi: ball yechilardi, lekin admin
+                    # statistikasida foydalanuvchi hech narsa qilmagandek
+                    # ko'rinardi va last_seen yangilanmagani uchun u
+                    # "bir haftadan beri yo'q" xabarini olardi.
+                    track_user_activity(
+                        caller_user_id,
+                        message.from_user.username if message.from_user else None,
+                        f"guest_{content_type}_message",
+                    )
+                else:
                     skip_ai = True
                     if quota.get("banned"):
                         forced_text = "🚫 Siz botdan foydalanish huquqidan mahrum qilingansiz."

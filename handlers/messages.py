@@ -565,17 +565,24 @@ async def _refund_quota(user_id: int, cost: int, quota: dict | None = None) -> N
         logger.error(f"[Kvota] qaytarishda xatolik (user={user_id}): {e}")
 
 
-async def _send_file_quota_notice(message: Message, quota_box: list, produced_files: bool) -> None:
-    """Fayl yaratish limiti bo'yicha xabarni chiqaradi (kerak bo'lsa).
+async def _after_file_task(message: Message, quota_box: list, produced_files: bool) -> None:
+    """Fayl vazifasidan keyingi ish: faollikni yozish va limit xabari.
 
-    Bu xabar ATAYLAB modelning o'z so'zlariga tashlab qo'yilmagan: model
-    har safar boshqacha ifodalaydi, tarif shartlarini o'zicha o'ylab
+    Limit xabari ATAYLAB modelning o'z so'zlariga tashlab qo'yilmagan:
+    model har safar boshqacha ifodalaydi, tarif shartlarini o'zicha o'ylab
     topishi ham mumkin. services/ai.py modelga faqat bitta qisqa uzr jumlasi
     yozishni buyuradi, tafsilotni esa shu yerdan aniq matn bilan beramiz.
     """
     quota = quota_box[0] if quota_box else None
     if quota is None:
         return
+
+    # Fayl yaratish admin statistikasida ko'rinsin — u eng qimmat amal,
+    # lekin ilgari hech qanday faollik turi sifatida yozilmasdi.
+    if produced_files:
+        track_user_activity(
+            message.from_user.id, message.from_user.username, "file_task"
+        )
 
     if quota.limit_hit:
         text = (
@@ -979,7 +986,7 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
 
         if output_files:
             await _send_output_files(chat_id, output_files)
-        await _send_file_quota_notice(last_message, file_quota_box, bool(output_files))
+        await _after_file_task(last_message, file_quota_box, bool(output_files))
 
         if full_reply:
             notify_watchers(user_id, last_message.from_user.username, "out", text=full_reply)
@@ -1164,7 +1171,7 @@ async def handle_document(message: Message, state: FSMContext):
 
         if output_files:
             await _send_output_files(chat_id, output_files)
-        await _send_file_quota_notice(message, file_quota_box, bool(output_files))
+        await _after_file_task(message, file_quota_box, bool(output_files))
 
         if full_reply:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply)
@@ -1250,7 +1257,7 @@ async def handle_voice(message: Message, state: FSMContext):
 
         if output_files:
             await _send_output_files(chat_id, output_files)
-        await _send_file_quota_notice(message, file_quota_box, bool(output_files))
+        await _after_file_task(message, file_quota_box, bool(output_files))
 
         if full_reply_text:
             notify_watchers(user_id, message.from_user.username, "out", text=full_reply_text)
