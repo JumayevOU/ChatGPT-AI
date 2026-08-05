@@ -825,26 +825,18 @@ async def handle_start(message: Message, state: FSMContext, command: CommandObje
     except Exception:
         pass
 
-    welcome = (
-        "👋 <b>KELING TANISHIB OLAYLIK!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🤖 Men sizning AI yordamchingizman:\n\n"
-        "<blockquote>"
-        f"{pro_module.pe('search', '🌐')} Savolga javob — internetdan ham qidiraman\n"
-        f"📺 <b>YouTube</b> — video xulosasini chiqaraman\n"
-        f"{pro_module.pe('document', '📄')} <b>Hujjat</b> — PDF/Word/Excel o'qib tahlil qilaman\n"
-        f"{pro_module.pe('photo', '📸')} <b>Rasm</b> — ko'rib tushuntiraman\n"
-        f"{pro_module.pe('voice', '🎙')} <b>Ovoz</b> — ovozli javob qaytaraman\n"
-        f"🛠 <b>Fayl yarataman</b> — PPTX, PDF, Word, Excel"
-        "</blockquote>\n\n"
-        "✍️ Savolingizni yozing, rasm, hujjat yoki ovoz yuboring.\n"
-        "🧹 Suhbatni noldan boshlash: /new"
+    await message.answer(
+        "👋 <b>Keling tanishib olaylik!</b>\n\n"
+        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
+        "➤ Savollaringizga javob beraman (Internetdan ham qidiraman 🌐)\n"
+        "➤ 📺 <b>YouTube</b> video silkasini tashlasangiz, uni qisqacha xulosa qilib beraman!\n"
+        "➤ 📄 <b>Hujjatlar (PDF/Word/Excel/TXT)</b> yuborsangiz, o'qib tahlil qilaman!\n"
+        "➤ 📸 <b>Rasm</b> yuborsangiz — uni xuddi insondek ko'rib tushuntiraman!\n"
+        "➤ 🎙 <b>Ovozli xabar</b> yuborsangiz — <b>ovozli javob</b> qaytaraman!\n"
+        "➤ 🛠 <b>Fayl yaratib beraman</b> — PPTX, PDF, Word, Excel\n\n"
+        "🧹 Agar suhbatni noldan boshlamoqchi bo'lsangiz /new buyrug'ini bering.\n\n"
+        "✍️ Savolingizni yozing, rasm, hujjat yoki ovoz yuboring. Boshladikmi?"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [pro_module.btn("👤 Profilim", "pro:profile", style=pro_module.BTN_PRIMARY),
-         pro_module.btn("💎 Pro tarif", "pro:open", style=pro_module.BTN_SUCCESS)],
-    ])
-    await pro_module.send_rich(message, welcome, kb)
 
 
 # --------------------------------------------------
