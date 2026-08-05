@@ -2,8 +2,8 @@ from aiogram import types
 from datetime import datetime, timezone, timedelta
 from db.database import get_full_user_profile
 from core.config import (
-    DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE, MESSAGE_COST_TEXT,
-    MESSAGE_COST_PHOTO, MESSAGE_COST_VOICE, MESSAGE_COST_DOCUMENT,
+    MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO, MESSAGE_COST_VOICE,
+    MESSAGE_COST_DOCUMENT, plan_limits, daily_limit,
 )
 
 _FEATURE_COSTS = [
@@ -44,6 +44,17 @@ def _beautify_date(date_val) -> str:
     return str(date_val).split('.')[0]
 
 
+def _plan_label(plan_type: str, premium_until) -> str:
+    """Tarifni foydalanuvchi tilida, muddati bilan ko'rsatadi."""
+    if plan_type == 'free':
+        return "🆓 Free"
+    if premium_until is None:
+        return "💎 Cheksiz (muddatsiz)"
+    days_left = max(0, (premium_until - datetime.now(timezone.utc)).days)
+    name = "Pro" if plan_type == 'pro' else "Premium"
+    return f"💎 {name} — {_beautify_date(premium_until)} gacha ({days_left} kun)"
+
+
 def _progress_bar(used: int, limit: int, length: int = 10) -> str:
     """Kunlik kredit sarfini vizual chiziqcha (progress bar) ko'rinishida chizadi."""
     if limit <= 0:
@@ -53,19 +64,23 @@ def _progress_bar(used: int, limit: int, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-def _build_credit_section(daily_used: int, plan_type: str) -> str:
+def _build_credit_section(daily_used: int, limit: int | None) -> str:
     """
     Kunlik AI Credit holatini aniq va chiroyli ko'rinishda shakllantiradi:
     progress-bar, foiz, ishlatilgan/qolgan ball va qolgan ball bilan yana
     qaysi feature'lardan necha marta foydalanish mumkinligi (dinamik).
+
+    `limit` — tarifga qarab core.config.plan_limits() dan keladi; None
+    faqat haqiqatan cheksiz tarif ('premium') uchun. ILGARI bu yerda
+    `plan_type != 'free'` tekshirilardi va Pro foydalanuvchiga "cheksiz" deb
+    YOLG'ON ko'rsatilardi.
     """
-    if plan_type != 'free':
+    if limit is None:
         return (
             "🔋 <b>Bugungi AI Creditlar</b>\n"
             "🔓 <b>Cheksiz</b> — kunlik limit qo'llanilmaydi"
         )
 
-    limit = DAILY_FREE_LIMIT
     used = min(daily_used, limit)
     remaining = max(0, limit - used)
     percent = min(100, int(round((used / limit) * 100))) if limit > 0 else 0
@@ -96,20 +111,19 @@ def _build_credit_section(daily_used: int, plan_type: str) -> str:
     return "\n".join(lines)
 
 
-def _build_file_section(files_used: int, plan_type: str) -> str:
+def _build_file_section(files_used: int, limit: int | None, plan_type: str) -> str:
     """Fayl yaratish sanog'i — ball byudjetidan ALOHIDA ko'rsatiladi.
 
     Ikkovini bitta bo'limga qo'shib yuborsak foydalanuvchi nima nimani
     yeyayotganini tushunmay qoladi; alohida turgani "fayl tugadi, lekin
     suhbat ishlaydi" degan asosiy g'oyani ham ko'rsatib turadi.
     """
-    if plan_type != 'free':
+    if limit is None:
         return (
             "📄 <b>Fayl yaratish va tahrirlash</b>\n"
             "🔓 <b>Cheksiz</b> — kunlik chegara qo'llanilmaydi"
         )
 
-    limit = DAILY_FILE_LIMIT_FREE
     used = min(files_used, limit)
     remaining = max(0, limit - used)
     bar = _progress_bar(used, limit)
@@ -122,17 +136,45 @@ def _build_file_section(files_used: int, plan_type: str) -> str:
         lines.append(
             "\n⏳ Bugungi fayl limiti tugadi — ertaga soat <b>00:00</b> da yangilanadi."
             "\n💬 Oddiy savollar hozir ham ishlaydi."
-            "\n💎 Premium'da <b>cheksiz</b>."
         )
+        if plan_type == 'free':
+            lines.append("💎 <b>Pro</b>'da kuniga 30 ta — /pro")
     else:
         lines.append(f"\n✅ Bugun yana <b>{remaining} ta</b> fayl yaratishingiz mumkin"
                      "\n<i>(PPTX, PDF, Word, Excel, format o'girish)</i>")
     return "\n".join(lines)
 
 
-async def handle_profile(message: types.Message):
-    """Foydalanuvchi profilini shakllantirish va yuborish."""
-    user_id = message.from_user.id
+def _build_pro_counters(profile: dict, plan_type: str) -> str:
+    """Pro imkoniyatlari sanog'i — FAQAT tarifda mavjud bo'lsa chiziladi.
+
+    Bepul foydalanuvchi profili ATAYLAB o'zgarmaydi: "0 / 0" turgan sanoq
+    faqat chalkashtiradi, reklama esa allaqachon limit xabarlarida bor.
+    """
+    rows = []
+    for label, key, used_col in (
+        ("🖼 Rasm chizish", "images", "daily_images_used"),
+        ("🔎 Chuqur tadqiqot", "research", "daily_research_used"),
+    ):
+        limit = daily_limit(plan_type, key)
+        if limit is None:
+            rows.append(f"{label} — 🔓 <b>cheksiz</b>")
+        elif limit > 0:
+            used = min(profile.get(used_col, 0) or 0, limit)
+            rows.append(f"{label} — <code>{used} / {limit}</code>")
+    if not rows:
+        return ""
+    return "💎 <b>PRO IMKONIYATLARI</b>\n" + "\n".join(rows)
+
+
+async def handle_profile(message: types.Message, user_id: int | None = None):
+    """Foydalanuvchi profilini shakllantirish va yuborish.
+
+    user_id ATAYLAB alohida parametr: callback tugmasidan chaqirilganda
+    `message` botning O'Z xabari bo'ladi va message.from_user — bot, ya'ni
+    u yerdan foydalanuvchini olsak, botning profilini ko'rsatib qo'yardik.
+    """
+    user_id = user_id if user_id is not None else message.from_user.id
     profile_data = await get_full_user_profile(user_id)
     
     if not profile_data:
@@ -144,21 +186,25 @@ async def handle_profile(message: types.Message):
     else:
         username = "Mavjud emas"
     status_text = "🟢 Faol" if profile_data['is_active'] else "🔴 Bloklangan"
-    plan_type = str(profile_data['plan_type']).capitalize()
+    plan_type = profile_data['plan_type'] or 'free'
+    plan_label = _plan_label(plan_type, profile_data.get('premium_until'))
     media_status = "Faol" if profile_data['media_analysis_active'] else "O'chirilgan"
     daily_used = profile_data['daily_requests_used']
     created_at = _beautify_date(profile_data.get('created_at', ''))
     last_seen = _beautify_date(profile_data.get('last_seen', ''))
 
-    credit_section = _build_credit_section(daily_used, profile_data['plan_type'])
+    point_limit, file_limit = plan_limits(plan_type)
+    credit_section = _build_credit_section(daily_used, point_limit)
     file_section = _build_file_section(
-        profile_data.get('daily_files_used', 0), profile_data['plan_type'])
+        profile_data.get('daily_files_used', 0), file_limit, plan_type)
+    pro_section = _build_pro_counters(profile_data, plan_type)
 
     text = (
         f"🪪 <b>SHAXSIY KABINET</b>\n\n"
         f"👤 <b>Profil:</b> {username}\n"
         f"🆔 <b>ID:</b> <code>{profile_data['user_id']}</code>\n"
-        f"💳 <b>Status:</b> {status_text} ({plan_type})\n\n"
+        f"💳 <b>Status:</b> {status_text}\n"
+        f"📦 <b>Tarif:</b> {plan_label}\n\n"
         
         f"⚙️ <b>TIZIM SOZLAMALARI</b>\n"
         f"🧠 <b>Tanlangan Model:</b> <code>{profile_data['current_model']}</code>\n\n"
@@ -169,6 +215,12 @@ async def handle_profile(message: types.Message):
         f"{credit_section}\n\n"
 
         f"{file_section}\n\n"
+
+        f"{pro_section + chr(10) + chr(10) if pro_section else ''}"
     )
     
-    await message.answer(text, parse_mode="HTML")
+    # Klaviatura quruvchisi pro.py'da yashaydi (pro.py profile.py'ni
+    # import qilmaydi — sikl bo'lmasligi uchun shu yo'nalish).
+    from handlers.pro import pro_keyboard_for
+    await message.answer(text, parse_mode="HTML",
+                         reply_markup=pro_keyboard_for(plan_type))

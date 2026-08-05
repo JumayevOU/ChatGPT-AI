@@ -7,7 +7,10 @@ import html as html_lib
 
 import aiohttp
 from aiogram import Router
-from aiogram.types import Message, FSInputFile, BufferedInputFile
+from aiogram.types import (
+    Message, FSInputFile, BufferedInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramRetryAfter
@@ -17,20 +20,24 @@ from core.config import (
     TEXT_MERGE_INSTANT_THRESHOLD, TEXT_MERGE_WAIT, TEXT_MERGE_MAX_PARTS,
     TEXT_MERGE_MAX_CHARS, MAX_TEXT_LENGTH,
     DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
-    MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE,
+    MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE, PLAN_LIMITS, CUSTOM_EMOJI,
     message_cost, pick_reasoning_effort,
 )
 from core.loader import logger, bot
+from aiogram.filters import CommandObject
 from db.database import (
     save_user, log_user_activity, is_admin, is_superadmin,
-    check_and_consume_quota, refund_quota, is_banned,
+    check_and_consume_quota, refund_quota, is_banned, has_started,
 )
+from handlers import pro as pro_module
+from services.file_task_quota import DailyQuota
 from core.keyboards import admin_keyboard
 from handlers.helpers import process_daily_pin, notify_watchers, send_error_with_retry
 from core.memory import get_text_merge_lock, text_merge_buffers, clear_text_merge_buffer
 from services.ai import (
     safe_update_history, get_gpt_reply,
-    speech_to_text, text_to_speech, get_vision_reply, extract_text_from_document,
+    speech_to_text_smart, text_to_speech_smart,
+    get_vision_reply, extract_text_from_document,
     clear_chat_history, get_youtube_summary, safe_get_chat_history,
     build_rich_markdown,
 )
@@ -66,6 +73,12 @@ def track_user_activity(user_id: int, username: str | None, event: str) -> None:
     """save_user + log_user_activity'ni parallel, bloklamaydigan tarzda bajaradi."""
     _fire_and_forget(save_user(user_id, username), label="save_user")
     _fire_and_forget(log_user_activity(user_id, username, event), label="log_user_activity")
+    # Referal bonusi aynan shu yerda hisobga olinadi — /start da emas.
+    # Sabab: /start bosish soxta akkaunt uchun bepul, HAQIQIY savol berish
+    # esa yo'q. maybe_qualify_referral() ichida RAM keshi bor, shuning
+    # uchun bu har xabarda DB so'roviga aylanmaydi.
+    if event.endswith("_message"):
+        _fire_and_forget(pro_module.maybe_qualify_referral(user_id), label="referral_qualify")
 
 
 # --------------------------------------------------
@@ -221,6 +234,10 @@ async def _edit_message_fallback(message: Message, text: str):
 
 # Telegram bot API'ning hujjat yuborishdagi qattiq chegarasi.
 MAX_TELEGRAM_DOCUMENT_SIZE = 50 * 1024 * 1024
+# Rasm (photo) chegarasi hujjatnikidan ANCHA past — undan oshgani hujjat
+# sifatida yuboriladi, ya'ni baribir yetib boradi, faqat preview'siz.
+MAX_TELEGRAM_PHOTO_SIZE = 10 * 1024 * 1024
+_PHOTO_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 async def _send_output_files(chat_id: int, output_files: list) -> None:
@@ -241,6 +258,19 @@ async def _send_output_files(chat_id: int, output_files: list) -> None:
             except Exception:
                 pass
             continue
+
+        # Rasm hujjat sifatida ketsa, chatda ko'rinmaydi — foydalanuvchi
+        # uni ochib ko'rishga majbur bo'ladi. send_photo preview beradi.
+        # Xato bo'lsa pastdagi hujjat yo'liga tushadi (eski xatti-harakat),
+        # ya'ni bu o'zgarish hech narsani yo'qota olmaydi.
+        if (filename.lower().endswith(_PHOTO_EXTENSIONS)
+                and len(content) <= MAX_TELEGRAM_PHOTO_SIZE):
+            try:
+                await bot.send_photo(chat_id, BufferedInputFile(content, filename=filename))
+                continue
+            except Exception as e:
+                logger.warning(f"Rasmni photo sifatida yuborib bo'lmadi ({filename}): {e}")
+
         try:
             await bot.send_document(chat_id, BufferedInputFile(content, filename=filename))
         except Exception as e:
@@ -288,17 +318,24 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
         "Fayl ustida ishlanmoqda",
         "Natija shakllantirilmoqda",
     ],
+    # Rasm yaratish ~20-25 soniya davom etadi — animatsiya bosqichlari
+    # foydalanuvchiga jarayon ketayotganini ko'rsatib turadi.
+    "image": [
+        "Rasm g'oyasi shakllantirilmoqda",
+        "Kompozitsiya tanlanmoqda",
+        "Ranglar joylanmoqda",
+        "Rasm chizilmoqda",
+    ],
 }
 
+# ID'lar core/config.py:CUSTOM_EMOJI da — yagona manba, chunki ular
+# handlers/pro.py dagi Pro reklamasida ham ishlatiladi.
 EMOJI_ID_BY_TYPE: dict[str, str] = {
-    "text": "5980787993139481991",
-    "photo": "5947288798713875484",
-    "document": "5818955300463447293",
-    "voice": "5947042989145590769",
-    "search": "5821388137443626414",
+    **CUSTOM_EMOJI,
     # Fayl vazifasi uchun hujjat emojisi qayta ishlatiladi — alohida premium
-    # emoji ID kerak bo'lsa, BotFather'dan olib shu yerga qo'yish yetarli.
-    "file_task": "5818955300463447293",
+    # emoji ID kerak bo'lsa, uni CUSTOM_EMOJI ga qo'shib shu yerga ulang.
+    "file_task": CUSTOM_EMOJI["document"],
+    "image": CUSTOM_EMOJI["photo"],
 }
 
 
@@ -440,6 +477,8 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
                 # hali davom etyapti (ekran "muzlab qolmasligi" uchun).
                 if "file_task" in chunk:
                     active_type = "file_task"
+                elif "image" in chunk:
+                    active_type = "image"
                 elif "search" in chunk:
                     active_type = "search"
                 continue
@@ -546,6 +585,16 @@ async def _check_quota(user_id: int, cost: int) -> dict:
         return {"allowed": True, "used": 0, "limit": DAILY_FREE_LIMIT, "unlimited": False}
 
 
+def _is_pro(quota: dict) -> bool:
+    """Pro imkoniyatlari (chuqur fikrlash, 2× xotira) uchun bayroq.
+
+    Tarif check_and_consume_quota() natijasidan olinadi — u allaqachon
+    bazadan o'qigan, shuning uchun qo'shimcha so'rov kerak emas. Admin va
+    muddatsiz 'premium' ham shu imkoniyatlarni oladi.
+    """
+    return quota.get("plan", "free") != "free"
+
+
 async def _refund_quota(user_id: int, cost: int, quota: dict | None = None) -> None:
     """
     Hech qanday haqiqiy AI javobi berilmagan so'rovlar uchun oldin
@@ -565,6 +614,21 @@ async def _refund_quota(user_id: int, cost: int, quota: dict | None = None) -> N
         logger.error(f"[Kvota] qaytarishda xatolik (user={user_id}): {e}")
 
 
+async def _answer_with_pro_button(message: Message, text: str, offer: bool) -> None:
+    """Limit xabarini yuboradi; `offer` bo'lsa yoniga "Pro" tugmasini qo'yadi.
+
+    Tugma ATAYLAB shu xabarning o'zida: foydalanuvchi limitga urilgan payt —
+    konversiya uchun eng qulay moment, uni /profile ga yuborib yo'qotmaymiz.
+    """
+    kb = None
+    if offer:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [pro_module.btn("💎 Pro tarifga o'tish", "pro:open",
+                            style=pro_module.BTN_SUCCESS)],
+        ])
+    await pro_module.send_rich(message, text, kb)
+
+
 async def _after_file_task(message: Message, quota_box: list, produced_files: bool) -> None:
     """Fayl vazifasidan keyingi ish: faollikni yozish va limit xabari.
 
@@ -573,48 +637,82 @@ async def _after_file_task(message: Message, quota_box: list, produced_files: bo
     topishi ham mumkin. services/ai.py modelga faqat bitta qisqa uzr jumlasi
     yozishni buyuradi, tafsilotni esa shu yerdan aniq matn bilan beramiz.
     """
-    quota = quota_box[0] if quota_box else None
+    # quota_box'da bir nechta kvota bo'lishi mumkin (fayl va rasm) —
+    # bittasi ishlatilib, ikkinchisiga umuman tegilmagan bo'lishi odatiy hol.
+    #
+    # ⚠️ `charged` tekshiruvi MAJBURIY: agar faqat rasm chizilgan bo'lsa,
+    # fayl kvotasi hech qachon yechilmagan bo'ladi va uning qiymatlari
+    # boshlang'ich holatda qoladi (limit=0, used=0, plan='free'). O'shanda
+    # pastdagi "oxirgi bepul faylingiz" shoxi yolg'on ishga tushib, PRO
+    # foydalanuvchiga bepul tarif haqida xabar yozib yuborardi.
+    quota = next((q for q in (quota_box or []) if getattr(q, "charged", False)), None)
     if quota is None:
         return
 
     # Fayl yaratish admin statistikasida ko'rinsin — u eng qimmat amal,
     # lekin ilgari hech qanday faollik turi sifatida yozilmasdi.
-    if produced_files:
+    if produced_files and quota.kind == "files":
         track_user_activity(
             message.from_user.id, message.from_user.username, "file_task"
         )
 
-    if quota.limit_hit:
+    # Pro foydalanuvchiga Pro sotib olishni taklif qilmaymiz — uning limiti
+    # allaqachon eng balandi, xabar faqat holatni tushuntiradi.
+    is_free = getattr(quota, "plan", "free") == "free"
+
+    if quota.kind == "images":
+        # Rasm BEPULDA UMUMAN YO'Q (limit=0), shuning uchun bepul
+        # foydalanuvchi uchun bu "limit tugadi" emas, "bu Pro imkoniyati".
+        if quota.limit_hit and quota.limit == 0:
+            text = (
+                f"🖼 <b>Rasm chizish — Pro imkoniyati</b>\n\n"
+                f"<blockquote>Pro tarifda kuniga <b>{PLAN_LIMITS['pro']['images']} ta</b> "
+                f"rasm chizib beraman: manzara, logotip, illyustratsiya — "
+                f"istagan tasviringizni.</blockquote>\n\n"
+                f"💬 Qolgan hamma narsa hozir ham ishlaydi."
+            )
+        elif quota.limit_hit:
+            text = (
+                f"🖼 <b>Bugungi rasm limiti tugadi</b> ({quota.limit} ta).\n"
+                f"🕛 Ertaga soat <b>00:00</b> da yangilanadi.\n"
+                f"💬 Suhbat hozir ham ishlaydi."
+            )
+        else:
+            return
+        await _answer_with_pro_button(message, text, offer=is_free)
+        return
+
+    if quota.limit_hit and is_free:
         text = (
             f"📄 <b>Bugungi fayl limiti tugadi</b>\n\n"
             f"Bepul tarifda kuniga <b>{quota.limit} ta</b> fayl yaratish "
             f"mumkin va bugungisi ishlatib bo'lindi.\n"
             f"🕛 Yangi limit ertaga soat <b>00:00</b> da avtomatik yangilanadi.\n\n"
-            f"💎 <b>Premium</b>da fayl yaratish <b>cheksiz</b>:\n"
+            f"💎 <b>Pro</b> tarifda kuniga <b>{PLAN_LIMITS['pro']['files']} ta</b>:\n"
             f"├ 📊 Prezentatsiya — PPTX\n"
             f"├ 📄 Hujjat — PDF, Word\n"
             f"├ 📈 Jadval va diagramma — Excel\n"
             f"└ 🔄 Formatdan formatga o'girish\n\n"
-            f"💬 Oddiy savollar hozir ham ishlaydi — bemalol yozavering.\n\n"
-            f"👤 Batafsil ma'lumot uchun <b>/profile</b> tugmasini bosing!"
+            f"💬 Oddiy savollar hozir ham ishlaydi — bemalol yozavering."
         )
-    elif produced_files and quota.remaining == 0:
+    elif quota.limit_hit:
+        text = (
+            f"📄 <b>Bugungi fayl limiti tugadi</b> ({quota.limit} ta).\n"
+            f"Siz bugun juda faol bo'ldingiz 🙌\n"
+            f"🕛 Limit ertaga soat <b>00:00</b> da to'liq yangilanadi.\n"
+            f"💬 Oddiy savollar hozir ham ishlaydi."
+        )
+    elif produced_files and quota.remaining == 0 and is_free:
         # Konversiya uchun eng qulay payt: fayl endigina qo'lida.
         text = (
             f"ℹ️ Bu bugungi <b>oxirgi bepul faylingiz</b> edi.\n"
             f"🕛 Ertaga soat <b>00:00</b> da yana <b>{quota.limit} ta</b> beriladi.\n"
-            f"💎 Premium'da cheksiz — <b>/profile</b>"
+            f"💎 Pro'da kuniga <b>{PLAN_LIMITS['pro']['files']} ta</b>."
         )
     else:
         return
 
-    try:
-        await message.answer(text, parse_mode="HTML")
-    except Exception:
-        try:
-            await message.answer(text)
-        except Exception:
-            pass
+    await _answer_with_pro_button(message, text, offer=is_free)
 
 
 _FEATURE_LABELS: dict[str, tuple[str, int]] = {
@@ -636,6 +734,7 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
     used = quota.get("used", quota.get("limit", 0))
     limit = quota.get("limit", 0)
     remaining = max(0, limit - used)
+    is_free = quota.get("plan", "free") == "free"
 
     feature_label = _FEATURE_LABELS.get(feature, (None, None))[0] if feature else None
 
@@ -646,11 +745,20 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
     ]
     has_any_affordable = remaining > 0 and any(count > 0 for _, count in affordable)
 
-    if not has_any_affordable:
+    if not has_any_affordable and not is_free:
+        # Pro/premium limitiga urilish juda kam uchraydi — bu yerda upsell
+        # o'rinsiz, aybdorlik hissi ham keraksiz.
+        text = (
+            f"⏳ <b>Bugungi limitingiz tugadi</b> ({used}/{limit} ball).\n"
+            f"Siz bugun juda faol bo'ldingiz 🙌\n"
+            f"🕛 Limit ertaga soat <b>00:00</b> da to'liq yangilanadi."
+        )
+    elif not has_any_affordable:
         text = (
             f"⏳ <b>Bugungi bepul limitingiz tugadi</b> ({used}/{limit} ball).\n"
-            f"🕛 Yangi limit ertaga soat <b>00:00</b> da avtomatik yangilanadi.\n"
-            f"👤 Batafsil ma'lumot uchun <b>/profile</b> tugmasini bosing!"
+            f"🕛 Yangi limit ertaga soat <b>00:00</b> da avtomatik yangilanadi.\n\n"
+            f"💎 <b>Pro</b> tarifda kuniga "
+            f"<b>{PLAN_LIMITS['pro']['points']} ball</b> — {PLAN_LIMITS['pro']['points'] // limit if limit else 10}× ko'p."
         )
     else:
         lines = "\n".join(f"├ {label}: {count} ta" for label, count in affordable)
@@ -659,17 +767,10 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
             f"❌{feature_part} AI Creditlaringiz yetarli emas.\n"
             f"💰 <b>Qolgan Creditlar:</b> {remaining}\n\n"
             f"<b>Hali ham foydalanishingiz mumkin:</b>\n{lines}\n\n"
-            f"🕛 Creditlar ertaga soat <b>00:00</b> da avtomatik yangilanadi.\n\n"
-            f"👤 Batafsil ma'lumot uchun <b>/profile</b> tugmasini bosing!"
+            f"🕛 Creditlar ertaga soat <b>00:00</b> da avtomatik yangilanadi."
         )
 
-    try:
-        await message.answer(text, parse_mode="HTML")
-    except Exception:
-        try:
-            await message.answer(text)
-        except Exception:
-            pass
+    await _answer_with_pro_button(message, text, offer=is_free)
 
 
 # --------------------------------------------------
@@ -683,9 +784,30 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
 # `router`ni include qilganda ular filtrsiz (masalan admin uchun ham)
 # qayta ro'yxatdan o'tib, general_router'dagi to'g'ri filtrlangan versiyani
 # hech qachon ishga tushirmay qo'yadi.
-async def handle_start(message: Message, state: FSMContext):
+async def handle_start(message: Message, state: FSMContext, command: CommandObject = None):
     await state.clear()
-    track_user_activity(message.from_user.id, message.from_user.username, "start")
+    user_id = message.from_user.id
+
+    # ⚠️ TARTIB MUHIM: track_user_activity() ichida save_user() fon
+    # vazifasi sifatida ishga tushadi va foydalanuvchini bazaga YOZADI.
+    # "Bu foydalanuvchi yangimi?" tekshiruvi undan KEYIN qo'yilsa, referal
+    # goh ishlab, goh ishlamay qoladi (race condition).
+    is_new_user = False
+    try:
+        is_new_user = not await has_started(user_id)
+    except Exception:
+        pass
+
+    track_user_activity(user_id, message.from_user.username, "start")
+
+    # Referal deep-link: t.me/<bot>?start=ref_<taklif_qilgan_id>
+    # Mukofot bu yerda EMAS, foydalanuvchi birinchi haqiqiy savolini
+    # berganda beriladi (pro.maybe_qualify_referral) — soxta akkauntlar
+    # ochib kun yig'ishning oldini oladi.
+    start_payload = (command.args or "") if command else ""
+    if is_new_user and start_payload.startswith("ref_"):
+        _fire_and_forget(
+            pro_module.register_referral(user_id, start_payload[4:]), label="referral")
 
     try:
         if await is_banned(message.from_user.id):
@@ -703,17 +825,26 @@ async def handle_start(message: Message, state: FSMContext):
     except Exception:
         pass
 
-    await message.answer(
-        "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchimman. Quyidagilarni qila olaman:\n"
-        "➤ Savollaringizga javob beraman (Internetdan ham qidiraman 🌐)\n"
-        "➤ 📺 <b>YouTube</b> video silkasini tashlasangiz, uni qisqacha xulosa qilib beraman!\n"
-        "➤ 📄 <b>Hujjatlar (PDF/TXT/DOCX)</b> yuborsangiz, o'qib tahlil qilaman!\n"
-        "➤ 📸 <b>Rasm</b> yuborsangiz — uni xuddi insondek ko'rib tushuntiraman!\n"
-        "➤ 🎙 <b>Ovozli xabar</b> yuborsangiz — <b>ovozli javob</b> qaytaraman!\n\n"
-        "🧹 Agar suhbatni noldan boshlamoqchi bo'lsangiz /new buyrug'ini bering.\n\n"
-        "✍️ Savolingizni yozing, rasm, hujjat yoki ovoz yuboring. Boshladikmi?"
+    welcome = (
+        "👋 <b>KELING TANISHIB OLAYLIK!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 Men sizning AI yordamchingizman:\n\n"
+        "<blockquote>"
+        f"{pro_module.pe('search', '🌐')} Savolga javob — internetdan ham qidiraman\n"
+        f"📺 <b>YouTube</b> — video xulosasini chiqaraman\n"
+        f"{pro_module.pe('document', '📄')} <b>Hujjat</b> — PDF/Word/Excel o'qib tahlil qilaman\n"
+        f"{pro_module.pe('photo', '📸')} <b>Rasm</b> — ko'rib tushuntiraman\n"
+        f"{pro_module.pe('voice', '🎙')} <b>Ovoz</b> — ovozli javob qaytaraman\n"
+        f"🛠 <b>Fayl yarataman</b> — PPTX, PDF, Word, Excel"
+        "</blockquote>\n\n"
+        "✍️ Savolingizni yozing, rasm, hujjat yoki ovoz yuboring.\n"
+        "🧹 Suhbatni noldan boshlash: /new"
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [pro_module.btn("👤 Profilim", "pro:profile", style=pro_module.BTN_PRIMARY),
+         pro_module.btn("💎 Pro tarif", "pro:open", style=pro_module.BTN_SUCCESS)],
+    ])
+    await pro_module.send_rich(message, welcome, kb)
 
 
 # --------------------------------------------------
@@ -981,7 +1112,8 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         file_quota_box: list = []
         stream_gen = get_gpt_reply(chat_id, prompt_text, user_id=user_id,
                                    output_files=output_files,
-                                   file_quota_out=file_quota_box, **file_kwargs)
+                                   file_quota_out=file_quota_box,
+                                   is_pro=_is_pro(quota), **file_kwargs)
         full_reply = await process_stream_draft(last_message, stream_gen)
 
         if output_files:
@@ -1007,6 +1139,106 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
             pass
         await _refund_quota(user_id, text_cost, quota)
     finally:
+        await state.clear()
+
+
+# --------------------------------------------------
+# 2b. CHUQUR TADQIQOT (/research — faqat Pro)
+# --------------------------------------------------
+_RESEARCH_MIN_LEN = 8
+
+_RESEARCH_HINT = (
+    "🔎 <b>CHUQUR TADQIQOT</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n\n"
+    "<blockquote>Bitta savol bo'yicha 10+ manbani qidiraman, "
+    "solishtiraman va tayyor <b>PDF hisobot</b> qilib beraman.</blockquote>\n\n"
+    "Shunday yozing:\n"
+    "<code>/research O'zbekistonda elektromobil bozori 2026</code>\n\n"
+    "<i>Bir necha daqiqa vaqt oladi — javob kelguncha kutib turing.</i>"
+)
+
+
+def _research_limit_text(quota) -> str:
+    """Limit 0 bo'lsa — bu 'Pro imkoniyati', aks holda 'bugungisi tugadi'."""
+    if quota.limit == 0:
+        return (
+            "🔎 <b>Chuqur tadqiqot — Pro imkoniyati</b>\n\n"
+            "<blockquote>Pro tarifda kuniga "
+            f"<b>{PLAN_LIMITS['pro']['research']} ta</b> chuqur tadqiqot: "
+            "10+ manba, taqqoslash va tayyor PDF hisobot.</blockquote>\n\n"
+            "💬 Oddiy savollar hozir ham ishlaydi."
+        )
+    return (
+        f"🔎 <b>Bugungi tadqiqot limiti tugadi</b> ({quota.limit} ta).\n"
+        f"🕛 Ertaga soat <b>00:00</b> da yangilanadi.\n"
+        f"💬 Oddiy savollar hozir ham ishlaydi."
+    )
+
+
+async def handle_research(message: Message, state: FSMContext,
+                          command: CommandObject = None):
+    """/research <savol> — ko'p bosqichli qidiruv + xulosa + PDF hisobot.
+
+    BALL YECHILMAYDI — o'z kunlik sanog'i bor. Sabab fayl limitidagi bilan
+    bir xil: tadqiqot eng qimmat amal, ballardan yechilsa bitta tadqiqotdan
+    keyin foydalanuvchi oddiy savol ham berolmay qolardi.
+    """
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    topic = ((command.args if command else None) or "").strip()
+
+    if len(topic) < _RESEARCH_MIN_LEN:
+        await pro_module.send_rich(message, _RESEARCH_HINT)
+        return
+
+    quota = DailyQuota(user_id, "research")
+    if not await quota.ensure_charged():
+        if quota.limit_hit:
+            await _answer_with_pro_button(
+                message, _research_limit_text(quota), offer=(quota.limit == 0))
+        else:
+            await message.answer("🚫 Siz botdan foydalanish huquqidan mahrum qilingansiz.")
+        return
+
+    track_user_activity(user_id, message.from_user.username, "research")
+    notify_watchers(user_id, message.from_user.username, "in", text=f"/research {topic}")
+    await check_and_clear_session(chat_id)
+    await state.set_state(GeneratingState.generating)
+
+    output_files: list = []
+    try:
+        stream_gen = get_gpt_reply(
+            chat_id, f"Chuqur tadqiqot mavzusi: {topic[:1000]}",
+            # user_id=None ATAYLAB: fayl sanog'i yechilmasin. Tadqiqot
+            # sanog'i butun amal (qidiruvlar + hisobot + PDF) uchun
+            # allaqachon to'langan, ikki marta yechish adolatsiz bo'lardi.
+            user_id=None,
+            output_files=output_files,
+            is_pro=True,
+            research=True,
+        )
+        full_reply = await process_stream_draft(message, stream_gen, content_type="search")
+
+        if output_files:
+            await _send_output_files(chat_id, output_files)
+
+        if full_reply:
+            quota.mark_success()
+            notify_watchers(user_id, message.from_user.username, "out", text=full_reply)
+            try:
+                await safe_update_history(chat_id, f"[Tadqiqot]: {topic}", role="user")
+                await safe_update_history(chat_id, full_reply, role="assistant")
+            except Exception as e:
+                logger.warning(f"[Tarix saqlash xatosi - tadqiqot] chat={chat_id}: {e}")
+    except Exception as e:
+        logger.error(f"[Research Error] {e}")
+        await message.answer(
+            "❌ Tadqiqot yakunlanmadi. Sanog'ingiz qaytarildi — "
+            "birozdan keyin qayta urinib ko'ring."
+        )
+    finally:
+        # Muvaffaqiyat bo'lmagan bo'lsa sanoqni o'zi qaytaradi.
+        await quota.refund_if_unused()
         await state.clear()
 
 
@@ -1048,7 +1280,8 @@ async def handle_photo(message: Message, state: FSMContext):
         # CONCISE_INSTRUCTION/STRICT_MATH_RULES bu yerga qo'shilmaydi —
         # get_vision_reply() ularni SYSTEM promptga o'zi qo'shadi (services/ai.py).
         # Tarix esa javob muvaffaqiyatli olingandan keyin, birgalikda saqlanadi.
-        stream_gen = get_vision_reply(chat_id, base64_image, caption)
+        stream_gen = get_vision_reply(chat_id, base64_image, caption,
+                                      is_pro=_is_pro(quota), user_id=user_id)
         full_reply = await process_stream_draft(message, stream_gen, content_type="photo")
 
         if full_reply:
@@ -1166,6 +1399,7 @@ async def handle_document(message: Message, state: FSMContext):
             input_filename=file_name,
             output_files=output_files,
             file_quota_out=file_quota_box,
+            is_pro=_is_pro(quota),
         )
         full_reply = await process_stream_draft(message, stream_gen, content_type="document")
 
@@ -1237,7 +1471,8 @@ async def handle_voice(message: Message, state: FSMContext):
         voice_path = f"voice_{file_id}.ogg"
         await bot.download_file(file.file_path, voice_path)
 
-        user_text = await speech_to_text(voice_path)
+        # Pro'da OpenAI transkripsiyasi (aniqroq), aks holda bepul yo'l.
+        user_text = await speech_to_text_smart(voice_path, is_pro=_is_pro(quota))
 
         if not user_text:
             await message.answer("🤷‍♂️ Ovozni tushunib bo'lmadi.")
@@ -1252,7 +1487,8 @@ async def handle_voice(message: Message, state: FSMContext):
         file_quota_box: list = []
         stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id,
                                    output_files=output_files,
-                                   file_quota_out=file_quota_box)
+                                   file_quota_out=file_quota_box,
+                                   is_pro=_is_pro(quota))
         full_reply_text = await process_stream_draft(message, stream_gen, content_type="voice")
 
         if output_files:
@@ -1273,7 +1509,8 @@ async def handle_voice(message: Message, state: FSMContext):
             pass
 
         audio_filename = f"reply_{chat_id}_{int(time.time())}.mp3"
-        generated_audio = await text_to_speech(full_reply_text, audio_filename)
+        generated_audio = await text_to_speech_smart(
+            full_reply_text, audio_filename, is_pro=_is_pro(quota))
 
         if generated_audio and os.path.exists(generated_audio):
             input_file = FSInputFile(generated_audio)

@@ -22,6 +22,9 @@ admin_keyboard = ReplyKeyboardMarkup(
             KeyboardButton(text="🛠 Texnik ta'til"),
             KeyboardButton(text="👁 Kuzatish")
         ],
+        [
+            KeyboardButton(text="🎁 Bepul Pro"),
+        ],
     ], resize_keyboard=True, one_time_keyboard=False
 )
 

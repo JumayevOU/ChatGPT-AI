@@ -537,6 +537,9 @@ else:
 
         skip_ai = False
         forced_text: str | None = None
+        # Pro imkoniyatlari guest rejimida ham ishlaydi — kvota tekshiruvi
+        # baribir bir marta bazaga boradi va tarifni qaytaradi.
+        guest_is_pro = False
 
         if caller_user_id is None:
             skip_ai = True
@@ -582,6 +585,8 @@ else:
                     logger.error(f"[Guest Kvota] tekshiruvda xatolik (user={caller_user_id}): {e}")
                     quota = {"allowed": True}
 
+                guest_is_pro = quota.get("plan", "free") != "free"
+
                 if quota.get("allowed", True):
                     # Guest mode faolligi ALOHIDA tur bilan yoziladi
                     # ("guest_text_message" va h.k.). Ilgari bu yerda hech
@@ -603,6 +608,10 @@ else:
                             "❌ Bugungi AI Creditlaringiz tugadi.\n"
                             "Iltimos, ertaga qayta urinib ko'ring."
                         )
+                        # Guest javobiga inline tugma biriktirib bo'lmaydi —
+                        # shuning uchun matnli ko'rsatkich.
+                        if quota.get("plan", "free") == "free":
+                            forced_text += "\n\n💎 Botga o'tib /pro — 10× ko'p kredit."
 
         # --------------------------------------------------
         # 1. Kutish holatini ko'rsatamiz (faqat AI chaqirilishi kerak bo'lgan
@@ -726,7 +735,7 @@ else:
                             f"Hujjat matni ({file_name}):\n{extracted_text}\n\n"
                             f"Foydalanuvchi so'rovi: {clean_query}"
                         )
-                        stream_gen = get_gpt_reply(caller_user_id, prompt)
+                        stream_gen = get_gpt_reply(caller_user_id, prompt, is_pro=guest_is_pro)
 
                 elif content_type == "voice":
                     voice = message.voice
@@ -739,10 +748,10 @@ else:
                     if not recognized_text:
                         full_text = "🤷‍♂️ Ovozni tushunib bo'lmadi."
                     else:
-                        stream_gen = get_gpt_reply(caller_user_id, recognized_text)
+                        stream_gen = get_gpt_reply(caller_user_id, recognized_text, is_pro=guest_is_pro)
 
                 else:  # text
-                    stream_gen = get_gpt_reply(caller_user_id, clean_query)
+                    stream_gen = get_gpt_reply(caller_user_id, clean_query, is_pro=guest_is_pro)
 
                 if stream_gen is not None:
                     async for chunk in stream_gen:

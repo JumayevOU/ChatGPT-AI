@@ -6,10 +6,17 @@ from typing import List, Dict
 # KONFIGURATSIYA
 # --------------------------------------------------
 try:
-    from core.config import SYSTEM_PROMPT, CONTEXT_WINDOW
+    from core.config import SYSTEM_PROMPT, CONTEXT_WINDOW, CONTEXT_WINDOW_PRO
 except ImportError:
     SYSTEM_PROMPT   = "Siz foydali yordamchisiz."
     CONTEXT_WINDOW  = 12
+    CONTEXT_WINDOW_PRO = 24
+
+# SAQLASH chegarasi — hamma uchun eng katta oyna bo'yicha. O'QISH chegarasi
+# esa chaqiruvchi beradigan `limit` (tarifga qarab). Ikkovini ajratmasak,
+# Pro'ning "2× xotira" imkoniyati jimgina ishlamay qolardi: kesh va SQLite
+# baribir 30 tadan keyingisini o'chirib tashlagan bo'lardi.
+_STORE_LIMIT = max(CONTEXT_WINDOW, CONTEXT_WINDOW_PRO)
 
 DB_PATH = "chat_history.db"
 
@@ -45,8 +52,8 @@ async def update_chat_history(chat_id: int, content: str, role: str = "user"):
 
     _cache[chat_id].append({"role": role, "content": content})
 
-    if len(_cache[chat_id]) > CONTEXT_WINDOW:
-        _cache[chat_id] = _cache[chat_id][-CONTEXT_WINDOW:]
+    if len(_cache[chat_id]) > _STORE_LIMIT:
+        _cache[chat_id] = _cache[chat_id][-_STORE_LIMIT:]
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -61,7 +68,7 @@ async def update_chat_history(chat_id: int, content: str, role: str = "user"):
                 ORDER BY id DESC
                 LIMIT ?
             )
-        """, (chat_id, chat_id, CONTEXT_WINDOW))
+        """, (chat_id, chat_id, _STORE_LIMIT))
         await db.commit()
 
 # --------------------------------------------------
@@ -72,11 +79,14 @@ async def get_chat_history(chat_id: int, limit: int = CONTEXT_WINDOW) -> List[Di
     if chat_id in _cache:
         return _cache[chat_id][-limit:]
 
-    history = await _load_from_db(chat_id, limit)
+    # Keshga HAR DOIM to'liq saqlash oynasi yuklanadi: aks holda free
+    # foydalanuvchi Pro'ga o'tganda kesh 30 tada qotib qolar va u
+    # to'lagan "2× xotira" faqat bot qayta ishga tushgach ochilardi.
+    history = await _load_from_db(chat_id, _STORE_LIMIT)
     _cache[chat_id] = history
-    return history
+    return history[-limit:]
 
-async def _load_from_db(chat_id: int, limit: int = CONTEXT_WINDOW) -> List[Dict]:
+async def _load_from_db(chat_id: int, limit: int = _STORE_LIMIT) -> List[Dict]:
     """DBdan so'nggi `limit` ta xabarni yuklaydi."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

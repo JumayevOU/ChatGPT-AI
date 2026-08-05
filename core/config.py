@@ -34,14 +34,44 @@ TIMEZONE = ZoneInfo("Asia/Tashkent")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  2) MODEL SOZLAMALARI — GPT-5.6 LUNA
+#  2) MODEL SOZLAMALARI — BEPUL KVOTAGA MOSLANGAN
 # ═══════════════════════════════════════════════════════════════
-GPT_MODEL: str = "gpt-5.6-luna"
+# ⚠️ MODEL NOMINI O'ZGARTIRISHDAN OLDIN SHUNI O'QING.
+#
+# OpenAI platformasida "data sharing" yoqilgani uchun kuniga BEPUL token
+# beriladi. Platformadagi ro'yxatda eng katta model sifatida gpt-5.4
+# ko'rsatilgan, LEKIN gpt-5.6 oilasi ham xuddi shu shartlarda bepul
+# ishlaydi (loyiha egasi tasdiqlagan). Shuning uchun asosiy model
+# gpt-5.6-luna bo'lib qoladi.
+#
+#     ~250k token/kun — katta modellar (gpt-5.6-*, gpt-5.4, gpt-5.1, ...)
+#     ~2.5M token/kun — mini/nano modellar (gpt-5.4-mini, gpt-4.1-mini, ...)
+#
+# 5.6 oilasida mini/nano variant YO'Q — faqat luna, sol, terra (hisobda
+# tekshirilgan). Ya'ni butun trafik katta chelakdan ichadi.
+#
+# ⚠️ RO'YXATDAN TASHQARI model to'liq narxda hisoblanadi va buni hech qanday
+# xato bildirmaydi — hisob oy oxirida chiqadi. tests/test_free_models.py
+# aynan shuni qo'riqlaydi.
+GPT_MODEL: str = "gpt-5.6-luna"      # bepul tarif
+GPT_MODEL_PRO: str = "gpt-5.6-luna"  # Pro tarif — hozircha bir xil model.
+# Pro'ning farqi limitlar, imkoniyatlar va CHUQURROQ fikrlashda
+# (upgrade_effort_for_pro), modelda emas. Boshqa modelga ajratmoqchi
+# bo'lsangiz shu qatorni o'zgartirish yetarli — qolgan kod tayyor.
 GPT_MODEL_DISPLAY_NAME: str = "GPT-5.6 Luna"
-GPT_KNOWLEDGE_CUTOFF: str = "February 16, 2026"
+# ⚠️ Bu yerda 2026-fevral yozilgan edi — HAQIQATGA MOS EMAS.
+# gpt-5.6-luna ikki xil tekshiruvda ham 2024-iyunni ko'rsatdi: o'zi shunday
+# deb aytdi VA 2025-yil voqealarini bilmasligini tasdiqladi. Noto'g'ri sana
+# turganda bot o'zida yo'q bilimga da'vo qilib, 2025-yil haqida ishonch
+# bilan xato javob berardi. Yangi voqealar internet_search orqali topiladi.
+GPT_KNOWLEDGE_CUTOFF: str = "June 2024"
 
-# Zaxira modellar: agar asosiy model 404/429 qaytarsa, shu tartibda urinib ko'riladi.
-MODEL_FALLBACKS: List[str] = ["gpt-5.6-terra", "gpt-5.6"]
+# Zaxira modellar: agar asosiy model 404/429 qaytarsa, shu tartibda urinib
+# ko'riladi. Ilgari bu ro'yxatda "gpt-5.6" turardi — u hisobda UMUMAN
+# MAVJUD EMAS (tekshirilgan), ya'ni o'lik zaxira edi. O'rniga haqiqiy
+# 5.6 birodarlari qo'yildi; oxirgisi mini chelakdan, chunki 5.6 oilasi
+# butunlay ishlamay qolgan holatda ham bot javob berishi kerak.
+MODEL_FALLBACKS: List[str] = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-4.1-mini"]
 
 # ── API tanlovi ────────────────────────────────────────────────
 # Reasoning modellar Responses API bilan sezilarli darajada yaxshi ishlaydi.
@@ -104,6 +134,13 @@ GPT_MAX_TOKENS: int = MAX_OUTPUT_TOKENS
 # 20 → 30 ga oshirildi: suhbat ancha izchil bo'ladi, narx sezilarli oshmaydi
 # (input $1/MTok + prompt caching).
 CONTEXT_WINDOW: int = 30
+# Pro tarif uchun kengaytirilgan kontekst oynasi.
+#
+# Saqlash HAMMA uchun CONTEXT_WINDOW_PRO gacha olib boriladi (SQLite'da bu
+# arzon), farq esa faqat O'QISHDA: free 30 tasini, Pro 60 tasini ko'radi.
+# Shu tufayli tarif o'zgarganda tarixni ko'chirish kerak emas va bepul
+# foydalanuvchi Pro'ga o'tsa, o'tmishdagi suhbat ham unga ochiladi.
+CONTEXT_WINDOW_PRO: int = 60
 
 # Reasoning model sekinroq javob beradi — timeout'ni oshirish shart.
 REQUEST_TIMEOUT: float = 180.0   # soniya
@@ -421,6 +458,19 @@ _COMPLEX_KEYWORDS = (
 )
 
 
+def upgrade_effort_for_pro(effort: str) -> str:
+    """Pro imkoniyati: MURAKKAB savol yanada chuqurroq tahlil qilinadi.
+
+    ATAYLAB har xabarni yuqori darajaga ko'tarmaydi — "salom" uchun ham
+    chuqur reasoning ishlatish foydalanuvchini kutdiradi va bizga qimmatga
+    tushadi, ya'ni bu imkoniyat emas, zarar bo'lardi. Faqat allaqachon
+    murakkab deb baholangan savol bir pog'ona ko'tariladi.
+    """
+    if effort == REASONING_EFFORT_COMPLEX:
+        return REASONING_EFFORT_MAX
+    return effort
+
+
 def pick_reasoning_effort(text: str, force_deep: bool = False) -> str:
     """Xabar matniga qarab mos reasoning darajasini qaytaradi.
 
@@ -456,6 +506,7 @@ def build_request_params(
     user_text: str = "",
     force_deep: bool = False,
     model: Optional[str] = None,
+    is_pro: bool = False,
 ) -> Dict[str, Any]:
     """Tayyor kwargs qaytaradi — to'g'ridan-to'g'ri client'ga uzatish mumkin.
 
@@ -469,7 +520,11 @@ def build_request_params(
         text = resp.choices[0].message.content
     """
     effort = pick_reasoning_effort(user_text, force_deep=force_deep)
-    chosen_model = model or GPT_MODEL
+    if is_pro:
+        effort = upgrade_effort_for_pro(effort)
+    # Pro kuchliroq modelni oladi (250k bepul chelak), bepul tarif esa
+    # kattaroq 2.5M chelakdagi mini modelni. Ikkalasi ham bepul ro'yxatda.
+    chosen_model = model or (GPT_MODEL_PRO if is_pro else GPT_MODEL)
 
     if USE_RESPONSES_API:
         reasoning: Dict[str, Any] = {"effort": effort}
@@ -564,10 +619,147 @@ MESSAGE_COST_VOICE: int = 50         # ovozli xabar (STT + GPT + TTS)
 # oddiy savol ham bera olmay qolardi va buni "bot buzildi" deb qabul
 # qilardi. Endi fayl limiti tugasa ham suhbat ishlashda davom etadi.
 #
-# Muvaffaqiyatsiz urinish hisoblanmaydi — file_task_quota.FileTaskQuota
+# Muvaffaqiyatsiz urinish hisoblanmaydi — file_task_quota.DailyQuota
 # sanoqni bir marta yechadi va fayl chiqmasa qaytarib beradi.
-# Premium hozircha cheksiz.
 DAILY_FILE_LIMIT_FREE: int = 2
+
+# ── Pro imkoniyatlari uchun kunlik sanoqlar ─────────────────────────
+# Bu raqamlar O'LCHANGAN xarajatga asoslangan (rejalashtirishda haqiqiy
+# API chaqiruvlari qilindi):
+#
+#   gpt-image-2 "low"    — 196 output token, 23 s  → ~$0.008/rasm
+#   gpt-image-2 "medium" — 1756 output token, 53 s → ~$0.07/rasm (9× qimmat)
+#
+# Telegram Stars'da dasturchiga 1 ⭐ ≈ $0.013 tushadi, ya'ni 100 ⭐ lik
+# oylik tarif ≈ $1.30 sof daromad. 3 rasm/kun (90/oy) × $0.008 ≈ $0.70 —
+# matn va ovoz xarajati ustiga qo'shilsa ham sig'adi.
+#
+# ponytail: birinchi oy haqiqiy hisobni ko'ring. Oshirish kerak bo'lsa
+# tartib shu — avval limitni ko'taring, IMAGE_QUALITY ni "medium" ga
+# ko'tarish esa 9 barobar qimmat, oxirgi chora.
+DAILY_IMAGE_LIMIT_PRO: int = 3
+DAILY_RESEARCH_LIMIT_PRO: int = 1
+
+
+# ── TARIFLAR VA ULARNING LIMITLARI ──────────────────────────────────
+# None = cheksiz.
+#
+#   free    — hamma yangi foydalanuvchi
+#   pro     — Telegram Stars orqali SOTIB OLINADIGAN tarif
+#   premium — admin qo'lda beradigan eski (legacy) cheksiz tarif
+#
+# Nega 'pro' cheksiz emas: bitta foydalanuvchi kuniga yuzlab rasm tashlab
+# OpenAI hisobini bo'shatishi mumkin. 10 000 ball — bu kuniga ~830 ta matnli
+# savol yoki ~55 ta rasm; normal foydalanuvchi bunga hech qachon yetmaydi,
+# lekin suiiste'mol to'xtaydi.
+# `images` va `research` uchun 0 = "bu tarifda umuman yo'q" (cheksiz emas!).
+# Shu tufayli bepul foydalanuvchi rasm so'raganda kvota tekshiruvi uni
+# oddiy "limit tugadi" emas, "bu Pro imkoniyati" holati bilan qaytaradi.
+PLAN_LIMITS: dict[str, dict[str, int | None]] = {
+    "free":    {"points": DAILY_FREE_LIMIT, "files": DAILY_FILE_LIMIT_FREE,
+                "images": 0, "research": 0},
+    "pro":     {"points": 10000,            "files": 30,
+                "images": DAILY_IMAGE_LIMIT_PRO, "research": DAILY_RESEARCH_LIMIT_PRO},
+    "premium": {"points": None,             "files": None,
+                "images": None, "research": None},
+}
+
+# Kunlik sanoq turi -> (ishlatilgan ustuni, sana ustuni, PLAN_LIMITS kaliti).
+#
+# Bu YAGONA manba: db.check_and_consume_daily() SQL ustun nomlarini aynan
+# shundan oladi. Yangi sanoq qo'shish = shu yerga bitta qator + bazaga ikkita
+# ustun, boshqa hech joyda o'zgarish kerak emas.
+DAILY_COUNTERS: dict[str, tuple[str, str, str]] = {
+    "files":    ("daily_files_used",    "daily_files_date",    "files"),
+    "images":   ("daily_images_used",   "daily_images_date",   "images"),
+    "research": ("daily_research_used", "daily_research_date", "research"),
+}
+
+
+def daily_limit(plan_type: str | None, key: str) -> int | None:
+    """Bitta kunlik limit. None = cheksiz, 0 = bu tarifda imkoniyat yo'q.
+
+    Noma'lum yoki bo'sh tarif → free limitlari. Bu ATAYLAB xavfsiz tomonga
+    og'ish: bazada kutilmagan qiymat paydo bo'lsa, foydalanuvchi cheksiz
+    kirish emas, bepul limit oladi.
+    """
+    p = PLAN_LIMITS.get(plan_type or "free", PLAN_LIMITS["free"])
+    return p.get(key, 0)
+
+
+def plan_limits(plan_type: str | None) -> tuple[int | None, int | None]:
+    """(kunlik ball limiti, kunlik fayl limiti). None = cheksiz.
+
+    Imzo ATAYLAB o'zgarmadi — mavjud chaqiruvchilar va testlar shunga
+    tayanadi. Yangi sanoqlar uchun daily_limit() ishlatiladi.
+    """
+    return daily_limit(plan_type, "points"), daily_limit(plan_type, "files")
+
+
+# ── PRO TARIF NARXLARI (TELEGRAM STARS, XTR) ────────────────────────
+# ⚠️ XTR uchun LabeledPrice.amount — bu TO'G'RIDAN-TO'G'RI stars soni,
+# oddiy valyutalardagi kabi ×100 EMAS. Adashilsa 100 barobar ko'p yoki
+# kam yechiladi — tests/test_pro_payload.py buni qulflab turadi.
+#
+# (kun, stars, ko'rinadigan nom, chegirma yorlig'i)
+#
+# Kun boshiga narx (chegirma yorliqlari SHUNDAN kelib chiqadi — yolg'on
+# "−N%" yozib qo'ymaslik uchun):
+#   1 oy  — 100/30  = 3.33 ⭐/kun
+#   3 oy  — 299/90  = 3.32 ⭐/kun   (1 oy bilan deyarli bir xil)
+#   6 oy  — 599/180 = 3.33 ⭐/kun   (1 oy bilan deyarli bir xil)
+#   1 yil — 999/365 = 2.74 ⭐/kun   (−18%)
+# Shuning uchun yorliq faqat yillik tarifda turadi.
+PRO_PLANS: list[tuple[int, int, str, str]] = [
+    (30,  100, "1 oy",  ""),
+    (90,  299, "3 oy",  ""),
+    (180, 599, "6 oy",  ""),
+    (365, 999, "1 yil", "−18%"),
+]
+PRO_PLANS_BY_DAYS: dict[int, tuple[int, str, str]] = {
+    days: (stars, title, badge) for days, stars, title, badge in PRO_PLANS
+}
+
+# Invoice payload'i versiyalangan: narx yoki format o'zgarsa, eski
+# invoice'lar pre_checkout bosqichida tushunarli sabab bilan rad etiladi.
+PRO_PAYLOAD_VERSION = "v1"
+
+# ── KO'RINISH: TUGMA RANGLARI, PREMIUM EMOJI, EFFEKTLAR ────────────
+# Bu qiymatlar Telegram API'da EMPIRIK tekshirilgan (noto'g'ri qiymat
+# "can't parse InlineKeyboardButton: invalid button style specified"
+# xatosini beradi va BUTUN xabar yuborilmaydi).
+#
+# ⚠️ QABUL QILINADIGAN YAGONA STILLAR — boshqasini yozmang:
+BTN_PRIMARY = "primary"     # asosiy amal (ko'k/urg'uli)
+BTN_SUCCESS = "success"     # ijobiy/tavsiya etilgan (yashil)
+BTN_DANGER = "danger"       # bekor qilish/yopish (qizil)
+
+# Premium (animatsion) custom emoji ID'lari. Bular botda ALLAQACHON
+# ishlatilgan va tekshirilgan ID'lar — o'ylab topilgani xato beradi.
+# Yangi emoji qo'shish: premium emoji'ni botga yuboring, message.entities
+# ichidagi custom_emoji_id ni shu yerga ko'chiring.
+CUSTOM_EMOJI: dict[str, str] = {
+    "text":     "5980787993139481991",
+    "photo":    "5947288798713875484",
+    "document": "5818955300463447293",
+    "voice":    "5947042989145590769",
+    "search":   "5821388137443626414",
+}
+
+# Xabar effektlari (faqat SHAXSIY chatda ishlaydi — guruhda xato beradi,
+# shuning uchun yuborishda progressiv fallback bor).
+MESSAGE_EFFECTS: dict[str, str] = {
+    "🔥": "5104841245755180586",
+    "👍": "5107584321108051014",
+    "❤️": "5044134455711629726",
+    "🎉": "5046509860389126442",
+}
+
+
+# ── REFERAL ─────────────────────────────────────────────────────────
+REFERRAL_REQUIRED: int = 3        # necha do'st bir mukofotni ochadi
+REFERRAL_REWARD_DAYS: int = 3     # har mukofotda necha kun Pro
+REFERRAL_MAX_REWARDS: int = 10    # abuse tavani (jami 30 kungacha)
 
 
 def message_cost(kind: str, effort: str = REASONING_EFFORT_DEFAULT) -> int:

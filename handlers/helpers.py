@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramForbiddenError
 
 from core.loader import logger, bot
 from db import database
@@ -140,3 +141,70 @@ async def notify_inactive_users():
                         logger.error(f"Xatolik yuborishda {user_id}: {e}")
         except Exception as e:
             logger.error(f"Notify job error: {e}")
+
+
+async def _dm_or_deactivate(user_id: int, text: str, kb=None) -> None:
+    """Xabar yuboradi; foydalanuvchi botni bloklagan bo'lsa is_active=FALSE.
+
+    handlers/admin.py'dagi broadcast bilan bir xil naqsh — bloklagan
+    foydalanuvchilar ro'yxatda "faol" bo'lib qolib ketmasin.
+    """
+    try:
+        await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+    except TelegramForbiddenError:
+        try:
+            await database.deactivate_user(user_id)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"[Tarif eslatmasi] yuborilmadi (user={user_id}): {e}")
+
+
+async def premium_expiry_watcher():
+    """Tarif muddati: 3 kun oldin ogohlantiradi, tugaganda free'ga tushiradi.
+
+    notify_inactive_users() bilan bir xil naqsh — oddiy while+sleep,
+    alohida cron/scheduler kerak emas.
+
+    check_and_consume_quota() ichidagi inline downgrade ATAYLAB saqlanadi:
+    u foydalanuvchi xabar yozgan zahoti ishlaydi (6 soatlik oynani yopadi)
+    va bu watcher ishlamay qolsa ham tizim to'g'ri qoladi. Ikkalasi ham
+    idempotent, shuning uchun ikkovi birga turishi xato emas.
+    """
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            # 1) Muddati tugayotganlar. take_expiry_reminders() belgilashni
+            #    va olishni BITTA so'rovda qiladi (RETURNING), shuning uchun
+            #    bot ikki nusxada ishlasa ham eslatma ikki marta ketmaydi.
+            from handlers.pro import btn as pro_btn
+            from core.config import BTN_PRIMARY, BTN_SUCCESS
+
+            renew_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [pro_btn("➕ Muddatni uzaytirish", "pro:open", style=BTN_PRIMARY)]])
+            back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [pro_btn("💎 Pro'ni qaytarish", "pro:open", style=BTN_SUCCESS)]])
+
+            for row in await database.take_expiry_reminders(within_days=3):
+                days_left = max(0, (row['premium_until'] - datetime.now(timezone.utc)).days)
+                await _dm_or_deactivate(row['user_id'], (
+                    f"⏳ <b>TARIFINGIZ TUGAYAPTI</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"<blockquote>Pro tarifingizga <b>{days_left} kun</b> qoldi.\n"
+                    f"Hozir uzaytirsangiz, yangi kunlar qolganiga "
+                    f"<b>qo'shiladi</b> — yonib ketmaydi.</blockquote>"
+                ), renew_kb)
+                await asyncio.sleep(0.05)
+
+            # 2) Muddati tugaganlar — free'ga tushiriladi va xabar beriladi.
+            for user_id in await database.expire_premiums():
+                await _dm_or_deactivate(user_id, (
+                    f"📦 <b>PRO TARIFINGIZ TUGADI</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"<blockquote>Endi bepul tarifdasiz. Bot ishlashda "
+                    f"davom etadi — faqat kunlik limit kichikroq.</blockquote>\n\n"
+                    f"Rahmat, biz bilan bo'lganingiz uchun 🙏"
+                ), back_kb)
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"[Tarif muddati] fon vazifasida xatolik: {e}")

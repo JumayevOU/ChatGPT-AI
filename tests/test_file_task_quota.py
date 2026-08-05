@@ -1,4 +1,4 @@
-"""file_task_quota.FileTaskQuota uchun qo'lda ishga tushiriladigan tekshiruv.
+﻿"""file_task_quota.FileTaskQuota uchun qo'lda ishga tushiriladigan tekshiruv.
 Ishga tushirish: python tests/test_file_task_quota.py
 """
 
@@ -23,28 +23,28 @@ class FakeQuota:
         self.charge_calls = []
         self.refund_calls = []
 
-    async def check_and_consume_file_quota(self, user_id):
-        self.charge_calls.append(user_id)
+    async def check_and_consume_daily(self, user_id, kind="files"):
+        self.charge_calls.append((user_id, kind))
         result = {"allowed": self.allowed, "unlimited": self.unlimited,
                   "used": self.used, "limit": self.limit}
         if self.banned:
             result["banned"] = True
         return result
 
-    async def refund_file_quota(self, user_id):
-        self.refund_calls.append(user_id)
+    async def refund_daily(self, user_id, kind="files"):
+        self.refund_calls.append((user_id, kind))
 
 
 async def _with_fake(fake, coro_fn):
-    real_check = file_task_quota.check_and_consume_file_quota
-    real_refund = file_task_quota.refund_file_quota
-    file_task_quota.check_and_consume_file_quota = fake.check_and_consume_file_quota
-    file_task_quota.refund_file_quota = fake.refund_file_quota
+    real_check = file_task_quota.check_and_consume_daily
+    real_refund = file_task_quota.refund_daily
+    file_task_quota.check_and_consume_daily = fake.check_and_consume_daily
+    file_task_quota.refund_daily = fake.refund_daily
     try:
         return await coro_fn()
     finally:
-        file_task_quota.check_and_consume_file_quota = real_check
-        file_task_quota.refund_file_quota = real_refund
+        file_task_quota.check_and_consume_daily = real_check
+        file_task_quota.refund_daily = real_refund
 
 
 async def main():
@@ -62,7 +62,7 @@ async def main():
         box["q"] = q
 
     await _with_fake(fake, scenario_success)
-    assert fake.charge_calls == [1], f"faqat bitta marta yechilishi kerak edi: {fake.charge_calls}"
+    assert fake.charge_calls == [(1, "files")], f"faqat bitta marta yechilishi kerak edi: {fake.charge_calls}"
     assert fake.refund_calls == [], "muvaffaqiyatda qaytarish bo'lmasligi kerak"
     assert box["q"].limit_hit is False
     assert box["q"].remaining == 1, box["q"].remaining
@@ -79,8 +79,8 @@ async def main():
         box["q"] = q
 
     await _with_fake(fake, scenario_all_failed)
-    assert fake.charge_calls == [2]
-    assert fake.refund_calls == [2], "hamma urinish muvaffaqiyatsiz bo'lsa qaytarilishi kerak"
+    assert fake.charge_calls == [(2, "files")]
+    assert fake.refund_calls == [(2, "files")], "hamma urinish muvaffaqiyatsiz bo'lsa qaytarilishi kerak"
     assert box["q"].remaining == 1, "qaytargandan keyin sanoq tiklanishi kerak"
     print("[2] fayl chiqmasa urinish bekor qilindi OK")
 
@@ -94,7 +94,7 @@ async def main():
         box["q"] = q
 
     await _with_fake(fake, scenario_denied)
-    assert fake.charge_calls == [3]
+    assert fake.charge_calls == [(3, "files")]
     assert fake.refund_calls == [], "ruxsat berilmagan holatda qaytarish shart emas"
     assert box["q"].limit_hit is True, "chiroyli xabar uchun bayroq ko'tarilmadi"
     assert box["q"].limit == 2 and box["q"].remaining == 0

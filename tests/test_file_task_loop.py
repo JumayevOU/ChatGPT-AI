@@ -1,4 +1,4 @@
-"""services.get_openai_reply ichidagi fayl-vazifa tool-loop'ini tekshiradi.
+﻿"""services.get_openai_reply ichidagi fayl-vazifa tool-loop'ini tekshiradi.
 
 OpenAI oqimi `_open_response_stream` seami orqali soxtalashtiriladi —
 shunda haqiqiy tarmoq chaqiruvisiz, dispatch mantiqi (tool tanlash,
@@ -82,13 +82,13 @@ class FakeQuotaDB:
         self.charges = []
         self.refunds = []
 
-    async def check_and_consume_file_quota(self, user_id):
-        self.charges.append(user_id)
+    async def check_and_consume_daily(self, user_id, kind="files"):
+        self.charges.append((user_id, kind))
         return {"allowed": self.allowed, "unlimited": self.unlimited,
                 "used": 1, "limit": 2}
 
-    async def refund_file_quota(self, user_id):
-        self.refunds.append(user_id)
+    async def refund_daily(self, user_id, kind="files"):
+        self.refunds.append((user_id, kind))
 
 
 class FakeSandbox:
@@ -129,14 +129,14 @@ async def run_case(*, rounds, sandbox_results, output_files, user_id=7,
         "open": services._open_response_stream,
         "sandbox": services.run_in_sandbox,
         "hist": services.safe_get_chat_history,
-        "check": file_task_quota.check_and_consume_file_quota,
-        "refund": file_task_quota.refund_file_quota,
+        "check": file_task_quota.check_and_consume_daily,
+        "refund": file_task_quota.refund_daily,
     }
     services._open_response_stream = make_fake_opener(rounds)
     services.run_in_sandbox = fake_sbx.run
     services.safe_get_chat_history = lambda *a, **k: _empty_history()
-    file_task_quota.check_and_consume_file_quota = fake_db.check_and_consume_file_quota
-    file_task_quota.refund_file_quota = fake_db.refund_file_quota
+    file_task_quota.check_and_consume_daily = fake_db.check_and_consume_daily
+    file_task_quota.refund_daily = fake_db.refund_daily
     try:
         chunks = await collect(services.get_openai_reply(
             1, "test so'rov", user_id=user_id, output_files=output_files,
@@ -147,8 +147,8 @@ async def run_case(*, rounds, sandbox_results, output_files, user_id=7,
         services._open_response_stream = real["open"]
         services.run_in_sandbox = real["sandbox"]
         services.safe_get_chat_history = real["hist"]
-        file_task_quota.check_and_consume_file_quota = real["check"]
-        file_task_quota.refund_file_quota = real["refund"]
+        file_task_quota.check_and_consume_daily = real["check"]
+        file_task_quota.refund_daily = real["refund"]
 
     return chunks, fake_db, fake_sbx
 
@@ -178,7 +178,7 @@ async def main():
     assert "[CLEAR_TEXT]" in chunks, chunks
     assert "Tayyor!" in chunks, chunks
     assert out_files == [("a.pdf", b"%PDF-1.4")], out_files
-    assert db.charges == [7], db.charges
+    assert db.charges == [(7, "files")], db.charges
     assert db.refunds == [], "muvaffaqiyatda qaytarilmasligi kerak"
     print("[1] muvaffaqiyatli fayl vazifasi OK")
 
@@ -200,7 +200,7 @@ async def main():
         output_files=out_files,
     )
     assert len(sbx.calls) == 2, f"ikki marta chaqirilishi kerak edi: {len(sbx.calls)}"
-    assert db.charges == [7], f"bir marta: {db.charges}"
+    assert db.charges == [(7, "files")], f"bir marta: {db.charges}"
     assert db.refunds == [], "oxirida muvaffaqiyat bo'ldi — qaytarish yo'q"
     assert out_files == [("b.xlsx", b"PK\x03\x04")], out_files
     print("[2] xato -> avtomatik qayta urinish OK")
@@ -217,7 +217,7 @@ async def main():
         output_files=out_files,
     )
     assert out_files == [], out_files
-    assert db.refunds == [7], f"qaytarilishi kerak: {db.refunds}"
+    assert db.refunds == [(7, "files")], f"qaytarilishi kerak: {db.refunds}"
     print("[3] to'liq muvaffaqiyatsizlik -> kvota qaytarildi OK")
 
     # 4) Kunlik fayl limiti tugagan -> sandbox UMUMAN chaqirilmaydi va

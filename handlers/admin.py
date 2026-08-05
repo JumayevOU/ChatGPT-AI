@@ -1,5 +1,7 @@
 import logging
 import json
+import html
+import re
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -15,14 +17,18 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter, TelegramBadRequest,
+)
 
 from core.keyboards import admin_keyboard
 from core.config import (
     DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
-    MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE,
+    MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE, plan_limits, PRO_PLANS,
+    REFERRAL_REQUIRED, REFERRAL_REWARD_DAYS,
 )
 from db import database as database_module
+from handlers import pro as pro_module
 
 from zoneinfo import ZoneInfo  # Python 3.9+
 
@@ -67,6 +73,16 @@ class MaintenanceStates(StatesGroup):
 class WatchStates(StatesGroup):
     waiting_for_group_id = State()
     waiting_for_identifier = State()
+
+
+class PromoAdminStates(StatesGroup):
+    waiting_for_spec = State()
+
+
+class GiveawayStates(StatesGroup):
+    """"Bepul Pro" bo'limi — promokod/referalni ANIQ odamlarga yuborish."""
+    waiting_promo_recipients = State()
+    waiting_ref_recipients = State()
 
 
 # --- Yangi: ReportStates (foydalanuvchi adminga xabar yozganda foydalaniladi) ---
@@ -122,16 +138,24 @@ def _render_user_card(profile: Dict[str, Any]) -> str:
     plan_type = profile.get('plan_type') or 'free'
     if plan_type != 'free':
         premium_until = profile.get('premium_until')
+        name = "Pro" if plan_type == 'pro' else "Premium"
         plan_label = (
-            f"💎 Premium ({format_dt(premium_until)} gacha)" if premium_until else "💎 Premium (muddatsiz)"
+            f"💎 {name} ({format_dt(premium_until)} gacha)" if premium_until
+            else f"💎 {name} (muddatsiz)"
         )
     else:
         plan_label = "🆓 Free"
 
+    # Limit qatori HAR QANDAY limitli tarif uchun ko'rsatiladi. Ilgari faqat
+    # 'free' uchun chizilardi — natijada admin pul to'lagan Pro foydalanuvchi
+    # kuniga qancha sarflayotganini umuman ko'ra olmasdi.
+    point_limit, file_limit = plan_limits(plan_type)
     limit_line = ""
-    if plan_type == 'free':
+    if point_limit is not None:
         limit_line = (
-            f"📊 <b>Bugungi limit:</b> <code>{profile.get('daily_requests_used', 0)} / {DAILY_FREE_LIMIT}</code>\n"
+            f"📊 <b>Bugungi limit:</b> "
+            f"<code>{profile.get('daily_requests_used', 0)} / {point_limit}</code> ball"
+            f" · <code>{profile.get('daily_files_used', 0)} / {file_limit}</code> fayl\n"
         )
 
     return (
@@ -162,6 +186,7 @@ def _user_management_keyboard(user_id: int, is_banned_flag: bool, plan_type: str
         [ban_btn],
         [plan_btn],
         [InlineKeyboardButton(text="🔄 Limitni reset qilish", callback_data=f"mu:resetquota:{user_id}")],
+        [InlineKeyboardButton(text="💸 To'lovlar / qaytarish", callback_data=f"mu:pay:{user_id}")],
         [InlineKeyboardButton(text="🔙 Yopish", callback_data=f"mu:close:{user_id}")],
     ])
 
@@ -330,6 +355,565 @@ def register_admin_handlers(dp, bot: Bot):
         await message.answer("🔧 Admin panel:", reply_markup=admin_keyboard)
 
     # --------------------------------------------------
+    # 🎁 BEPUL PRO — promokod/referalni ANIQ odamlarga yuborish
+    # --------------------------------------------------
+    # Bu bo'lim ATAYLAB admin panelida: bepul olish yo'llari ommaviy
+    # ekranlarda ko'rinsa, hech kim sotib olmay bepulini kutib o'tirardi.
+    # Foydalanuvchi bu imkoniyatlar haqida faqat admin unga xabar
+    # yuborgandagina biladi.
+
+    async def _resolve_recipients(raw: str):
+        """"@ali 123456 @vali" satrini foydalanuvchilarga aylantiradi.
+
+        Qaytaradi: (topilganlar[(id, ko'rinadigan nom)], topilmaganlar[str])
+        Bir marta ko'p odamga yuborish — kampaniya uchun ham, bitta odam
+        uchun ham bir xil ishlaydi, alohida rejim kerak emas.
+        """
+        tokens = [t.strip(" ,\n\t") for t in re.split(r"[\s,]+", raw or "") if t.strip(" ,\n\t")]
+        found, missing, seen = [], [], set()
+        for token in tokens[:50]:            # ponytail: bir martada 50 ta yetadi
+            try:
+                uid = await database_module.get_user_by_identifier(token)
+            except Exception:
+                uid = None
+            if not uid or uid in seen:
+                if not uid:
+                    missing.append(html.escape(token))
+                continue
+            seen.add(uid)
+            try:
+                prof = await database_module.get_full_user_profile(uid)
+            except Exception:
+                prof = None
+            # html.escape: token — admin yozgan erkin matn. Ichida "<" bo'lsa
+            # HTML parse xatosi butun hisobotni yuborilmas qilardi.
+            name = html.escape(token) if token.startswith("@") else f"<code>{uid}</code>"
+            if prof and prof.get("username") and prof["username"] != "Mavjud emas":
+                name = f"@{prof['username']}"
+            found.append((uid, name, bool(prof and prof.get("is_banned"))))
+        return found, missing
+
+    async def _report_delivery(message: Message, sent, failed, missing, banned):
+        lines = [f"📨 <b>Yuborish yakunlandi</b>\n"]
+        if sent:
+            lines.append(f"✅ <b>Yuborildi ({len(sent)}):</b> " + ", ".join(sent))
+        if failed:
+            lines.append(f"🚫 <b>Yetmadi ({len(failed)}):</b> " + ", ".join(failed)
+                         + "\n<i>Botni bloklagan bo'lishi mumkin.</i>")
+        if banned:
+            lines.append(f"⛔️ <b>Banlangan, o'tkazib yuborildi:</b> " + ", ".join(banned))
+        if missing:
+            lines.append(f"❓ <b>Topilmadi ({len(missing)}):</b> " + ", ".join(missing)
+                         + "\n<i>Ular botga /start bermagan.</i>")
+        await message.answer("\n\n".join(lines), parse_mode=ParseMode.HTML)
+
+    async def _render_giveaway_menu():
+        try:
+            s = await database_module.giveaway_stats()
+        except Exception:
+            logger.exception("giveaway_stats error")
+            s = {}
+        promo_days = s.get("promo_days", 0) or 0
+        ref_rewards = s.get("rewarded", 0) or 0
+        ref_days = ref_rewards // REFERRAL_REQUIRED * REFERRAL_REWARD_DAYS
+
+        text = (
+            f"🎁 <b>BEPUL PRO BERISH</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<blockquote>Bu imkoniyatlar foydalanuvchilarga "
+            f"<b>ko'rinmaydi</b>. Faqat siz yuborgan odam biladi va "
+            f"foydalana oladi.</blockquote>\n\n"
+            f"🎟 <b>Promokodlar</b>\n"
+            f"├ Faol: <b>{s.get('active_codes', 0)}</b> ta "
+            f"(jami {s.get('total_codes', 0)})\n"
+            f"├ Ishlatilgan: <b>{s.get('redemptions', 0)}</b> marta\n"
+            f"└ Berilgan: <b>{promo_days} kun</b>\n\n"
+            f"👥 <b>Referal</b>\n"
+            f"├ Taklif qilingan: <b>{s.get('invited', 0)}</b>\n"
+            f"├ Faol bo'lgan: <b>{s.get('qualified', 0)}</b>\n"
+            f"└ Berilgan: <b>{ref_days} kun</b>\n\n"
+            f"💸 <b>Jami bepul berilgan: {promo_days + ref_days} kun</b>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎟 Yangi promokod yaratish",
+                                  callback_data="gv:new", style="primary")],
+            [InlineKeyboardButton(text="📨 Promokodni odamga yuborish",
+                                  callback_data="gv:sendpromo", style="success")],
+            [InlineKeyboardButton(text="👥 Referal taklifini yuborish",
+                                  callback_data="gv:sendref", style="success")],
+            [InlineKeyboardButton(text="📋 Kodlar ro'yxati", callback_data="gv:list")],
+            [InlineKeyboardButton(text="✖️ Yopish", callback_data="gv:close",
+                                  style="danger")],
+        ])
+        return text, kb
+
+    async def show_giveaway_menu(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            return
+        await state.clear()
+        text, kb = await _render_giveaway_menu()
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    async def _promo_picker_kb(action: str):
+        """Yuborish uchun kod tanlash — faqat ISHLATSA BO'LADIGAN kodlar."""
+        try:
+            codes = await database_module.list_promo_codes()
+        except Exception:
+            logger.exception("list_promo_codes error")
+            return None
+        now = datetime.now(timezone.utc)
+        usable = [
+            c for c in codes
+            if not c['revoked']
+            and c['used_count'] < c['max_uses']
+            and (c['expires_at'] is None or c['expires_at'] > now)
+        ]
+        if not usable:
+            return None
+        rows = [[InlineKeyboardButton(
+            text=f"{c['code']} · {c['days']} kun · {c['used_count']}/{c['max_uses']}",
+            callback_data=f"gv:{action}:{c['code']}")] for c in usable[:20]]
+        rows.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="gv:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def giveaway_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        parts = (query.data or "").split(":")
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "close":
+            await state.clear()
+            await query.answer()
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+
+        if action == "menu":
+            await state.clear()
+            await query.answer()
+            text, kb = await _render_giveaway_menu()
+            try:
+                await query.message.edit_text(text, parse_mode=ParseMode.HTML,
+                                              reply_markup=kb)
+            except Exception:
+                pass
+            return
+
+        if action == "new":
+            await query.answer()
+            await state.set_state(PromoAdminStates.waiting_for_spec)
+            await query.message.answer(_PROMO_HELP, parse_mode=ParseMode.HTML)
+            return
+
+        if action == "list":
+            await query.answer()
+            text, kb = await _render_promo_list()
+            await query.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action in ("sendpromo", "sendref") and len(parts) == 2:
+            await query.answer()
+            if action == "sendref":
+                await state.set_state(GiveawayStates.waiting_ref_recipients)
+                await query.message.answer(
+                    "👥 <b>Referal taklifini yuborish</b>\n\n"
+                    "Kimga yuboray? @username yoki ID — bir nechtasini "
+                    "probel/vergul bilan ajratib yozing.\n\n"
+                    "<blockquote>Misol: <code>@ali @vali 123456789</code></blockquote>\n\n"
+                    "Har biriga <b>o'zining shaxsiy havolasi</b> yuboriladi.",
+                    parse_mode=ParseMode.HTML)
+                return
+            kb = await _promo_picker_kb("pick")
+            if kb is None:
+                await query.message.answer(
+                    "❗️ Ishlatsa bo'ladigan promokod yo'q.\n"
+                    "Avval <b>🎟 Yangi promokod yaratish</b> tugmasini bosing.",
+                    parse_mode=ParseMode.HTML)
+                return
+            await query.message.answer("🎟 <b>Qaysi kodni yuboray?</b>",
+                                       parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if action == "pick" and len(parts) == 3:
+            code = parts[2]
+            await query.answer()
+            await state.set_state(GiveawayStates.waiting_promo_recipients)
+            await state.update_data(promo_code=code)
+            await query.message.answer(
+                f"📨 <b>{code}</b> kodi kimga yuborilsin?\n\n"
+                f"@username yoki ID — bir nechtasini probel/vergul bilan "
+                f"ajratib yozing.\n\n"
+                f"<blockquote>Misol: <code>@ali @vali 123456789</code></blockquote>\n\n"
+                f"<i>Ular bir bosishda faollashtira oladi.</i>",
+                parse_mode=ParseMode.HTML)
+            return
+
+        await query.answer()
+
+    async def process_promo_recipients(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+        data = await state.get_data()
+        code = data.get("promo_code")
+        await state.clear()
+        if not code:
+            await message.answer("❗️ Kod yo'qoldi. 🎁 Bepul Pro dan qayta boshlang.")
+            return
+
+        try:
+            info = await database_module.get_promo_code(code)
+        except Exception:
+            logger.exception("get_promo_code error")
+            await message.answer("❌ DB xatosi.")
+            return
+        if info is None:
+            await message.answer("❗️ Bu kod endi mavjud emas.")
+            return
+
+        found, missing = await _resolve_recipients(message.text or "")
+        if not found and not missing:
+            await message.answer("❗️ Hech kim ko'rsatilmadi. Qayta urinib ko'ring.")
+            return
+
+        # ⚠️ Kod nechta odamga yuborilayotganini max_uses bilan solishtiramiz:
+        # 1 martalik kodni 10 kishiga yuborsak, 9 tasi "kod ishlatilgan"
+        # degan xafa qiluvchi javob olardi.
+        active = [f for f in found if not f[2]]
+        remaining = info['max_uses'] - info['used_count']
+        if len(active) > remaining:
+            await message.answer(
+                f"⚠️ <b>Diqqat:</b> <code>{code}</code> kodidan yana "
+                f"<b>{remaining} marta</b> foydalanish mumkin, siz esa "
+                f"<b>{len(active)} kishiga</b> yubormoqchisiz.\n\n"
+                f"Kodning <b>MAX</b> qiymatini oshiring yoki kamroq odamga "
+                f"yuboring — aks holda ortiqchasi kodni ishlata olmaydi.",
+                parse_mode=ParseMode.HTML)
+            return
+
+        sent, failed, banned = [], [], []
+        for uid, name, is_banned_flag in found:
+            if is_banned_flag:
+                banned.append(name)
+                continue
+            ok = await pro_module.send_promo_gift(
+                uid, info['code'], info['days'], info['expires_at'])
+            (sent if ok else failed).append(name)
+            await asyncio.sleep(0.05)      # flood-control
+
+        try:
+            await database_module.log_admin_action(
+                message.from_user.id, "send_promo", None,
+                f"{code} -> {len(sent)} ta")
+        except Exception:
+            pass
+        await _report_delivery(message, sent, failed, missing, banned)
+
+    async def process_ref_recipients(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+        await state.clear()
+
+        if not pro_module.BOT_USERNAME:
+            await message.answer(
+                "❌ Bot username aniqlanmagan — referal havolasi yasab bo'lmaydi. "
+                "Botni qayta ishga tushiring.")
+            return
+
+        found, missing = await _resolve_recipients(message.text or "")
+        if not found and not missing:
+            await message.answer("❗️ Hech kim ko'rsatilmadi. Qayta urinib ko'ring.")
+            return
+
+        sent, failed, banned = [], [], []
+        for uid, name, is_banned_flag in found:
+            if is_banned_flag:
+                banned.append(name)
+                continue
+            ok = await pro_module.send_referral_invite(uid)
+            (sent if ok else failed).append(name)
+            await asyncio.sleep(0.05)
+
+        try:
+            await database_module.log_admin_action(
+                message.from_user.id, "send_referral", None, f"{len(sent)} ta")
+        except Exception:
+            pass
+        await _report_delivery(message, sent, failed, missing, banned)
+
+    # --------------------------------------------------
+    # PROMOKODLAR
+    # --------------------------------------------------
+    _PROMO_HELP = (
+        "🎟 <b>Promokodlar</b>\n\n"
+        "Yangi kod yaratish uchun bitta qatorda yuboring:\n"
+        "<code>KOD KUN MAX MUDDAT</code>\n\n"
+        "├ <b>KOD</b> — harflar/raqamlar (masalan NEWYEAR)\n"
+        "├ <b>KUN</b> — necha kun Pro beriladi\n"
+        "├ <b>MAX</b> — necha marta ishlatish mumkin\n"
+        "└ <b>MUDDAT</b> — YYYY-MM-DD yoki <code>-</code> (cheksiz)\n\n"
+        "<b>Misol:</b> <code>NEWYEAR 30 100 2026-01-31</code>\n"
+        "<b>Misol:</b> <code>SORRY 7 1 -</code>"
+    )
+
+    async def _render_promo_list():
+        try:
+            codes = await database_module.list_promo_codes()
+        except Exception:
+            logger.exception("list_promo_codes error")
+            return "❌ DB xatosi.", None
+
+        if not codes:
+            return _PROMO_HELP + "\n\n— Hozircha kod yo'q —", None
+
+        lines = [_PROMO_HELP, "\n<b>Mavjud kodlar:</b>"]
+        rows = []
+        for c in codes:
+            expired = c['expires_at'] is not None and c['expires_at'] <= datetime.now(timezone.utc)
+            if c['revoked']:
+                mark = "🚫"
+            elif expired or c['used_count'] >= c['max_uses']:
+                mark = "⌛️"
+            else:
+                mark = "✅"
+            until = format_dt(c['expires_at']) if c['expires_at'] else "cheksiz"
+            lines.append(
+                f"{mark} <code>{c['code']}</code> — {c['days']} kun · "
+                f"{c['used_count']}/{c['max_uses']} · {until}"
+            )
+            if not c['revoked']:
+                rows.append([InlineKeyboardButton(
+                    text=f"🚫 {c['code']} bekor qilish",
+                    callback_data=f"promo:revoke:{c['code']}")])
+
+        rows.append([InlineKeyboardButton(text="🔙 Yopish", callback_data="promo:close")])
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def show_promo_menu(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            return
+        text, kb = await _render_promo_list()
+        await state.set_state(PromoAdminStates.waiting_for_spec)
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    async def process_promo_create(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) != 4:
+            await message.answer(
+                "❗️ Format: <code>KOD KUN MAX MUDDAT</code>\n"
+                "Misol: <code>NEWYEAR 30 100 2026-01-31</code>\n\n"
+                "Bekor qilish uchun boshqa tugmani bosing.",
+                parse_mode=ParseMode.HTML)
+            return
+
+        code, days_raw, max_raw, expiry_raw = parts
+        if not code.replace("_", "").isalnum() or len(code) > 32:
+            await message.answer("❗️ Kod faqat harf/raqamdan iborat va 32 belgidan qisqa bo'lsin.")
+            return
+        try:
+            days, max_uses = int(days_raw), int(max_raw)
+        except ValueError:
+            await message.answer("❗️ KUN va MAX butun son bo'lishi kerak.")
+            return
+        if not (0 < days <= 3650) or not (0 < max_uses <= 100000):
+            await message.answer("❗️ KUN 1-3650, MAX 1-100000 oralig'ida bo'lsin.")
+            return
+
+        expires_at = None
+        if expiry_raw != "-":
+            try:
+                expires_at = datetime.strptime(expiry_raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                await message.answer("❗️ MUDDAT formati: YYYY-MM-DD yoki <code>-</code>",
+                                     parse_mode=ParseMode.HTML)
+                return
+            if expires_at <= datetime.now(timezone.utc):
+                await message.answer("❗️ Muddat kelajakda bo'lishi kerak.")
+                return
+
+        admin_id = message.from_user.id
+        try:
+            created = await database_module.create_promo_code(
+                code, days, max_uses, expires_at, admin_id)
+        except Exception:
+            logger.exception("create_promo_code error")
+            await message.answer("❌ DB xatosi.")
+            return
+
+        if not created:
+            await message.answer(f"❗️ <code>{code.upper()}</code> kodi allaqachon mavjud.",
+                                 parse_mode=ParseMode.HTML)
+            return
+
+        try:
+            await database_module.log_admin_action(
+                admin_id, "create_promo", None, f"{code.upper()} {days}d x{max_uses}")
+        except Exception:
+            pass
+
+        # Kod yaratilgach FSM'dan chiqamiz va DARHOL yuborishni taklif
+        # qilamiz — admin uchun eng tabiiy keyingi qadam shu.
+        await state.clear()
+        await message.answer(
+            f"✅ <b>PROMOKOD YARATILDI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<blockquote>"
+            f"🎟 Kod: <code>{code.upper()}</code>\n"
+            f"💎 Muddat: <b>{days} kun</b> Pro\n"
+            f"👥 Necha marta: <b>{max_uses}</b>\n"
+            f"⏰ Amal qiladi: <b>"
+            f"{format_dt(expires_at) if expires_at else 'cheksiz'}</b>"
+            f"</blockquote>\n\n"
+            f"<i>Bu kod hech qayerda e'lon qilinmaydi — faqat siz "
+            f"yuborgan odam biladi.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📨 Shu kodni odamga yuborish",
+                    callback_data=f"gv:pick:{code.upper()}", style="success")],
+                [InlineKeyboardButton(text="🎁 Bepul Pro menyusi",
+                                      callback_data="gv:menu")],
+            ]))
+
+    async def promo_admin_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        parts = (query.data or "").split(":")
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "close":
+            await state.clear()
+            await query.answer()
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+
+        if action == "revoke" and len(parts) == 3:
+            code = parts[2]
+            try:
+                ok = await database_module.revoke_promo_code(code)
+                if ok:
+                    await database_module.log_admin_action(
+                        query.from_user.id, "revoke_promo", None, code)
+            except Exception:
+                logger.exception("revoke_promo_code error")
+                await query.answer("❗ DB xatosi.", show_alert=True)
+                return
+            await query.answer("✅ Bekor qilindi." if ok else "❌ Kod topilmadi.", show_alert=True)
+            text, kb = await _render_promo_list()
+            try:
+                await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            except Exception:
+                pass
+            return
+
+        await query.answer()
+
+    # --------------------------------------------------
+    # TO'LOVLAR VA REFUND
+    # --------------------------------------------------
+    async def _show_user_payments(query: CallbackQuery, target_id: int):
+        try:
+            payments = await database_module.get_user_payments(target_id)
+        except Exception:
+            logger.exception("get_user_payments error")
+            await query.message.answer("❌ DB xatosi.")
+            return
+
+        if not payments:
+            await query.message.answer("💸 Bu foydalanuvchida Stars to'lovlari yo'q.")
+            return
+
+        lines = [f"💸 <b>To'lovlar</b> (<code>{target_id}</code>)\n"]
+        rows = []
+        for p in payments:
+            mark = "↩️ qaytarilgan" if p['refunded_at'] else "✅"
+            gift = " 🎁" if p['payer_id'] != p['beneficiary_id'] else ""
+            lines.append(
+                f"{mark} <b>{p['stars']} ⭐</b> · {p['days']} kun{gift} · "
+                f"{format_dt(p['created_at'])}"
+            )
+            if not p['refunded_at']:
+                # ⚠️ callback_data 64 bayt bilan cheklangan, Telegram'ning
+                # charge_id'si esa unga sig'maydi — shuning uchun ichki
+                # SERIAL id ishlatiladi, charge_id server tomonda topiladi.
+                rows.append([InlineKeyboardButton(
+                    text=f"↩️ {p['stars']} ⭐ qaytarish",
+                    callback_data=f"mu:refund:{target_id}:{p['id']}")])
+
+        rows.append([InlineKeyboardButton(text="🔙 Yopish", callback_data=f"mu:close:{target_id}")])
+        await query.message.answer(
+            "\n".join(lines), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def _do_refund(query: CallbackQuery, admin_id: int, payment_id_raw: str):
+        try:
+            payment = await database_module.get_payment_by_id(int(payment_id_raw))
+        except Exception:
+            logger.exception("get_payment_by_id error")
+            await query.answer("❗ DB xatosi.", show_alert=True)
+            return
+
+        if payment is None:
+            await query.answer("❌ To'lov topilmadi.", show_alert=True)
+            return
+        if payment['refunded_at']:
+            await query.answer("ℹ️ Bu to'lov allaqachon qaytarilgan.", show_alert=True)
+            return
+
+        # ⚠️ TARTIB: AVVAL Telegram, KEYIN baza. Telegram refund'ni rad
+        # etishi mumkin (muddat o'tgan, allaqachon qaytarilgan) — bunday
+        # holatda foydalanuvchidan tarif olib qo'yilmasligi kerak.
+        try:
+            await bot.refund_star_payment(
+                user_id=payment['payer_id'],                 # PULNI TO'LAGAN odam
+                telegram_payment_charge_id=payment['charge_id'],
+            )
+        except TelegramBadRequest as e:
+            # Telegram'ning o'z sababini aynan ko'rsatamiz — "Xatolik"
+            # degan umumiy matn admin uchun foydasiz.
+            await query.answer(f"❌ Telegram rad etdi: {e.message}", show_alert=True)
+            return
+        except Exception:
+            logger.exception("refund_star_payment error")
+            await query.answer("❗ Telegram bilan bog'lanishda xatolik.", show_alert=True)
+            return
+
+        try:
+            await database_module.mark_payment_refunded(payment['charge_id'], admin_id)
+            await database_module.log_admin_action(
+                admin_id, "refund_stars", payment['beneficiary_id'], payment['charge_id'])
+        except Exception:
+            # Pul QAYTARILDI, lekin baza yozilmadi — bu holatni log'da
+            # aniq qoldiramiz, chunki tarif hali ham foydalanuvchida turadi.
+            logger.exception(
+                f"REFUND QILINDI, LEKIN BAZAGA YOZILMADI: charge={payment['charge_id']}")
+            await query.answer(
+                "⚠️ Pul qaytarildi, lekin bazada belgilanmadi. Log'ni tekshiring.",
+                show_alert=True)
+            return
+
+        await query.answer("✅ Pul qaytarildi va tarif olib tashlandi.", show_alert=True)
+        try:
+            await bot.send_message(payment['payer_id'], (
+                f"↩️ <b>To'lovingiz qaytarildi</b>\n\n"
+                f"💰 {payment['stars']} ⭐ hisobingizga qaytarildi.\n"
+                f"🧾 Chek: <code>{payment['charge_id']}</code>"
+            ), parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+    # --------------------------------------------------
     # FOYDALANUVCHINI BOSHQARISH
     # --------------------------------------------------
     async def start_manage_user(message: Message, state: FSMContext):
@@ -424,6 +1008,19 @@ def register_admin_handlers(dp, bot: Bot):
             return
 
         admin_id = query.from_user.id
+
+        if action == "pay":
+            await query.answer()
+            await _show_user_payments(query, target_id)
+            return
+
+        if action == "refund":
+            # parts: mu:refund:<target_id>:<payment_id>
+            if len(parts) != 4:
+                await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
+                return
+            await _do_refund(query, admin_id, parts[3])
+            return
         try:
             if action == "ban":
                 await database_module.ban_user(target_id)
@@ -795,7 +1392,7 @@ def register_admin_handlers(dp, bot: Bot):
                           'text_message','photo_message','document_message','voice_message',
                           'guest_text_message','guest_photo_message',
                           'guest_document_message','guest_voice_message',
-                          'file_task'
+                          'file_task','research'
                       )
                     GROUP BY activity_type ORDER BY cnt DESC
                 ''')
@@ -803,9 +1400,12 @@ def register_admin_handlers(dp, bot: Bot):
                 plan_counts = await conn.fetchrow('''
                     SELECT
                         COUNT(*) FILTER (WHERE plan_type = 'free' OR plan_type IS NULL) AS free_count,
-                        COUNT(*) FILTER (WHERE plan_type IS NOT NULL AND plan_type != 'free') AS premium_count
+                        COUNT(*) FILTER (WHERE plan_type = 'pro') AS pro_count,
+                        COUNT(*) FILTER (WHERE plan_type IS NOT NULL AND plan_type NOT IN ('free', 'pro')) AS premium_count
                     FROM users WHERE is_active = TRUE
                 ''')
+
+            revenue = await database_module.revenue_stats()
         except Exception:
             logger.exception("handle_users_command error")
             await message.answer("❌ DB xatosi.")
@@ -841,6 +1441,9 @@ def register_admin_handlers(dp, bot: Bot):
             "guest_document_message": ("📄 Hujjat · guest", MESSAGE_COST_DOCUMENT),
             "guest_voice_message": ("🎤 Ovoz · guest", MESSAGE_COST_VOICE),
             "file_task": ("🛠 Fayl yaratish", 0),
+            # Rasm va tadqiqot ball emas, alohida kunlik sanoqdan yechiladi —
+            # shuning uchun ball bahosi 0 (fayl vazifasi kabi).
+            "research": ("🔎 Chuqur tadqiqot", 0),
         }
         total_cost_estimate = 0
         total_actions = 0
@@ -860,7 +1463,16 @@ def register_admin_handlers(dp, bot: Bot):
         guest_share = round(guest_actions / total_actions * 100) if total_actions else 0
 
         free_count = plan_counts["free_count"] if plan_counts else 0
+        pro_count = plan_counts["pro_count"] if plan_counts else 0
         premium_count = plan_counts["premium_count"] if plan_counts else 0
+
+        # Daromad qaytarilgan to'lovlarsiz hisoblanadi (revenue_stats()
+        # ichida FILTER refunded_at IS NULL) — ya'ni bu netto raqam.
+        plan_names = {d: t for d, _s, t, _b in PRO_PLANS}
+        by_plan = " · ".join(
+            f"{plan_names.get(days, f'{days} kun')}: <b>{cnt}</b>"
+            for days, cnt in revenue.get('by_plan', [])
+        ) or "—"
 
         text = (
             "👥 <b>Bot foydalanuvchilari statistikasi</b>\n\n"
@@ -880,7 +1492,15 @@ def register_admin_handlers(dp, bot: Bot):
             f"👥 Shundan Guest Mode: <b>{guest_actions}</b> ta ({guest_share}%)\n\n"
             f"📦 <b>Rejalar bo'yicha</b>\n"
             f"├ 🆓 Free: <b>{free_count}</b>\n"
-            f"└ 💎 Premium: <b>{premium_count}</b>"
+            f"├ 💎 Pro (sotib olingan): <b>{pro_count}</b>\n"
+            f"└ ♾️ Premium (qo'lda): <b>{premium_count}</b>\n\n"
+            f"💰 <b>Daromad (Stars)</b>\n"
+            f"├ Bugun: <b>{revenue.get('stars_today', 0)}</b> ⭐\n"
+            f"├ 30 kun: <b>{revenue.get('stars_30d', 0)}</b> ⭐ "
+            f"({revenue.get('sales_30d', 0)} ta sotuv)\n"
+            f"├ Jami: <b>{revenue.get('stars_total', 0)}</b> ⭐\n"
+            f"└ Qaytarilgan: <b>{revenue.get('refunds', 0)}</b> ta\n"
+            f"📊 {by_plan}"
         )
         await message.answer(text, parse_mode="HTML")
 
@@ -1462,6 +2082,7 @@ def register_admin_handlers(dp, bot: Bot):
     dp.message.register(start_manage_user, F.text == "🔍 Foydalanuvchini boshqarish")
     dp.message.register(show_maintenance_menu, F.text == "🛠 Texnik ta'til")
     dp.message.register(show_watch_menu, F.text == "👁 Kuzatish")
+    dp.message.register(show_giveaway_menu, F.text == "🎁 Bepul Pro")
     dp.message.register(capture_broadcast_content, BroadcastStates.waiting_for_content)
     dp.message.register(process_manage_user_identifier, ManageUserStates.waiting_for_identifier)
     dp.message.register(process_user, PMStates.waiting_for_user)
@@ -1471,6 +2092,11 @@ def register_admin_handlers(dp, bot: Bot):
     dp.message.register(process_maintenance_message, MaintenanceStates.waiting_for_message)
     dp.message.register(process_watch_group_id, WatchStates.waiting_for_group_id)
     dp.message.register(process_watch_identifier, WatchStates.waiting_for_identifier)
+    # DIQQAT: FSM handlerlari tugma handlerlaridan KEYIN ro'yxatdan o'tadi —
+    # aks holda admin promokod holatida qolib, boshqa tugmalarni bosa olmasdi.
+    dp.message.register(process_promo_create, PromoAdminStates.waiting_for_spec)
+    dp.message.register(process_promo_recipients, GiveawayStates.waiting_promo_recipients)
+    dp.message.register(process_ref_recipients, GiveawayStates.waiting_ref_recipients)
 
     # register report message handler (user types the report text after pressing report button)
     dp.message.register(process_report_message, ReportStates.waiting_for_report_message)
@@ -1487,4 +2113,6 @@ def register_admin_handlers(dp, bot: Bot):
     dp.callback_query.register(users_list_page_callback, lambda q: q.data and q.data.startswith("ulist:"))
     dp.callback_query.register(maintenance_toggle_callback, lambda q: q.data and q.data.startswith("maint:"))
     dp.callback_query.register(watch_menu_callback, lambda q: q.data and q.data.startswith("watch:"))
+    dp.callback_query.register(promo_admin_callback, lambda q: q.data and q.data.startswith("promo:"))
+    dp.callback_query.register(giveaway_callback, lambda q: q.data and q.data.startswith("gv:"))
 

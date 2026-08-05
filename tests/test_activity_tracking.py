@@ -102,17 +102,52 @@ def main():
         logged.clear()
         asyncio.run(hm._after_file_task(FakeMsg(), [], True))
         assert logged == [], "fayl vazifasi bo'lmasa yozilmasligi kerak"
+
+        # Faqat RASM chizilgan holat: fayl sanog'i umuman yechilmagan.
+        # Ilgari bu yerda "oxirgi bepul faylingiz" xabari yolg'on ishga
+        # tushib, Pro foydalanuvchiga bepul tarif haqida yozib yuborardi.
+        logged.clear()
+        asyncio.run(hm._after_file_task(FakeMsg(), [FakeUnchargedQuota()], True))
+        assert logged == [], (
+            "ishlatilmagan sanoq bo'yicha faollik yozilmasligi kerak"
+        )
     finally:
         hm.track_user_activity = real
     print("[5] fayl yaratish faqat fayl chiqqanda yoziladi OK")
 
-    print("\nactivity_tracking: barcha tekshiruvlar o'tdi (5/5).")
+    # 6) Ishlatilmagan sanoq bo'yicha limit XABARI ham chiqmasligi kerak
+    sent = []
+    real_answer = hm._answer_with_pro_button
+    hm._answer_with_pro_button = lambda msg, text, offer: sent.append(text)
+    try:
+        asyncio.run(hm._after_file_task(FakeMsg(), [FakeUnchargedQuota()], True))
+        assert sent == [], (
+            "KRITIK: tegilmagan sanoq bo'yicha limit xabari yuborildi — "
+            "Pro foydalanuvchi 'oxirgi bepul faylingiz' xabarini olardi"
+        )
+    finally:
+        hm._answer_with_pro_button = real_answer
+    print("[6] tegilmagan sanoq bo'yicha noto'g'ri xabar chiqmaydi OK")
+
+    print("\nactivity_tracking: barcha tekshiruvlar o'tdi (6/6).")
 
 
 class FakeQuota:
+    """services.file_task_quota.DailyQuota ning soxta nusxasi.
+
+    `charged` va `kind` HAQIQIY sinfda bor va _after_file_task ularga
+    tayanadi — soxta obyekt ham ularni berishi shart.
+    """
     limit_hit = False
     limit = 2
     remaining = 1
+    charged = True
+    kind = "files"
+
+
+class FakeUnchargedQuota(FakeQuota):
+    """Umuman ishlatilmagan sanoq (masalan faqat rasm chizilgan holat)."""
+    charged = False
 
 
 class FakeUser:
