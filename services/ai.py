@@ -1116,23 +1116,100 @@ _MEMORY_TOOL = {
 }
 
 
-# Telegram'dagi "ism" — ixtiyoriy matn, ism bo'lishi SHART EMAS: ".", "•••",
-# "🔥🔥🔥", "⚡ARZON SOTUV⚡", "user_12345" ham uchraydi. Bunday matn bilan
-# murojaat qilish ismsiz javobdan YOMONROQ, shuning uchun faqat ishonchli
-# ko'ringan nom olinadi, qolgan hollarda ism umuman ishlatilmaydi.
+# Telegram'dagi "ism" — ixtiyoriy matn. Ikkita ALOHIDA muammo bor:
 #
-# Qoida: birinchi belgi HARF, qolgani harf yoki ' ’ - (G'ulom, O'tkir,
-# Abdulla-Aziz o'tadi; raqam, emoji, nuqta, tinish belgisi o'tmaydi).
-_TG_NAME_RE = re.compile(r"^[^\W\d_](?:[^\W\d_]|['’\-]){1,23}$", re.UNICODE)
+#   1) Umuman ism emas: ".", "•••", "🔥🔥🔥", "⚡ARZON SOTUV⚡", "user_12345".
+#   2) Ism bor, lekin birinchi so'z ISM EMAS: "Jumayev Og'abek",
+#      "Olimovich Alisher", "Karimov Aziz Olimovich". Birinchi so'zni olsak
+#      bot odamga "Jumayev" yoki "Olimovich" deb murojaat qilardi.
+#
+# Shuning uchun: barcha so'zlar tekshiriladi, familiya/otasining ismiga
+# o'xshaganlari chetlanadi, qolganidan birinchisi olinadi.
+#
+# So'z ichidan HARFLAR ketma-ketligi ajratib olinadi, ya'ni yon-atrofdagi
+# emoji/tinish belgisi ismni yo'q qilmaydi: "Aziz🔥" -> "Aziz".
+_NAME_CORE_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])*", re.UNICODE)
+
+# Familiya va otasining ismi qo'shimchalari (o'zbekcha + ruscha).
+#
+# ⚠️ Ro'yxat ATAYLAB tor: "-ina"/"-ина" va "-zoda" bu yerda YO'Q, chunki
+# ular haqiqiy ismlarni ham yeb qo'yardi (Madina, Marina, Shahzoda).
+# Ortiqcha qoida qo'shishdan ko'ra bitta familiyani o'tkazib yuborish
+# arzonroq: noto'g'ri kesilgan ism har bir xabarda ko'zga tashlanadi.
+_SURNAME_SUFFIX = (
+    "ovich", "evich", "ovna", "evna",             # otasining ismi (ruscha)
+    "o'g'li", "og'li", "ogli", "qizi", "kizi",    # otasining ismi (o'zbekcha)
+    "ov", "ova", "ev", "eva",                     # familiya (-yev/-yeva ham shu)
+    "skiy", "skaya",
+    # Kirillcha yozilgani ham xuddi shunday tez uchraydi.
+    "ович", "евич", "овна", "евна",
+    "ов", "ова", "ев", "ева", "ёв", "ёва", "ский", "ская",
+)
+
+# Ismga yopishtirilgan kasb/brend "dumi": XusanDev, AzizUZ, SardorSMM,
+# "Aziz | Dev". Eng uzunidan tekshiriladi ("developer" "dev" dan oldin).
+_ROLE_WORDS = tuple(sorted((
+    "developer", "dev", "coder", "programmer", "design", "designer",
+    "smm", "seo", "pro", "uz", "uzb", "bot", "admin", "official",
+    "media", "team", "shop", "tech", "blog", "blogger", "digital",
+    "marketing", "studio", "group", "channel", "kanal",
+    "user", "id",          # kasb emas, lekin ism ham emas ("user_12345")
+), key=len, reverse=True))
+
+# `_ | / ,` — ism bilan dum orasidagi ajratgich ("Aziz_dev", "Xusan | Dev").
+# `-` ATAYLAB yo'q: "Abdulla-Aziz" butun ism, bo'linmasligi kerak.
+_NAME_SEPARATORS = str.maketrans("_|/,", "    ")
+
+
+def _strip_role_tail(word: str) -> str:
+    """"XusanDev" -> "Xusan". Chegara aniq bo'lmasa TEGILMAYDI.
+
+    ⚠️ Chegara sharti shart: "uz" dumini shartsiz kessak "Behruz" -> "Behr",
+    "Feruz" -> "Fer" bo'lib ketardi. Shuning uchun faqat katta harf
+    ("XusanDev", "BekzodUZ") yoki ajratgich ("Aziz_dev") kesiladi —
+    "behruz" ichidagi kichik "uz" hech qachon tegilmaydi.
+    """
+    low = word.lower()
+    for tail in _ROLE_WORDS:
+        # Kesilgandan keyin kamida 3 belgi qolsin: "AiDev" -> "Ai" emas.
+        if not low.endswith(tail) or len(low) <= len(tail) + 2:
+            continue
+        cut = len(word) - len(tail)
+        if word[cut].isupper() or word[cut - 1] in "_-":
+            return word[:cut].rstrip("_-")
+    return word
 
 
 def clean_tg_name(name: Optional[str]) -> str:
-    """Telegram ismidan murojaat uchun yaroqli qismini oladi ("" = yaroqsiz).
+    """Telegram ismidan MUROJAAT uchun yaroqli qismini oladi ("" = yaroqsiz).
+
+    Kutiladigan kirish — `message.from_user.full_name` (ism + familiya),
+    chunki ba'zi foydalanuvchi familiyani "ism" maydoniga, ismni "familiya"
+    maydoniga yozadi. Ikkalasi birga ko'rilsa tartib ahamiyatsiz bo'ladi.
 
     Sof funksiya — tests/test_memory.py'da tekshiriladi.
     """
-    first = (str(name or "").strip().split() or [""])[0]
-    return first if _TG_NAME_RE.match(first) else ""
+    # Turli apostroflar bir ko'rinishga keltiriladi: "O‘g‘li" ham "o'g'li"
+    # kabi tanilsin.
+    text = str(name or "").replace("’", "'").replace("‘", "'").replace("`", "'")
+    words = []
+    for chunk in text.translate(_NAME_SEPARATORS).split()[:4]:
+        m = _NAME_CORE_RE.search(chunk)
+        # 2..24 belgi: bitta harf ism emas, 24 dan uzuni ham (odatda shior).
+        if m and 2 <= len(m.group(0)) <= 24:
+            words.append(m.group(0))
+    # Alohida turgan kasb so'zi ("Xusan | Dev") ism o'rniga o'tib ketmasin.
+    words = [w for w in words if w.lower() not in _ROLE_WORDS]
+    # Dum familiya tekshiruvidan OLDIN kesiladi: "XusanDev" aks holda
+    # "-ev" bilan tugagani uchun familiya deb chetlanardi.
+    words = [_strip_role_tail(w) for w in words]
+    if not words:
+        return ""
+    given = [w for w in words if not w.lower().endswith(_SURNAME_SUFFIX)]
+    # Hamma so'z familiyaga o'xshasa — bu ehtimol haqiqiy ismning o'zi
+    # ("Nodirova" yolg'iz turibdi), shuning uchun birinchi yaroqli so'zga
+    # qaytamiz: o'z ismi bilan murojaat ismsizdan baribir yaxshi.
+    return (given or words)[0]
 
 
 async def _memory_context(user_id: Optional[int], *, can_write: bool = True,

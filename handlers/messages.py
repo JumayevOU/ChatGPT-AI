@@ -1106,7 +1106,7 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
                                    output_files=output_files,
                                    file_quota_out=file_quota_box,
                                    is_pro=_is_pro(quota),
-                                   tg_name=last_message.from_user.first_name,
+                                   tg_name=last_message.from_user.full_name,
                                    **file_kwargs)
         full_reply = await process_stream_draft(last_message, stream_gen)
 
@@ -1276,7 +1276,7 @@ async def handle_photo(message: Message, state: FSMContext):
         # Tarix esa javob muvaffaqiyatli olingandan keyin, birgalikda saqlanadi.
         stream_gen = get_vision_reply(chat_id, base64_image, caption,
                                       is_pro=_is_pro(quota), user_id=user_id,
-                                      tg_name=message.from_user.first_name)
+                                      tg_name=message.from_user.full_name)
         full_reply = await process_stream_draft(message, stream_gen, content_type="photo")
 
         if full_reply:
@@ -1395,7 +1395,7 @@ async def handle_document(message: Message, state: FSMContext):
             output_files=output_files,
             file_quota_out=file_quota_box,
             is_pro=_is_pro(quota),
-            tg_name=message.from_user.first_name,
+            tg_name=message.from_user.full_name,
         )
         full_reply = await process_stream_draft(message, stream_gen, content_type="document")
 
@@ -1485,7 +1485,7 @@ async def handle_voice(message: Message, state: FSMContext):
                                    output_files=output_files,
                                    file_quota_out=file_quota_box,
                                    is_pro=_is_pro(quota),
-                                   tg_name=message.from_user.first_name)
+                                   tg_name=message.from_user.full_name)
         full_reply_text = await process_stream_draft(message, stream_gen, content_type="voice")
 
         if output_files:

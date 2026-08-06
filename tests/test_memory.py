@@ -110,16 +110,82 @@ async def test_clear_and_guards():
 def test_clean_tg_name():
     """Telegram "ism"i ixtiyoriy matn — murojaatga yaroqsizi rad etilsin."""
     assert ai.clean_tg_name("Aziz") == "Aziz"
-    assert ai.clean_tg_name("  Aziz Karimov ") == "Aziz"      # faqat birinchi so'z
     assert ai.clean_tg_name("G'ulom") == "G'ulom"             # apostrof o'tadi
+    assert ai.clean_tg_name("O‘tkir") == "O'tkir"             # boshqa apostrof ham
     assert ai.clean_tg_name("Abdulla-Aziz") == "Abdulla-Aziz"
     print("[10] haqiqiy ismlar o'tadi OK")
 
     # Bularning har biri bilan murojaat qilish ismsiz javobdan yomonroq.
-    for yaroqsiz in (".", "-", "...", "•••", "🔥🔥🔥", "⚡ARZON⚡", "user_12345",
+    for yaroqsiz in (".", "-", "...", "•••", "🔥🔥🔥", "user_12345",
                      "1234", "@kanal", "", None, "   ", "a" * 40):
         assert ai.clean_tg_name(yaroqsiz) == "", f"o'tib ketdi: {yaroqsiz!r}"
     print("[11] nik/emoji/raqam/nuqta rad etiladi OK")
+
+    # Emoji ism bilan YONMA-YON tursa ism yo'qolmasin — bu juda keng
+    # tarqalgan, "⚡DO'KON⚡" kabi do'kon nomini o'tkazib yuborishdan
+    # ko'ra muhimroq (u ham baribir o'sha akkauntning o'z nomi).
+    assert ai.clean_tg_name("Aziz🔥") == "Aziz"
+    assert ai.clean_tg_name("🔥Aziz🔥") == "Aziz"
+    assert ai.clean_tg_name("💎 Nodira 💎") == "Nodira"
+    print("[11b] yonidagi emoji ismni yo'q qilmaydi OK")
+
+    # Kirillcha familiya ham lotinchasi kabi chetlanadi.
+    assert ai.clean_tg_name("Иванов Александр") == "Александр"
+    assert ai.clean_tg_name("Мухаммад Иванов") == "Мухаммад"
+    assert ai.clean_tg_name("Марина") == "Марина"      # "-ина" kesilmaydi
+    print("[11c] kirillcha familiya chetlanadi OK")
+
+
+def test_name_not_surname():
+    """Familiya/otasining ismi ISM o'rniga ishlatilmasin.
+
+    Telegram maydonlariga odam xohlagan tartibda yozadi, shuning uchun
+    tartibga tayanib bo'lmaydi — qo'shimchaga qarab tanlanadi.
+    """
+    for kirish, kutilgan in (
+            ("Jumayev Og'abek", "Og'abek"),      # familiya oldinda
+            ("Og'abek Jumayev", "Og'abek"),      # ism oldinda
+            ("Olimovich Alisher", "Alisher"),    # otasining ismi oldinda
+            ("Karimov Aziz Olimovich", "Aziz"),  # uchalasi
+            ("Nodira Salimova", "Nodira"),
+            ("Sardor Rahimov", "Sardor"),
+            ("Alisher Olimovich", "Alisher"),
+            ("Aziz Toshpo'latov", "Aziz"),
+    ):
+        assert ai.clean_tg_name(kirish) == kutilgan, \
+            f"{kirish!r} -> {ai.clean_tg_name(kirish)!r}, kutilgan {kutilgan!r}"
+    print("[12] familiya/otasining ismi chetlanadi OK")
+
+    # Faqat familiya turgan bo'lsa — o'shani ishlatamiz, ismsizdan yaxshi.
+    assert ai.clean_tg_name("Nodirova") == "Nodirova"
+    # Qo'shimcha ro'yxati tor: haqiqiy ismlarni yeb qo'ymasligi kerak.
+    for ism in ("Madina", "Shahzoda", "Shahnoza", "Dilnoza", "Bekzod"):
+        assert ai.clean_tg_name(ism) == ism, f"haqiqiy ism yo'qoldi: {ism}"
+    print("[13] yolg'iz familiya va o'xshash ismlar to'g'ri OK")
+
+
+def test_role_tail():
+    """Ismga yopishgan kasb/brend dumi kesilsin — lekin ehtiyotkorlik bilan."""
+    for kirish, kutilgan in (
+            ("XusanDev", "Xusan"),
+            ("AzizDesigner", "Aziz"),
+            ("BekzodUZ", "Bekzod"),
+            ("SardorSMM", "Sardor"),
+            ("Aziz_dev", "Aziz"),
+            ("Xusan | Dev", "Xusan"),          # alohida so'z ham chetlanadi
+            ("Dev Xusan", "Xusan"),            # tartibdan qat'i nazar
+            ("XusanDev Karimov", "Xusan"),
+            ("Karimov XusanDev", "Xusan"),
+    ):
+        assert ai.clean_tg_name(kirish) == kutilgan, \
+            f"{kirish!r} -> {ai.clean_tg_name(kirish)!r}, kutilgan {kutilgan!r}"
+    print("[14] kasb dumi kesiladi OK")
+
+    # ⚠️ ENG MUHIMI: chegara bo'lmasa TEGILMAYDI. Bu ismlar "uz"/"pro"/"it"
+    # bilan tugaydi, lekin ular dum emas — kesilsa ism buzilardi.
+    for ism in ("Behruz", "Feruz", "Mahmud", "Doniyor", "Otabek", "Ozod"):
+        assert ai.clean_tg_name(ism) == ism, f"ism buzildi: {ism}"
+    print("[15] chegarasiz o'xshashlik kesilmaydi OK")
 
 
 def test_similar_index():
@@ -134,7 +200,7 @@ def test_similar_index():
     # "Foydalanuvchi" so'zi hammasida bor — u yolg'iz o'xshashlik bermasin.
     assert similar_index("Foydalanuvchi shaxmat o'ynaydi",
                          ["Foydalanuvchi Toshkentda yashaydi"]) is None
-    print("[12] o'xshash yozuv topiladi, begonasi tinch qoldiriladi OK")
+    print("[16] o'xshash yozuv topiladi, begonasi tinch qoldiriladi OK")
 
 
 async def main():
@@ -142,8 +208,10 @@ async def main():
     await test_index_bounds()
     await test_clear_and_guards()
     test_clean_tg_name()
+    test_name_not_surname()
+    test_role_tail()
     test_similar_index()
-    print("\nxotira: barcha tekshiruvlar o'tdi (12/12).")
+    print("\nxotira: barcha tekshiruvlar o'tdi (16/16).")
 
 
 if __name__ == "__main__":
