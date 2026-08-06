@@ -254,11 +254,17 @@ async def create_users_table():
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 content TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ
             );
         ''')
 
         try:
+            # `updated_at` keyinroq qo'shildi. Modelga sana ko'rsatiladi, va
+            # tuzatilgan fakt eski sana bilan tursa model unga kamroq
+            # ishonadi — shuning uchun yangilanish vaqti alohida yoziladi.
+            await conn.execute(
+                "ALTER TABLE user_memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_star_payments_payer ON star_payments(payer_id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_star_payments_created ON star_payments(created_at);")
@@ -832,6 +838,40 @@ _SECRET_RE = re.compile(
 )
 
 
+# Takrorni topishda e'tiborsiz qoldiriladigan so'zlar — deyarli har bir
+# yozuvda uchraydi, shuning uchun o'xshashlik hisobiga kirsa hamma narsa
+# hamma narsaga "o'xshab" ketardi.
+_MEM_STOPWORDS = {"foydalanuvchi", "foydalanuvchining", "uning", "bilan",
+                  "uchun", "ham", "bir", "boshqa"}
+
+
+def _mem_keywords(text: str) -> set:
+    return {w for w in re.findall(r"\w+", str(text or "").lower(), re.UNICODE)
+            if len(w) > 2 and w not in _MEM_STOPWORDS}
+
+
+def similar_index(content: str, existing: list) -> Optional[int]:
+    """Mazmunan o'xshash mavjud yozuvning RAQAMI (1 dan), yoki None.
+
+    Nega kerak: model "Foydalanuvchi Toshkentda yashaydi" ni saqlab qo'yib,
+    keyin "Samarqandga ko'chdi" ni `update` emas, `add` bilan yozib yuboradi.
+    Ikkala qarama-qarshi fakt yonma-yon qolsa bot chalkashadi. Bu yerda
+    yozuv TO'SILMAYDI — model natijada eslatma oladi va o'zi tozalaydi
+    (to'sib qo'yilsa model qayta-qayta urinib halqaga tushardi).
+
+    ponytail: so'z kesishuvi, embedding emas — 40 ta yozuv uchun yetarli.
+    Noto'g'ri ishora zarar qilmaydi: qaror baribir modelniki.
+    """
+    new = _mem_keywords(content)
+    if not new:
+        return None
+    for i, old in enumerate(existing, 1):
+        cur = _mem_keywords(old)
+        if cur and len(new & cur) / min(len(new), len(cur)) >= 0.5:
+            return i
+    return None
+
+
 def clean_memory(content: str) -> str:
     """Xotira yozuvini tozalaydi. Bo'sh satr qaytsa — yozuv rad etiladi.
 
@@ -853,7 +893,7 @@ async def get_memories(user_id: int) -> List[Dict[str, Any]]:
         await create_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            'SELECT id, content, created_at FROM user_memories '
+            'SELECT id, content, created_at, updated_at FROM user_memories '
             'WHERE user_id = $1 ORDER BY id', user_id)
     return [dict(r) for r in rows]
 
@@ -875,14 +915,22 @@ async def add_memory(user_id: int, content: str) -> str:
                 'SELECT 1 FROM user_memories WHERE user_id = $1 AND content = $2',
                 user_id, content):
             return "allaqachon saqlangan"
-        if await conn.fetchval(
-                'SELECT COUNT(*) FROM user_memories WHERE user_id = $1',
-                user_id) >= MAX_MEMORIES:
+        rows = await conn.fetch(
+            'SELECT content FROM user_memories WHERE user_id = $1 ORDER BY id',
+            user_id)
+        if len(rows) >= MAX_MEMORIES:
             return (f"xotira to'la ({MAX_MEMORIES} ta) — avval keraksiz "
                     "yozuvni o'chiring")
         await conn.execute(
             'INSERT INTO user_memories (user_id, content) VALUES ($1, $2)',
             user_id, content)
+
+    # Yozuv SAQLANDI, keyin eslatma beriladi — model o'zi qaror qiladi.
+    dup = similar_index(content, [r["content"] for r in rows])
+    if dup:
+        return (f"saqlandi — lekin {dup}-yozuv shunga o'xshash. Agar u "
+                "eskirgan bo'lsa, uni delete qiling; ikkalasi ham to'g'ri "
+                "bo'lsa, hech narsa qilmang")
     return "saqlandi"
 
 
@@ -900,7 +948,8 @@ async def update_memory(user_id: int, mem_id: int, content: str) -> str:
         await create_db_pool()
     async with pool.acquire() as conn:
         res = await conn.execute(
-            'UPDATE user_memories SET content = $1 WHERE id = $2 AND user_id = $3',
+            'UPDATE user_memories SET content = $1, updated_at = NOW() '
+            'WHERE id = $2 AND user_id = $3',
             content, mem_id, user_id)
     return "yangilandi" if res.endswith("1") else "topilmadi"
 

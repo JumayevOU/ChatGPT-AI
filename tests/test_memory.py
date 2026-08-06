@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 
-from db.database import clean_memory, MAX_MEMORY_LEN
+from db.database import clean_memory, similar_index, MAX_MEMORY_LEN
 from services import ai
 
 
@@ -107,11 +107,43 @@ async def test_clear_and_guards():
     print("[9] guest va noma'lum amal himoyasi OK")
 
 
+def test_clean_tg_name():
+    """Telegram "ism"i ixtiyoriy matn — murojaatga yaroqsizi rad etilsin."""
+    assert ai.clean_tg_name("Aziz") == "Aziz"
+    assert ai.clean_tg_name("  Aziz Karimov ") == "Aziz"      # faqat birinchi so'z
+    assert ai.clean_tg_name("G'ulom") == "G'ulom"             # apostrof o'tadi
+    assert ai.clean_tg_name("Abdulla-Aziz") == "Abdulla-Aziz"
+    print("[10] haqiqiy ismlar o'tadi OK")
+
+    # Bularning har biri bilan murojaat qilish ismsiz javobdan yomonroq.
+    for yaroqsiz in (".", "-", "...", "•••", "🔥🔥🔥", "⚡ARZON⚡", "user_12345",
+                     "1234", "@kanal", "", None, "   ", "a" * 40):
+        assert ai.clean_tg_name(yaroqsiz) == "", f"o'tib ketdi: {yaroqsiz!r}"
+    print("[11] nik/emoji/raqam/nuqta rad etiladi OK")
+
+
+def test_similar_index():
+    mavjud = ["shahar: Toshkent", "kasb: grafik dizayner", "ism: Aziz"]
+
+    # Qarama-qarshi fakt — model `add` qilsa, 1-yozuv haqida eslatma kerak.
+    assert similar_index("shahar: Samarqand", mavjud) == 1
+    # Butunlay boshqa mavzu — eslatma bermasin.
+    assert similar_index("qiziqish: shaxmat", mavjud) is None
+    # Bo'sh matn hech qachon o'xshamaydi.
+    assert similar_index("", mavjud) is None
+    # "Foydalanuvchi" so'zi hammasida bor — u yolg'iz o'xshashlik bermasin.
+    assert similar_index("Foydalanuvchi shaxmat o'ynaydi",
+                         ["Foydalanuvchi Toshkentda yashaydi"]) is None
+    print("[12] o'xshash yozuv topiladi, begonasi tinch qoldiriladi OK")
+
+
 async def main():
     test_clean_memory()
     await test_index_bounds()
     await test_clear_and_guards()
-    print("\nxotira: barcha tekshiruvlar o'tdi (9/9).")
+    test_clean_tg_name()
+    test_similar_index()
+    print("\nxotira: barcha tekshiruvlar o'tdi (12/12).")
 
 
 if __name__ == "__main__":

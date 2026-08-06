@@ -1105,7 +1105,9 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
         stream_gen = get_gpt_reply(chat_id, prompt_text, user_id=user_id,
                                    output_files=output_files,
                                    file_quota_out=file_quota_box,
-                                   is_pro=_is_pro(quota), **file_kwargs)
+                                   is_pro=_is_pro(quota),
+                                   tg_name=last_message.from_user.first_name,
+                                   **file_kwargs)
         full_reply = await process_stream_draft(last_message, stream_gen)
 
         if output_files:
@@ -1273,7 +1275,8 @@ async def handle_photo(message: Message, state: FSMContext):
         # get_vision_reply() ularni SYSTEM promptga o'zi qo'shadi (services/ai.py).
         # Tarix esa javob muvaffaqiyatli olingandan keyin, birgalikda saqlanadi.
         stream_gen = get_vision_reply(chat_id, base64_image, caption,
-                                      is_pro=_is_pro(quota), user_id=user_id)
+                                      is_pro=_is_pro(quota), user_id=user_id,
+                                      tg_name=message.from_user.first_name)
         full_reply = await process_stream_draft(message, stream_gen, content_type="photo")
 
         if full_reply:
@@ -1392,6 +1395,7 @@ async def handle_document(message: Message, state: FSMContext):
             output_files=output_files,
             file_quota_out=file_quota_box,
             is_pro=_is_pro(quota),
+            tg_name=message.from_user.first_name,
         )
         full_reply = await process_stream_draft(message, stream_gen, content_type="document")
 
@@ -1480,7 +1484,8 @@ async def handle_voice(message: Message, state: FSMContext):
         stream_gen = get_gpt_reply(chat_id, user_text, user_id=user_id,
                                    output_files=output_files,
                                    file_quota_out=file_quota_box,
-                                   is_pro=_is_pro(quota))
+                                   is_pro=_is_pro(quota),
+                                   tg_name=message.from_user.first_name)
         full_reply_text = await process_stream_draft(message, stream_gen, content_type="voice")
 
         if output_files:
