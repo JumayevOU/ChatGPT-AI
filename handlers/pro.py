@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from aiogram.types import (
     Message, CallbackQuery, PreCheckoutQuery, LabeledPrice,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineQuery, InlineQueryResultArticle, InputTextMessageContent,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -39,6 +40,11 @@ from services import menu as menu_module
 
 # main.py ishga tushganda to'ldiriladi (deep-link havolalar uchun kerak).
 BOT_USERNAME: str = ""
+
+# main.py get_me() dan to'ldiradi. Inline rejim @BotFather'da /setinline
+# bilan YOQILADI — kod uni o'zi yoqa olmaydi. Yoqilmagan bo'lsa ulashish
+# tugmasi eski (matnli) usulga tushadi, ya'ni hech narsa buzilmaydi.
+INLINE_ENABLED: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -82,9 +88,13 @@ def _downgrade_kb(kb: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | Non
     """Klaviaturadan bezak maydonlarini olib tashlaydi (fallback uchun)."""
     if kb is None:
         return None
+    # ⚠️ switch_inline_query ham KO'CHIRILADI: u tushib qolsa tugmada
+    # birorta ham amal maydoni qolmaydi va Telegram BUTUN klaviaturani
+    # rad etadi — ya'ni "chekinish" xabarni yo'q qilardi.
     rows = [[
         InlineKeyboardButton(
-            text=b.text, callback_data=b.callback_data, url=b.url)
+            text=b.text, callback_data=b.callback_data, url=b.url,
+            switch_inline_query=b.switch_inline_query)
         for b in row
     ] for row in kb.inline_keyboard]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -841,15 +851,18 @@ async def maybe_qualify_referral(user_id: int) -> None:
         referrer_id = await database.qualify_referral(user_id)
         if referrer_id is None:
             return
+        # Shart TAKLIFCHIga qarab olinadi (shaxsiy -> umumiy -> config):
+        # bloger uchun qo'yilgan yengil shart uning o'z havolasiga tegishli.
+        cfg = await database.get_referral_config(referrer_id)
         rewarded = await database.claim_referral_reward(
-            referrer_id, REFERRAL_REQUIRED, REFERRAL_REWARD_DAYS, REFERRAL_MAX_REWARDS)
+            referrer_id, cfg['required'], cfg['reward_days'], cfg['max_rewards'])
         if not rewarded:
             return
         try:
             await bot.send_message(referrer_id, (
                 f"🎉 <b>Referal mukofoti!</b>\n\n"
-                f"{REFERRAL_REQUIRED} ta do'stingiz botdan foydalana boshladi — "
-                f"sizga <b>{REFERRAL_REWARD_DAYS} kun Pro</b> qo'shildi.\n\n"
+                f"{cfg['required']} ta do'stingiz botdan foydalana boshladi — "
+                f"sizga <b>{cfg['reward_days']} kun Pro</b> qo'shildi.\n\n"
                 f"👤 Holatni ko'rish: /profile"
             ), parse_mode="HTML")
         except TelegramForbiddenError:
@@ -860,35 +873,114 @@ async def maybe_qualify_referral(user_id: int) -> None:
         logger.debug(f"[Referal] hisobga olishda xatolik: {e}")
 
 
+def _referral_link(user_id: int) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}" if BOT_USERNAME else ""
+
+
+def _share_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """DO'STGA boradigan xabar: chiroyli matn + ostida havolali tugma.
+
+    Tugmada `style` ATAYLAB yo'q: bu xabarni bot emas, foydalanuvchi
+    yuboradi (inline rejim), rang esa bot imkoniyati — rad etilsa butun
+    xabar ketmay qolardi.
+    """
+    link = _referral_link(user_id)
+    text = (
+        "🤖 <b>Sun'iy intellekt — o'zbek tilida</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<blockquote>Men shu botdan foydalanaman, senga ham tavsiya "
+        "qilaman — bepul va ro'yxatdan o'tish shart emas.</blockquote>\n\n"
+        "➤ Har qanday savolga javob beradi 💬\n"
+        "➤ 📄 PDF, Word, Excel o'qib tahlil qiladi\n"
+        "➤ 📸 Rasmni ko'rib tushuntiradi\n"
+        "➤ 🎙 Ovozli xabarga <b>ovoz bilan</b> javob beradi\n"
+        "➤ 🛠 Taqdimot, hujjat, jadval yasab beradi\n"
+        "➤ 🌐 Internetdan qidiradi\n\n"
+        "👇 Pastdagi tugmani bosing"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Botni ochish", url=link)]])
+    return text, kb
+
+
+def _share_button(user_id: int) -> InlineKeyboardButton:
+    """Ulashish tugmasi — inline rejim bo'lsa chiroylisi, bo'lmasa eskisi.
+
+    Inline rejimda foydalanuvchi chat tanlaydi va xabar UNING nomidan,
+    tugmasi bilan birga ketadi. t.me/share/url esa faqat TEKIS MATN
+    yubora oladi — havola va matn yalang'och ko'rinib turishining sababi
+    aynan shu edi, kodning kamchiligi emas.
+    """
+    if INLINE_ENABLED:
+        return InlineKeyboardButton(
+            text="📤 Do'stlarga ulashish", switch_inline_query="")
+    # Zaxira: hech bo'lmaganda matn to'g'ri kodlansin ("%20" ko'rinmasin).
+    from urllib.parse import quote
+    link = _referral_link(user_id)
+    matn = "Bu AI bot zo'r ekan — o'zbekcha gapiradi, sinab ko'r!"
+    return btn("📤 Do'stlarga ulashish", "", style=BTN_SUCCESS,
+               url=f"https://t.me/share/url?url={quote(link, safe='')}"
+                   f"&text={quote(matn, safe='')}")
+
+
+async def handle_inline_share(query: InlineQuery) -> None:
+    """Inline rejim: "@bot" yozib chat tanlaganda chiqadigan yagona natija."""
+    text, kb = _share_message(query.from_user.id)
+    try:
+        await query.answer(
+            [InlineQueryResultArticle(
+                id=f"ref{query.from_user.id}",
+                title="📤 Do'stga taklif yuborish",
+                description="Chiroyli xabar + tugma bilan ketadi",
+                input_message_content=InputTextMessageContent(
+                    message_text=text, parse_mode="HTML",
+                    link_preview_options={"is_disabled": True}),
+                reply_markup=kb,
+            )],
+            cache_time=300,
+            # ⚠️ is_personal=True SHART: natija ichida foydalanuvchining
+            # SHAXSIY referal havolasi bor. Umumiy kesh bo'lsa Telegram uni
+            # boshqa odamga ham berib yuborardi va u begona havolani
+            # tarqatib, mukofotni boshqa birov olardi.
+            is_personal=True,
+        )
+    except Exception as e:
+        logger.debug(f"[Referal] inline javob berilmadi: {e}")
+
+
 async def _render_referral(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     try:
         p = await database.get_referral_progress(user_id)
     except Exception:
         p = {'invited': 0, 'qualified': 0, 'rewarded': 0}
+    try:
+        cfg = await database.get_referral_config(user_id)
+    except Exception:
+        cfg = {'required': REFERRAL_REQUIRED, 'reward_days': REFERRAL_REWARD_DAYS}
+    required, reward_days = cfg['required'], cfg['reward_days']
 
     toward_next = p['qualified'] - p['rewarded']
-    need = max(0, REFERRAL_REQUIRED - toward_next)
-    link = (f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-            if BOT_USERNAME else "(havola tayyorlanmoqda)")
+    need = max(0, required - toward_next)
+    link = _referral_link(user_id) or "(havola tayyorlanmoqda)"
 
     # Vizual progress: har bir do'st bitta belgi. Raqamdan ko'ra
     # "yana 1 ta qoldi" degan his kuchliroq turtki beradi.
-    done = min(REFERRAL_REQUIRED, toward_next)
-    dots = "🟢" * done + "⚪️" * (REFERRAL_REQUIRED - done)
+    done = min(required, toward_next)
+    dots = "🟢" * done + "⚪️" * (required - done)
 
     status = "🎉 Mukofot tayyor!" if need == 0 else f"Yana <b>{need} ta</b> do'st kerak"
 
     text = (
         f"👥 <b>DO'ST TAKLIF QILING</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<blockquote>Har <b>{REFERRAL_REQUIRED} ta</b> do'st uchun "
-        f"<b>{REFERRAL_REWARD_DAYS} kun Pro</b> — mutlaqo bepul.</blockquote>\n\n"
-        f"{dots}  <b>{done}/{REFERRAL_REQUIRED}</b>\n"
+        f"<blockquote>Har <b>{required} ta</b> do'st uchun "
+        f"<b>{reward_days} kun Pro</b> — mutlaqo bepul.</blockquote>\n\n"
+        f"{dots}  <b>{done}/{required}</b>\n"
         f"{status}\n\n"
         f"📊 <b>Statistikangiz</b>\n"
         f"├ Taklif qilingan: <b>{p['invited']}</b>\n"
         f"├ Faol bo'lgan: <b>{p['qualified']}</b>\n"
-        f"└ Olingan mukofot: <b>{p['rewarded'] // REFERRAL_REQUIRED * REFERRAL_REWARD_DAYS} kun</b>\n\n"
+        f"└ Olingan mukofot: <b>{p['rewarded'] // required * reward_days} kun</b>\n\n"
         f"🔗 <b>Havolangiz</b> <i>(bosib nusxalang)</i>\n"
         f"<code>{link}</code>\n\n"
         f"<blockquote expandable><i>Do'stingiz havola orqali kirib, "
@@ -896,12 +988,8 @@ async def _render_referral(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"bosish yetarli emas. Bu qoida soxta akkauntlarga qarshi.</i></blockquote>"
     )
 
-    share = (
-        f"https://t.me/share/url?url={link}"
-        f"&text=Bu%20AI%20bot%20zo'r%20ekan%20—%20sinab%20ko'r!"
-    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [btn("📤 Do'stlarga ulashish", "", style=BTN_SUCCESS, url=share)],
+        [_share_button(user_id)],
         [btn("💎 Pro tarif", "pro:open", style=BTN_PRIMARY)],
         [btn("✖️ Yopish", "pro:close", style=BTN_DANGER)],
     ])
@@ -1059,11 +1147,18 @@ async def send_promo_gift(user_id: int, code: str, days: int,
 
 async def send_referral_invite(user_id: int, note: str = "") -> bool:
     """Foydalanuvchiga uning SHAXSIY referal havolasini yuboradi."""
-    link = (f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-            if BOT_USERNAME else None)
+    link = _referral_link(user_id) or None
     if link is None:
         logger.error("[Bepul Pro] BOT_USERNAME yo'q — referal havolasi yasab bo'lmadi")
         return False
+
+    # Shart shu odamning O'ZIGA qarab olinadi — admin unga shaxsiy shart
+    # qo'ygan bo'lsa, taklif xabarida ham aynan shu ko'rinishi kerak.
+    try:
+        cfg = await database.get_referral_config(user_id)
+    except Exception:
+        cfg = {'required': REFERRAL_REQUIRED, 'reward_days': REFERRAL_REWARD_DAYS}
+    required, reward_days = cfg['required'], cfg['reward_days']
 
     extra = f"\n\n<blockquote>{note}</blockquote>" if note else ""
     text = (
@@ -1071,9 +1166,9 @@ async def send_referral_invite(user_id: int, note: str = "") -> bool:
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Siz uchun maxsus taklif dasturi ochildi.{extra}\n\n"
         f"<blockquote>"
-        f"Har <b>{REFERRAL_REQUIRED} ta</b> do'st uchun — "
-        f"<b>{REFERRAL_REWARD_DAYS} kun Pro</b> bepul.\n"
-        f"Jami <b>{REFERRAL_MAX_REWARDS * REFERRAL_REWARD_DAYS} kun</b>gacha "
+        f"Har <b>{required} ta</b> do'st uchun — "
+        f"<b>{reward_days} kun Pro</b> bepul.\n"
+        f"Jami <b>{REFERRAL_MAX_REWARDS * reward_days} kun</b>gacha "
         f"yig'ishingiz mumkin."
         f"</blockquote>\n\n"
         f"🔗 <b>Shaxsiy havolangiz</b> <i>(bosib nusxalang)</i>\n"
@@ -1082,10 +1177,8 @@ async def send_referral_invite(user_id: int, note: str = "") -> bool:
         f"birinchi savolini berganda hisobga olinadi — shunchaki /start "
         f"bosish yetarli emas.</i></blockquote>"
     )
-    share = (f"https://t.me/share/url?url={link}"
-             f"&text=Bu%20AI%20bot%20zo'r%20ekan%20—%20sinab%20ko'r!")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [btn("📤 Do'stlarga ulashish", "", style=BTN_SUCCESS, url=share)],
+        [_share_button(user_id)],
         [btn("📊 Holatimni ko'rish", "pro:ref", style=BTN_PRIMARY)],
     ])
     try:

@@ -128,6 +128,9 @@ async def main():
                                lambda q: q.data and q.data.startswith("pro:"))
     dp.callback_query.register(digest_module.handle_digest_callback,
                                lambda q: q.data and q.data.startswith("dg:"))
+    # Ulashish uchun inline rejim (@BotFather /setinline). Yoqilmagan bo'lsa
+    # bu handlerga hech qachon update kelmaydi — zarari yo'q.
+    dp.inline_query.register(pro_module.handle_inline_share)
     asyncio.create_task(notify_inactive_users())
     asyncio.create_task(premium_expiry_watcher())
     asyncio.create_task(reminder_watcher())
@@ -138,6 +141,13 @@ async def main():
     try:
         me = await bot.get_me()
         pro_module.BOT_USERNAME = me.username or ""
+        # Inline rejim @BotFather'da /setinline bilan yoqiladi. Yoqilmagan
+        # bo'lsa ulashish tugmasi eski matnli usulga tushadi — kod uni
+        # o'zi yoqa olmaydi, shuning uchun so'rab olamiz.
+        pro_module.INLINE_ENABLED = bool(me.supports_inline_queries)
+        if not pro_module.INLINE_ENABLED:
+            logger.warning("Inline rejim o'chiq — @BotFather /setinline bilan "
+                           "yoqilsa ulashish xabari tugmali bo'ladi.")
     except Exception as e:
         logger.warning(f"get_me() muvaffaqiyatsiz — referal havolalari ishlamaydi: {e}")
 

@@ -27,6 +27,7 @@ admin_keyboard = ReplyKeyboardMarkup(
         ],
         [
             KeyboardButton(text="🎁 Bepul Pro"),
+            KeyboardButton(text="👥 Referal sharti"),
         ],
     ], resize_keyboard=True, one_time_keyboard=False
 )

@@ -14,6 +14,7 @@ from core.config import (
     plan_limits, daily_limit, DAILY_COUNTERS,
     MAX_ACTIVE_REMINDERS, REMINDER_MAX_LEN, REMINDER_REPEATS,
     REMINDER_MAX_AHEAD_DAYS,
+    REFERRAL_REQUIRED, REFERRAL_REWARD_DAYS, REFERRAL_MAX_REWARDS,
 )
 
 load_dotenv()
@@ -164,6 +165,14 @@ async def create_users_table():
         await conn.execute('''
             INSERT INTO bot_settings (id) VALUES (1)
             ON CONFLICT (id) DO NOTHING
+        ''')
+        # Referal shartlari admin panelidan boshqariladi. NULL = core/config.py
+        # dagi qiymat ishlatiladi, ya'ni sozlanmagan bot ham eski xatti-harakatda
+        # qoladi va migratsiya kerak emas.
+        await conn.execute('''
+            ALTER TABLE bot_settings
+                ADD COLUMN IF NOT EXISTS referral_required INT,
+                ADD COLUMN IF NOT EXISTS referral_reward_days INT
         ''')
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS watch_settings (
@@ -808,6 +817,11 @@ async def ensure_profile_columns():
             # holatini kuzatadi). is_banned esa FAQAT admin panel orqali qo'lda
             # o'zgaradi — shuning uchun ban avtomatik "bekor" bo'lib qolmaydi.
             "ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
+            # SHAXSIY referal sharti (bloger/hamkor uchun). NULL = umumiy
+            # sozlama, u ham NULL bo'lsa core/config.py qiymati. Uch bosqichli
+            # zanjir ATAYLAB: hech bir bosqich qolganini o'chirib tashlamaydi.
+            "ADD COLUMN IF NOT EXISTS referral_required INT",
+            "ADD COLUMN IF NOT EXISTS referral_reward_days INT",
             # NULL = muddatsiz premium (yoki free/hech qachon premium bo'lmagan).
             # Muddat o'tsa, check_and_consume_quota() foydalanuvchini avtomatik
             # free'ga tushiradi (kunlik limit auto-reset qanday ishlasa, shunday).
@@ -1889,6 +1903,93 @@ async def get_referral_progress(referrer_id: int) -> Dict[str, int]:
             referrer_id,
         )
         return dict(row) if row else {'invited': 0, 'qualified': 0, 'rewarded': 0}
+
+
+@with_db_retry()
+async def get_referral_config(user_id: Optional[int] = None) -> Dict[str, int]:
+    """Referal sharti: SHAXSIY -> UMUMIY -> core/config.py.
+
+    Uch bosqich bitta so'rovda hal qilinadi, chunki bu har bir mukofot
+    hisoblashda chaqiriladi. `user_id=None` — faqat umumiy sozlama
+    (admin ekrani uchun).
+
+    max_rewards ATAYLAB sozlanmaydi: u abuse tavani, admin uni tasodifan
+    ko'tarib qo'ysa cheksiz kun yig'ish yo'li ochilardi.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            '''SELECT COALESCE(u.referral_required, s.referral_required) AS required,
+                      COALESCE(u.referral_reward_days, s.referral_reward_days) AS days
+                 FROM bot_settings s
+                 LEFT JOIN users u ON u.user_id = $1
+                WHERE s.id = 1''',
+            user_id,
+        )
+    required = (row and row['required']) or REFERRAL_REQUIRED
+    days = (row and row['days']) or REFERRAL_REWARD_DAYS
+    return {'required': required, 'reward_days': days,
+            'max_rewards': REFERRAL_MAX_REWARDS}
+
+
+# Admin ham xato yozadi: "3 300" deb qo'yilsa bitta odam bir yilda Pro
+# yig'ib olardi. Chegaralar shu yerda, ekranda emas.
+REFERRAL_REQUIRED_MAX = 100
+REFERRAL_REWARD_DAYS_MAX = 90
+
+
+def clean_referral_config(required, reward_days) -> tuple[Optional[int], Optional[int], str]:
+    """Admin kiritgan qiymatlarni tekshiradi. Sof funksiya — testda tekshiriladi."""
+    try:
+        req, days = int(required), int(reward_days)
+    except (TypeError, ValueError):
+        return None, None, "Ikkala qiymat ham butun son bo'lishi kerak."
+    if not 1 <= req <= REFERRAL_REQUIRED_MAX:
+        return None, None, f"Do'stlar soni 1 dan {REFERRAL_REQUIRED_MAX} gacha bo'lsin."
+    if not 1 <= days <= REFERRAL_REWARD_DAYS_MAX:
+        return None, None, f"Kunlar soni 1 dan {REFERRAL_REWARD_DAYS_MAX} gacha bo'lsin."
+    return req, days, ""
+
+
+@with_db_retry()
+async def set_referral_config(required: int, reward_days: int,
+                              user_id: Optional[int] = None) -> bool:
+    """Referal shartini o'rnatadi. user_id=None — HAMMAGA (umumiy sozlama).
+
+    False — bunday foydalanuvchi topilmadi (umumiy sozlamada hech qachon).
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        if user_id is None:
+            await conn.execute(
+                '''UPDATE bot_settings
+                      SET referral_required = $1, referral_reward_days = $2
+                    WHERE id = 1''',
+                required, reward_days,
+            )
+            return True
+        res = await conn.execute(
+            '''UPDATE users SET referral_required = $2, referral_reward_days = $3
+                WHERE user_id = $1''',
+            user_id, required, reward_days,
+        )
+        return res.endswith(" 1")
+
+
+@with_db_retry()
+async def clear_referral_config(user_id: int) -> None:
+    """Shaxsiy shartni olib tashlaydi — foydalanuvchi umumiy sozlamaga qaytadi."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            '''UPDATE users SET referral_required = NULL, referral_reward_days = NULL
+                WHERE user_id = $1''', user_id)
 
 
 # ═══════════════════════════════════════════════════════════════════

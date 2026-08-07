@@ -82,6 +82,11 @@ class PromoAdminStates(StatesGroup):
     waiting_for_spec = State()
 
 
+class ReferralStates(StatesGroup):
+    """Referal sharti: "nechta do'st -> necha kun" va u KIMGA tegishli."""
+    waiting_for_spec = State()
+
+
 class GiveawayStates(StatesGroup):
     """"Bepul Pro" bo'limi — promokod/referalni ANIQ odamlarga yuborish."""
     waiting_promo_recipients = State()
@@ -568,6 +573,103 @@ def register_admin_handlers(dp, bot: Bot):
         await state.clear()
         text, kb = await _render_giveaway_menu()
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    # ── REFERAL SHARTI ─────────────────────────────────────────────
+    # "Nechta do'st -> necha kun Pro" va u KIMGA tegishli. Uch bosqichli
+    # zanjir: shaxsiy -> umumiy -> core/config.py.
+
+    async def show_referral_settings(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            return
+        await state.clear()
+        try:
+            cfg = await database_module.get_referral_config()
+        except Exception:
+            logger.exception("get_referral_config error")
+            await message.answer("⚠️ Sozlamani o'qib bo'lmadi.")
+            return
+        await state.set_state(ReferralStates.waiting_for_spec)
+        await message.answer(
+            f"👥 <b>REFERAL SHARTI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<blockquote>Hozir: har <b>{cfg['required']} ta</b> do'st uchun "
+            f"<b>{cfg['reward_days']} kun</b> Pro.</blockquote>\n\n"
+            f"Yangi shartni yozing:\n\n"
+            f"<b>Hammaga:</b>\n<code>3 5</code>\n"
+            f"<i>3 ta do'st → 5 kun Pro</i>\n\n"
+            f"<b>Bitta odamga:</b>\n<code>3 5 123456789</code>\n"
+            f"<i>oxirida — o'sha odamning ID raqami</i>\n\n"
+            f"<b>Shaxsiy shartni bekor qilish:</b>\n<code>0 0 123456789</code>\n"
+            f"<i>u umumiy shartga qaytadi</i>\n\n"
+            f"❌ Bekor qilish: /start",
+            parse_mode=ParseMode.HTML)
+
+    async def process_referral_spec(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            return
+        # ⚠️ Holat ochiq turganda BU handler har qanday matnni yutadi —
+        # /start general_router'ga umuman yetib bormaydi. Shuning uchun
+        # chiqish yo'lini shu yerning o'zida ochamiz, aks holda admin
+        # bo'limda qamalib qolardi.
+        if (message.text or "").startswith("/"):
+            await state.clear()
+            await message.answer("❌ Bekor qilindi.", reply_markup=admin_keyboard)
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) not in (2, 3):
+            await message.answer("⚠️ Format: <code>3 5</code> yoki "
+                                 "<code>3 5 123456789</code>",
+                                 parse_mode=ParseMode.HTML)
+            return
+
+        target_id = None
+        if len(parts) == 3:
+            try:
+                target_id = int(parts[2])
+            except ValueError:
+                await message.answer("⚠️ Oxirgi qiymat — ID raqami bo'lishi kerak.")
+                return
+            # Shaxsiy shartni bekor qilish: "0 0 <id>".
+            if parts[0] == "0" and parts[1] == "0":
+                try:
+                    await database_module.clear_referral_config(target_id)
+                except Exception:
+                    logger.exception("clear_referral_config error")
+                    await message.answer("⚠️ Bazaga yozib bo'lmadi.")
+                    return
+                await state.clear()
+                await message.answer(
+                    f"✅ <code>{target_id}</code> uchun shaxsiy shart olib "
+                    f"tashlandi — endi umumiy shart amal qiladi.",
+                    parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
+                return
+
+        required, days, err = database_module.clean_referral_config(parts[0], parts[1])
+        if err:
+            await message.answer(f"⚠️ {err}")
+            return
+
+        try:
+            ok = await database_module.set_referral_config(required, days, target_id)
+        except Exception:
+            logger.exception("set_referral_config error")
+            await message.answer("⚠️ Bazaga yozib bo'lmadi.")
+            return
+        if not ok:
+            await message.answer("⚠️ Bunday foydalanuvchi topilmadi — u botga "
+                                 "hech qachon /start bermagan bo'lishi mumkin.")
+            return
+
+        await state.clear()
+        kimga = (f"<code>{target_id}</code> uchun" if target_id else "HAMMAGA")
+        await message.answer(
+            f"✅ Referal sharti yangilandi.\n\n"
+            f"<blockquote>{kimga}: har <b>{required} ta</b> do'st uchun "
+            f"<b>{days} kun</b> Pro.</blockquote>\n\n"
+            f"<i>Allaqachon berilgan mukofotlar qayta hisoblanmaydi — "
+            f"yangi shart bundan keyingi mukofotlarga amal qiladi.</i>",
+            parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
 
     async def _promo_picker_kb(action: str):
         """Yuborish uchun kod tanlash — faqat ISHLATSA BO'LADIGAN kodlar."""
@@ -2387,6 +2489,8 @@ def register_admin_handlers(dp, bot: Bot):
     dp.message.register(show_maintenance_menu, F.text == "🛠 Texnik ta'til")
     dp.message.register(show_watch_menu, F.text == "👁 Kuzatish")
     dp.message.register(show_giveaway_menu, F.text == "🎁 Bepul Pro")
+    dp.message.register(show_referral_settings, F.text == "👥 Referal sharti")
+    dp.message.register(process_referral_spec, ReferralStates.waiting_for_spec)
     # ⚠️ TARTIB: tugma va oluvchi holatlari waiting_for_content dan OLDIN.
     # Konstruktor ochiq turganda admin yozgan matn "yangi kontent" bo'lib
     # ketmasligi kerak — u tugma nomi yoki oluvchilar ro'yxati.
