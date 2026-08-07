@@ -886,20 +886,19 @@ def _share_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """
     link = _referral_link(user_id)
     text = (
-        "🤖 <b>Sun'iy intellekt — o'zbek tilida</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<blockquote>Men shu botdan foydalanaman, senga ham tavsiya "
-        "qilaman — bepul va ro'yxatdan o'tish shart emas.</blockquote>\n\n"
-        "➤ Har qanday savolga javob beradi 💬\n"
-        "➤ 📄 PDF, Word, Excel o'qib tahlil qiladi\n"
-        "➤ 📸 Rasmni ko'rib tushuntiradi\n"
-        "➤ 🎙 Ovozli xabarga <b>ovoz bilan</b> javob beradi\n"
-        "➤ 🛠 Taqdimot, hujjat, jadval yasab beradi\n"
-        "➤ 🌐 Internetdan qidiradi\n\n"
-        "👇 Pastdagi tugmani bosing"
+        "🤖 <b>AI yordamchini sinab ko'ring!</b>\n\n"
+        "💬 Har qanday savolga javob\n"
+        "🌐 Internetdan qidiruv\n"
+        "📄 Hujjat va rasm tahlili\n"
+        "🎤 Ovozli suhbat\n"
+        "📊 Fayllar yaratish va yana ko'plab AI funksiyalar!\n\n"
+        "👇 Botga ushbu tugma orqali qo'shiling:"
     )
+    # Rang inline natijada ham qabul qilinadi (API'da tekshirilgan), lekin
+    # noto'g'ri qiymat BUTUN natijani rad etadi — shuning uchun faqat
+    # core/config.py dagi konstanta ishlatiladi, satr yozilmaydi.
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Botni ochish", url=link)]])
+        [btn("🤖ChatGPT-AI", "", style=BTN_PRIMARY, url=link)]])
     return text, kb
 
 

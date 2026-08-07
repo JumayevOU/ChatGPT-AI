@@ -94,9 +94,32 @@ def test_defaults():
     print("[9] mukofot tavani admin panelidan o'zgartirilmaydi OK")
 
 
+def test_share_message():
+    """Do'stga boradigan xabar — tugmasi haqiqiy va rangi haqiqiy bo'lsin.
+
+    Noto'g'ri rang qiymati inline natijani BUTUNLAY rad ettiradi va
+    ulashish jimgina ishlamay qo'yadi (xato faqat logda qoladi).
+    """
+    from core.config import BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER
+    eski = pro.BOT_USERNAME
+    pro.BOT_USERNAME = "testbot"
+    try:
+        text, kb = pro._share_message(555)
+        tugma = kb.inline_keyboard[0][0]
+        assert tugma.url == "https://t.me/testbot?start=ref_555", tugma.url
+        assert getattr(tugma, "style", None) in (BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER)
+        # Havolali tugmada callback_data bo'lmasligi kerak.
+        assert not tugma.callback_data
+        assert text.strip() and "<b>" in text
+    finally:
+        pro.BOT_USERNAME = eski
+    print("[10] ulashish xabari tugmasi va rangi to'g'ri OK")
+
+
 if __name__ == "__main__":
     test_clean()
     test_self_referral_blocked()
     test_repeat_blocked()
     test_defaults()
-    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (9/9).")
+    test_share_message()
+    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (10/10).")

@@ -83,8 +83,16 @@ class PromoAdminStates(StatesGroup):
 
 
 class ReferralStates(StatesGroup):
-    """Referal sharti: "nechta do'st -> necha kun" va u KIMGA tegishli."""
-    waiting_for_spec = State()
+    """Referal oqimi: nechta do'st -> necha kun -> kimga -> yuborish.
+
+    Bosqichma-bosqich, chunki bitta qatorda format yozdirish ("3 5 12345")
+    adminni har safar formatni eslashga majbur qiladi va xato yozilganda
+    boshidan boshlanadi.
+    """
+    waiting_for_count = State()
+    waiting_for_days = State()
+    waiting_for_scope = State()
+    waiting_for_user = State()
 
 
 class GiveawayStates(StatesGroup):
@@ -574,9 +582,23 @@ def register_admin_handlers(dp, bot: Bot):
         text, kb = await _render_giveaway_menu()
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-    # ── REFERAL SHARTI ─────────────────────────────────────────────
-    # "Nechta do'st -> necha kun Pro" va u KIMGA tegishli. Uch bosqichli
-    # zanjir: shaxsiy -> umumiy -> core/config.py.
+    # ── REFERAL: SHART + TAKLIF YUBORISH ───────────────────────────
+    # Oqim: nechta do'st -> necha kun -> kimga -> yuborish.
+    # Shart o'rnatish va taklif yuborish ATAYLAB bitta oqimda: admin
+    # shartni o'zgartirib, odamlarga xabar bermay qo'ysa, o'zgarish hech
+    # kimga yetib bormaydi va kampaniya ma'nosiz bo'lardi.
+
+    _REF_CANCEL_KB = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="refset:cancel")]])
+
+    async def _ref_cancelled(message: Message, state: FSMContext) -> bool:
+        """Holat ochiq turganda BU handler har qanday matnni yutadi —
+        /buyruq general_router'ga yetib bormaydi. Chiqish yo'li shu yerda."""
+        if (message.text or "").startswith("/"):
+            await state.clear()
+            await message.answer("❌ Bekor qilindi.", reply_markup=admin_keyboard)
+            return True
+        return False
 
     async def show_referral_settings(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
@@ -588,88 +610,199 @@ def register_admin_handlers(dp, bot: Bot):
             logger.exception("get_referral_config error")
             await message.answer("⚠️ Sozlamani o'qib bo'lmadi.")
             return
-        await state.set_state(ReferralStates.waiting_for_spec)
+        await state.set_state(ReferralStates.waiting_for_count)
         await message.answer(
-            f"👥 <b>REFERAL SHARTI</b>\n"
+            f"👥 <b>REFERAL KAMPANIYASI</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<blockquote>Hozir: har <b>{cfg['required']} ta</b> do'st uchun "
-            f"<b>{cfg['reward_days']} kun</b> Pro.</blockquote>\n\n"
-            f"Yangi shartni yozing:\n\n"
-            f"<b>Hammaga:</b>\n<code>3 5</code>\n"
-            f"<i>3 ta do'st → 5 kun Pro</i>\n\n"
-            f"<b>Bitta odamga:</b>\n<code>3 5 123456789</code>\n"
-            f"<i>oxirida — o'sha odamning ID raqami</i>\n\n"
-            f"<b>Shaxsiy shartni bekor qilish:</b>\n<code>0 0 123456789</code>\n"
-            f"<i>u umumiy shartga qaytadi</i>\n\n"
-            f"❌ Bekor qilish: /start",
-            parse_mode=ParseMode.HTML)
+            f"<blockquote>Hozirgi shart: har <b>{cfg['required']} ta</b> do'st "
+            f"uchun <b>{cfg['reward_days']} kun</b> Pro.</blockquote>\n\n"
+            f"<b>1/3 — Nechta do'st chaqirishi kerak?</b>\n"
+            f"<i>Faqat raqam yozing. Masalan: 3</i>",
+            parse_mode=ParseMode.HTML, reply_markup=_REF_CANCEL_KB)
 
-    async def process_referral_spec(message: Message, state: FSMContext):
+    async def process_referral_count(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
-            return
-        # ⚠️ Holat ochiq turganda BU handler har qanday matnni yutadi —
-        # /start general_router'ga umuman yetib bormaydi. Shuning uchun
-        # chiqish yo'lini shu yerning o'zida ochamiz, aks holda admin
-        # bo'limda qamalib qolardi.
-        if (message.text or "").startswith("/"):
             await state.clear()
-            await message.answer("❌ Bekor qilindi.", reply_markup=admin_keyboard)
             return
-
-        parts = (message.text or "").split()
-        if len(parts) not in (2, 3):
-            await message.answer("⚠️ Format: <code>3 5</code> yoki "
-                                 "<code>3 5 123456789</code>",
+        if await _ref_cancelled(message, state):
+            return
+        count, _, err = database_module.clean_referral_config(
+            (message.text or "").strip(), 1)
+        if err:
+            await message.answer(f"⚠️ {err}\n\n<i>Faqat raqam yozing.</i>",
                                  parse_mode=ParseMode.HTML)
             return
+        await state.update_data(ref_count=count)
+        await state.set_state(ReferralStates.waiting_for_days)
+        await message.answer(
+            f"✅ <b>{count} ta</b> do'st.\n\n"
+            f"<b>2/3 — Necha kun Pro berilsin?</b>\n"
+            f"<i>Faqat raqam yozing. Masalan: 3</i>",
+            parse_mode=ParseMode.HTML, reply_markup=_REF_CANCEL_KB)
 
-        target_id = None
-        if len(parts) == 3:
-            try:
-                target_id = int(parts[2])
-            except ValueError:
-                await message.answer("⚠️ Oxirgi qiymat — ID raqami bo'lishi kerak.")
-                return
-            # Shaxsiy shartni bekor qilish: "0 0 <id>".
-            if parts[0] == "0" and parts[1] == "0":
-                try:
-                    await database_module.clear_referral_config(target_id)
-                except Exception:
-                    logger.exception("clear_referral_config error")
-                    await message.answer("⚠️ Bazaga yozib bo'lmadi.")
-                    return
-                await state.clear()
-                await message.answer(
-                    f"✅ <code>{target_id}</code> uchun shaxsiy shart olib "
-                    f"tashlandi — endi umumiy shart amal qiladi.",
-                    parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
-                return
-
-        required, days, err = database_module.clean_referral_config(parts[0], parts[1])
+    async def process_referral_days(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+        if await _ref_cancelled(message, state):
+            return
+        data = await state.get_data()
+        count = data.get("ref_count")
+        count, days, err = database_module.clean_referral_config(
+            count, (message.text or "").strip())
         if err:
-            await message.answer(f"⚠️ {err}")
+            await message.answer(f"⚠️ {err}\n\n<i>Faqat raqam yozing.</i>",
+                                 parse_mode=ParseMode.HTML)
+            return
+        await state.update_data(ref_days=days)
+        await state.set_state(ReferralStates.waiting_for_scope)
+        await message.answer(
+            f"✅ Shart: <b>{count} ta</b> do'st → <b>{days} kun</b> Pro.\n\n"
+            f"<b>3/3 — Kimga tegishli bo'lsin?</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌍 Hammaga", callback_data="refset:all")],
+                [InlineKeyboardButton(text="👤 Bitta userga", callback_data="refset:one")],
+                [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="refset:cancel")],
+            ]))
+
+    async def referral_scope_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        action = (query.data or "").split(":")[-1]
+        if action == "cancel":
+            await state.clear()
+            await query.answer("Bekor qilindi")
+            try:
+                await query.message.edit_text("❌ Bekor qilindi.")
+            except Exception:
+                pass
+            return
+
+        data = await state.get_data()
+        count, days, err = database_module.clean_referral_config(
+            data.get("ref_count"), data.get("ref_days"))
+        if err:
+            await state.clear()
+            await query.answer("Ma'lumot yo'qoldi, boshidan boshlang.", show_alert=True)
+            return
+        await query.answer()
+
+        if action == "one":
+            await state.set_state(ReferralStates.waiting_for_user)
+            await query.message.answer(
+                "👤 <b>Kimga?</b>\n\n"
+                "<code>@username</code> yoki ID raqamini yozing.\n\n"
+                "<blockquote>Bir nechtasini probel bilan ajratib ham "
+                "yozsangiz bo'ladi.</blockquote>",
+                parse_mode=ParseMode.HTML, reply_markup=_REF_CANCEL_KB)
+            return
+
+        # ── HAMMAGA ──
+        await state.clear()
+        try:
+            await database_module.set_referral_config(count, days, None)
+        except Exception:
+            logger.exception("set_referral_config error")
+            await query.message.answer("⚠️ Bazaga yozib bo'lmadi.")
             return
 
         try:
-            ok = await database_module.set_referral_config(required, days, target_id)
+            users = await database_module.get_all_users()
         except Exception:
-            logger.exception("set_referral_config error")
-            await message.answer("⚠️ Bazaga yozib bo'lmadi.")
-            return
-        if not ok:
-            await message.answer("⚠️ Bunday foydalanuvchi topilmadi — u botga "
-                                 "hech qachon /start bermagan bo'lishi mumkin.")
+            logger.exception("get_all_users error")
+            await query.message.answer(
+                f"✅ Shart o'rnatildi ({count} → {days} kun), lekin "
+                f"foydalanuvchilar ro'yxatini olib bo'lmadi — taklif yuborilmadi.")
             return
 
+        target_ids = [u["user_id"] for u in users
+                      if u.get("is_active", True) and not u.get("is_banned")]
+        progress = await query.message.answer(
+            f"📤 Taklif yuborilmoqda: 0/{len(target_ids)}")
+        sent = 0
+        for i, uid in enumerate(target_ids, 1):
+            if await pro_module.send_referral_invite(uid):
+                sent += 1
+            # Broadcast bilan bir xil sur'at — Telegram flood-controlga
+            # tushmaslik uchun.
+            await asyncio.sleep(0.05)
+            if i % 25 == 0:
+                try:
+                    await progress.edit_text(
+                        f"📤 Taklif yuborilmoqda: {i}/{len(target_ids)}")
+                except Exception:
+                    pass
+
+        try:
+            await database_module.log_admin_action(
+                query.from_user.id, "referral_campaign", None,
+                f"{count}/{days}kun, {sent} ta")
+        except Exception:
+            pass
+        try:
+            await progress.edit_text(
+                f"✅ <b>Kampaniya yakunlandi.</b>\n\n"
+                f"<blockquote>Shart: har <b>{count} ta</b> do'st → "
+                f"<b>{days} kun</b> Pro (hammaga).</blockquote>\n\n"
+                f"📨 Yuborildi: <b>{sent}</b> ta\n"
+                f"❌ Yetib bormadi: <b>{len(target_ids) - sent}</b> ta "
+                f"<i>(bloklagan yoki chat topilmadi)</i>",
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+    async def process_referral_user(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+        if await _ref_cancelled(message, state):
+            return
+        data = await state.get_data()
+        count, days, err = database_module.clean_referral_config(
+            data.get("ref_count"), data.get("ref_days"))
+        if err:
+            await state.clear()
+            await message.answer("❗️ Ma'lumot yo'qoldi. Boshidan boshlang.",
+                                 reply_markup=admin_keyboard)
+            return
+
+        found, missing = await _resolve_recipients(message.text or "")
+        if not found:
+            await message.answer(
+                "❗️ Bunday foydalanuvchi topilmadi. U botga hech qachon "
+                "/start bermagan bo'lishi mumkin. Qayta urinib ko'ring.")
+            return
         await state.clear()
-        kimga = (f"<code>{target_id}</code> uchun" if target_id else "HAMMAGA")
+
+        sent, failed, banned = [], [], []
+        for uid, name, is_banned_flag in found:
+            if is_banned_flag:
+                banned.append(name)
+                continue
+            try:
+                # Shaxsiy shart AVVAL yoziladi: taklif xabari shartni
+                # o'qib ko'rsatadi, teskari tartibda odam eski shartni
+                # ko'rib qolardi.
+                await database_module.set_referral_config(count, days, uid)
+            except Exception:
+                logger.exception("set_referral_config error")
+                failed.append(name)
+                continue
+            ok = await pro_module.send_referral_invite(uid)
+            (sent if ok else failed).append(name)
+            await asyncio.sleep(0.05)
+
+        try:
+            await database_module.log_admin_action(
+                message.from_user.id, "referral_campaign", None,
+                f"{count}/{days}kun, {len(sent)} ta")
+        except Exception:
+            pass
         await message.answer(
-            f"✅ Referal sharti yangilandi.\n\n"
-            f"<blockquote>{kimga}: har <b>{required} ta</b> do'st uchun "
-            f"<b>{days} kun</b> Pro.</blockquote>\n\n"
-            f"<i>Allaqachon berilgan mukofotlar qayta hisoblanmaydi — "
-            f"yangi shart bundan keyingi mukofotlarga amal qiladi.</i>",
-            parse_mode=ParseMode.HTML, reply_markup=admin_keyboard)
+            f"✅ Shaxsiy shart: har <b>{count} ta</b> do'st → "
+            f"<b>{days} kun</b> Pro.", parse_mode=ParseMode.HTML)
+        await _report_delivery(message, sent, failed, missing, banned)
 
     async def _promo_picker_kb(action: str):
         """Yuborish uchun kod tanlash — faqat ISHLATSA BO'LADIGAN kodlar."""
@@ -2490,7 +2623,11 @@ def register_admin_handlers(dp, bot: Bot):
     dp.message.register(show_watch_menu, F.text == "👁 Kuzatish")
     dp.message.register(show_giveaway_menu, F.text == "🎁 Bepul Pro")
     dp.message.register(show_referral_settings, F.text == "👥 Referal sharti")
-    dp.message.register(process_referral_spec, ReferralStates.waiting_for_spec)
+    dp.message.register(process_referral_count, ReferralStates.waiting_for_count)
+    dp.message.register(process_referral_days, ReferralStates.waiting_for_days)
+    dp.message.register(process_referral_user, ReferralStates.waiting_for_user)
+    dp.callback_query.register(referral_scope_callback,
+                               lambda q: q.data and q.data.startswith("refset:"))
     # ⚠️ TARTIB: tugma va oluvchi holatlari waiting_for_content dan OLDIN.
     # Konstruktor ochiq turganda admin yozgan matn "yangi kontent" bo'lib
     # ketmasligi kerak — u tugma nomi yoki oluvchilar ro'yxati.
