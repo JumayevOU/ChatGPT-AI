@@ -116,10 +116,44 @@ def test_share_message():
     print("[10] ulashish xabari tugmasi va rangi to'g'ri OK")
 
 
+async def test_inline_vs_guest():
+    """Inline ulashish Guest Mode'ga xalaqit bermasin.
+
+    Ikkalasi ham "@bot ..." dan boshlanadi. Foydalanuvchi "@bot 2+2" deb
+    yozayotganda ekranda referal kartochkasi turishi kerak EMAS — u
+    Guest Mode savolini berayotgan bo'ladi.
+    """
+    class _FakeQuery:
+        def __init__(self, q):
+            self.query = q
+            self.from_user = type("U", (), {"id": 777})()
+            self.natijalar = None
+
+        async def answer(self, results, **kw):
+            self.natijalar = results
+
+    eski = pro.BOT_USERNAME
+    pro.BOT_USERNAME = "testbot"
+    try:
+        yozayotgan = _FakeQuery("2+2 nechchi")
+        await pro.handle_inline_share(yozayotgan)
+        assert yozayotgan.natijalar == [], \
+            "Guest Mode savoli ustiga referal kartochkasi chiqdi"
+
+        tugma_orqali = _FakeQuery("")
+        await pro.handle_inline_share(tugma_orqali)
+        assert len(tugma_orqali.natijalar) == 1, "ulashish kartochkasi chiqmadi"
+    finally:
+        pro.BOT_USERNAME = eski
+    print("[11] inline ulashish Guest Mode'ga xalaqit bermaydi OK")
+
+
 if __name__ == "__main__":
+    import asyncio
     test_clean()
     test_self_referral_blocked()
     test_repeat_blocked()
     test_defaults()
     test_share_message()
-    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (10/10).")
+    asyncio.run(test_inline_vs_guest())
+    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (11/11).")

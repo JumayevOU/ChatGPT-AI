@@ -923,7 +923,26 @@ def _share_button(user_id: int) -> InlineKeyboardButton:
 
 
 async def handle_inline_share(query: InlineQuery) -> None:
-    """Inline rejim: "@bot" yozib chat tanlaganda chiqadigan yagona natija."""
+    """Inline rejim: "@bot" yozib chat tanlaganda chiqadigan yagona natija.
+
+    ⚠️ GUEST MODE bilan yonma-yon yashaydi. Ikkalasi ham `@bot ...` dan
+    boshlanadi, lekin bular BOSHQA-BOSHQA update turlari:
+      * inline_query  — foydalanuvchi YOZAYOTGANDA, hali yubormasdan;
+      * guest_message — xabar YUBORILGANDAN keyin (guest_query_id bilan).
+    Shuning uchun biri ikkinchisini almashtirmaydi.
+
+    Lekin ekranda xalaqit bermasin: "@bot 2+2" deb yozilgan bo'lsa, bu
+    Guest Mode savoli — biz BO'SH ro'yxat qaytaramiz va panel umuman
+    ko'rinmaydi. Referal kartochkasi faqat so'rov BO'SH bo'lganda, ya'ni
+    "Do'stlarga ulashish" tugmasi orqali kelinganda chiqadi.
+    """
+    if (query.query or "").strip():
+        try:
+            await query.answer([], cache_time=0, is_personal=True)
+        except Exception as e:
+            logger.debug(f"[Referal] bo'sh inline javob berilmadi: {e}")
+        return
+
     text, kb = _share_message(query.from_user.id)
     try:
         await query.answer(
