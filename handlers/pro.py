@@ -35,6 +35,7 @@ from core.config import (
     CUSTOM_EMOJI, MESSAGE_EFFECTS, BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER,
 )
 from db import database
+from services import menu as menu_module
 
 # main.py ishga tushganda to'ldiriladi (deep-link havolalar uchun kerak).
 BOT_USERNAME: str = ""
@@ -523,6 +524,12 @@ async def handle_successful_payment(message: Message):
         # allaqachon olgan, ikkinchi marta bezovta qilmaymiz.
         logger.info(f"[Pro] takroriy successful_payment e'tiborsiz qoldirildi: {charge_id}")
         return
+
+    # Pro buyruqlarini DARHOL menyuga qo'shamiz — aks holda ular
+    # foydalanuvchi keyingi xabarini yozgandagina paydo bo'lardi va yangi
+    # sotib olgan odam "nima o'zgardi?" deb qolardi. Sovg'a bo'lsa menyu
+    # OLUVCHIga qo'yiladi.
+    await menu_module.sync_commands(message.bot, beneficiary, True)
 
     await _notify_purchase(message, payer, beneficiary, days, charge_id)
 

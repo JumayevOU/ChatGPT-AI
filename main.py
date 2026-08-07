@@ -2,6 +2,7 @@ import asyncio
 from aiogram import types, F, Router
 from aiogram.filters import CommandStart
 from aiogram.methods import DeleteWebhook
+from aiogram.types import BotCommandScopeAllPrivateChats
 from core.loader import dp, bot, logger
 from db.database import create_db_pool, create_users_table, create_history_table
 from db import database
@@ -23,6 +24,7 @@ from handlers.guest import router as guest_router
 from handlers import pro as pro_module
 from handlers import digest as digest_module
 from handlers.helpers import premium_expiry_watcher, reminder_watcher
+from services import menu as menu_module
 
 general_router = Router(name="general")
 
@@ -138,6 +140,17 @@ async def main():
         pro_module.BOT_USERNAME = me.username or ""
     except Exception as e:
         logger.warning(f"get_me() muvaffaqiyatsiz — referal havolalari ishlamaydi: {e}")
+
+    # Bepul buyruqlar ro'yxati — HAMMA shaxsiy chat uchun standart. Pro
+    # buyruqlari services/menu.py'da chat darajasida shu ro'yxat USTIDAN
+    # yoziladi, chunki Telegram'da aniqroq qamrov ustun turadi. Shu sababli
+    # /start uchun alohida bazaga murojaat qilish shart emas: yangi
+    # foydalanuvchi birinchi soniyadanoq menyuni ko'radi.
+    try:
+        await bot.set_my_commands(menu_module.COMMON_COMMANDS,
+                                  scope=BotCommandScopeAllPrivateChats())
+    except Exception as e:
+        logger.warning(f"Buyruqlar menyusi qo'yilmadi: {e}")
 
     await bot(DeleteWebhook(drop_pending_updates=True))
     await dp.start_polling(bot)
