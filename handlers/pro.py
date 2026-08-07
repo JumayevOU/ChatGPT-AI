@@ -230,10 +230,12 @@ def _perks_block() -> str:
         f"    <i>bepulda YO'Q — istagan tasviringizni chizib beraman</i>\n"
         f"{pe('voice', '🎙')} <b>Tabiiy ovoz</b>\n"
         f"    <i>aniqroq tushunadi, tirik ovozda javob beradi</i>\n"
+        f"⏰ <b>Eslatmalar</b>\n"
+        f"    <i>\"ertaga soat 9 da rejamni yubor\" — o'zim yozaman</i>\n"
         f"🧠 <b>Chuqur fikrlash</b>\n"
         f"    <i>murakkab savolga kuchliroq tahlil</i>\n"
-        f"💬 <b>2× uzun xotira</b>\n"
-        f"    <i>suhbatni ikki barobar ko'proq eslab qoladi</i>"
+        f"💬 <b>3× uzun xotira</b>\n"
+        f"    <i>suhbatni uch barobar ko'proq eslab qoladi</i>"
         "</blockquote>"
     ).replace(",", " ")
 
@@ -1030,7 +1032,7 @@ async def send_promo_gift(user_id: int, code: str, days: int,
         f"<i>(bepulda {DAILY_FREE_LIMIT})</i>\n"
         f"{pe('document', '📄')} Kunlik fayl: <b>{PLAN_LIMITS['pro']['files']} ta</b> "
         f"<i>(bepulda {DAILY_FILE_LIMIT_FREE})</i>\n"
-        f"🧠 Chuqur fikrlash · 💬 2× uzun xotira"
+        f"⏰ Eslatmalar · 🧠 Chuqur fikrlash · 💬 3× uzun xotira"
         f"</blockquote>\n\n"
         f"🎟 <b>Kodingiz:</b> <code>{code}</code>{deadline}\n\n"
         f"👇 Faollashtirish uchun tugmani bosing:"

@@ -22,7 +22,7 @@ from db.database import ensure_profile_columns
 from handlers.guest import router as guest_router
 from handlers import pro as pro_module
 from handlers import digest as digest_module
-from handlers.helpers import premium_expiry_watcher
+from handlers.helpers import premium_expiry_watcher, reminder_watcher
 
 general_router = Router(name="general")
 
@@ -128,6 +128,7 @@ async def main():
                                lambda q: q.data and q.data.startswith("dg:"))
     asyncio.create_task(notify_inactive_users())
     asyncio.create_task(premium_expiry_watcher())
+    asyncio.create_task(reminder_watcher())
     asyncio.create_task(digest_module.daily_digest_watcher())
 
     # Referal va sovg'a havolalari (t.me/<username>?start=ref_...) uchun

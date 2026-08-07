@@ -7,11 +7,13 @@ from functools import wraps
 import asyncpg
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo  
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from core.config import (
     GPT_MODEL_DISPLAY_NAME, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE,
     plan_limits, daily_limit, DAILY_COUNTERS,
+    MAX_ACTIVE_REMINDERS, REMINDER_MAX_LEN, REMINDER_REPEATS,
+    REMINDER_MAX_AHEAD_DAYS,
 )
 
 load_dotenv()
@@ -259,7 +261,33 @@ async def create_users_table():
             );
         ''')
 
+        # Eslatmalar va rejalashtirilgan vazifalar (Pro).
+        # `chat_id` ATAYLAB yo'q: eslatma DOIM shaxsiy chatga boradi.
+        # Guruhda yaratilgan eslatma o'sha guruhga tushsa, foydalanuvchining
+        # shaxsiy ishi begonalarga ko'rinardi.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                text TEXT NOT NULL,
+                run_at TIMESTAMPTZ NOT NULL,
+                repeat TEXT NOT NULL DEFAULT 'once',
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                last_sent_at TIMESTAMPTZ
+            );
+        ''')
+
         try:
+            # Qisman indeks: watcher har 60 soniyada FAQAT faol va muddati
+            # kelganlarini so'raydi, o'chirilgan eskilari indeksga umuman
+            # kirmaydi.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scheduled_due "
+                "ON scheduled_tasks (run_at) WHERE active;")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scheduled_user "
+                "ON scheduled_tasks (user_id) WHERE active;")
             # `updated_at` keyinroq qo'shildi. Modelga sana ko'rsatiladi, va
             # tuzatilgan fakt eski sana bilan tursa model unga kamroq
             # ishonadi — shuning uchun yangilanish vaqti alohida yoziladi.
@@ -974,6 +1002,174 @@ async def clear_memories(user_id: int) -> None:
         await create_db_pool()
     async with pool.acquire() as conn:
         await conn.execute('DELETE FROM user_memories WHERE user_id = $1', user_id)
+
+
+# ─────────────────────────────────────────────────────────────
+# ⏰ ESLATMALAR VA REJALASHTIRILGAN VAZIFALAR
+# ─────────────────────────────────────────────────────────────
+# `text` va `run_at` ni MODEL yozadi — ya'ni bu ham xotira kabi ISHONCHSIZ
+# manba. Tekshiruvlar shu yerda turadi, tool sxemasining "description" iga
+# ishonib qolinmaydi: ko'rsatma kafolat emas.
+
+def clean_reminder_text(text: str) -> str:
+    """Eslatma matnini tozalaydi. Bo'sh satr qaytsa — rad etiladi.
+
+    Sof funksiya — DB'siz test qilinadi (tests/test_reminders.py).
+    """
+    return " ".join(str(text or "").split())[:REMINDER_MAX_LEN]
+
+
+def parse_run_at(when: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Model bergan vaqt satrini Toshkent vaqtidagi datetime'ga aylantiradi.
+
+    Kutiladigan format: "YYYY-MM-DD HH:MM" (yoki "T" ajratgichi bilan).
+    None qaytsa — vaqt yaroqsiz va eslatma YARATILMAYDI. Jim qolib
+    noto'g'ri vaqtga qo'yishdan ko'ra ochiq xato qaytargan yaxshi.
+    """
+    raw = str(when or "").strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(raw, fmt).replace(tzinfo=TASHKENT_TZ)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+
+    now = now or datetime.now(TASHKENT_TZ)
+    # O'tmish rad etiladi (1 daqiqa bardosh — model "hozir" deb hisoblab
+    # bir necha soniya orqada qolgan vaqt yozishi normal).
+    if dt < now - timedelta(minutes=1):
+        return None
+    if dt > now + timedelta(days=REMINDER_MAX_AHEAD_DAYS):
+        return None
+    return dt
+
+
+def _add_months(dt: datetime, n: int) -> datetime:
+    """Oy qo'shadi, oy oxirini QIRQADI: 31-yanvar + 1 oy = 28/29-fevral."""
+    import calendar
+    month = dt.month - 1 + n
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    return dt.replace(year=year, month=month,
+                      day=min(dt.day, calendar.monthrange(year, month)[1]))
+
+
+def next_run_at(current: datetime, repeat: str,
+                now: Optional[datetime] = None) -> Optional[datetime]:
+    """Keyingi ishga tushish vaqti. None = takrorlanmaydi, o'chirilsin.
+
+    Bot bir necha kun o'chib turgan bo'lsa `current` ancha orqada qoladi —
+    shuning uchun kelajakka CHIQIB OLGUNCHA suriladi, aks holda watcher
+    bitta eslatmani ketma-ket o'nlab marta yuborardi.
+    """
+    if repeat == "once" or repeat not in REMINDER_REPEATS:
+        return None
+    now = now or datetime.now(TASHKENT_TZ)
+    nxt = current
+    # Tavan: buzuq ma'lumot cheksiz siklga aylanmasin.
+    for _ in range(500):
+        if repeat == "daily":
+            nxt += timedelta(days=1)
+        elif repeat == "weekly":
+            nxt += timedelta(days=7)
+        else:
+            nxt = _add_months(nxt, 1)
+        if nxt > now:
+            return nxt
+    return None
+
+
+@with_db_retry()
+async def create_scheduled_task(user_id: int, text: str, when: str,
+                                repeat: str = "once") -> str:
+    """Eslatma yaratadi. Qaytgan satr to'g'ridan-to'g'ri modelga boradi."""
+    text = clean_reminder_text(text)
+    if not text:
+        return "rad etildi (matn bo'sh)"
+    if repeat not in REMINDER_REPEATS:
+        return f"noma'lum takrorlanish — {', '.join(REMINDER_REPEATS)} dan biri bo'lishi kerak"
+    run_at = parse_run_at(when)
+    if run_at is None:
+        return ("vaqt yaroqsiz — 'YYYY-MM-DD HH:MM' formatida, o'tmishda "
+                "bo'lmagan va 2 yildan uzoq bo'lmagan vaqt bering")
+
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        n = await conn.fetchval(
+            'SELECT COUNT(*) FROM scheduled_tasks WHERE user_id = $1 AND active',
+            user_id)
+        if n >= MAX_ACTIVE_REMINDERS:
+            return (f"eslatmalar to'la ({MAX_ACTIVE_REMINDERS} ta) — "
+                    "avval keraksizini bekor qiling")
+        await conn.execute(
+            'INSERT INTO scheduled_tasks (user_id, text, run_at, repeat) '
+            'VALUES ($1, $2, $3, $4)',
+            user_id, text, run_at, repeat)
+    return f"qo'yildi: {run_at:%Y-%m-%d %H:%M}" + (
+        f" ({repeat})" if repeat != "once" else "")
+
+
+@with_db_retry()
+async def list_scheduled_tasks(user_id: int) -> List[Dict[str, Any]]:
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            'SELECT id, text, run_at, repeat FROM scheduled_tasks '
+            'WHERE user_id = $1 AND active ORDER BY run_at', user_id)
+    return [dict(r) for r in rows]
+
+
+# ⚠️ `AND user_id = $N` MAJBURIY: raqam modelning bergan indeksidan kelib
+# chiqadi, ya'ni xato bo'lishi mumkin. Egalik tekshiruvisiz model boshqa
+# odamning eslatmasini bekor qilib qo'yardi (xotira bilan bir xil xavf).
+@with_db_retry()
+async def cancel_scheduled_task(user_id: int, task_id: int) -> str:
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            'UPDATE scheduled_tasks SET active = FALSE '
+            'WHERE id = $1 AND user_id = $2 AND active', task_id, user_id)
+    return "bekor qilindi" if res.endswith("1") else "topilmadi"
+
+
+@with_db_retry()
+async def due_scheduled_tasks(limit: int = 100) -> List[Dict[str, Any]]:
+    """Muddati kelgan faol eslatmalar."""
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            'SELECT id, user_id, text, run_at, repeat FROM scheduled_tasks '
+            'WHERE active AND run_at <= NOW() ORDER BY run_at LIMIT $1', limit)
+    return [dict(r) for r in rows]
+
+
+@with_db_retry()
+async def advance_scheduled_task(task_id: int, run_at: datetime,
+                                 repeat: str) -> None:
+    """Yuborilgandan keyin: keyingi vaqtga suradi yoki o'chiradi."""
+    nxt = next_run_at(run_at, repeat)
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        if nxt is None:
+            await conn.execute(
+                'UPDATE scheduled_tasks SET active = FALSE, last_sent_at = NOW() '
+                'WHERE id = $1', task_id)
+        else:
+            await conn.execute(
+                'UPDATE scheduled_tasks SET run_at = $2, last_sent_at = NOW() '
+                'WHERE id = $1', task_id, nxt)
 
 
 @with_db_retry()

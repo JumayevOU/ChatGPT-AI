@@ -783,6 +783,29 @@ MESSAGE_EFFECTS: dict[str, str] = {
 }
 
 
+# ── ESLATMALAR VA REJALASHTIRILGAN VAZIFALAR (PRO) ──────────────────
+# Telegram'ga XOS imkoniyat: veb-chatbot sizga o'zi yozolmaydi.
+#
+# Tick 60 soniya — daydjestdagi 600 EMAS. Daydjest 10 daqiqa kechiksa hech
+# kim sezmaydi, "soat 9:00 da eslat" 9:09 da kelsa esa ishonch yo'qoladi.
+# So'rov qisman indeks bo'yicha ketadi (WHERE active), ya'ni arzon.
+REMINDER_TICK: int = 60
+
+# Bitta foydalanuvchidagi FAOL eslatmalar tavani. Chegarasiz qoldirilsa
+# bitta hisob minglab eslatma yaratib Telegram rate limitini yeb qo'yardi.
+MAX_ACTIVE_REMINDERS: int = 50
+
+REMINDER_MAX_LEN: int = 200
+
+# Cron parser ATAYLAB yo'q — bu to'rttasi "har dushanba", "har kuni ertalab",
+# "oyning boshida" kabi real so'rovlarning deyarli hammasini qoplaydi.
+REMINDER_REPEATS: tuple = ("once", "daily", "weekly", "monthly")
+
+# Eslatmani ENG UZOG'I shuncha vaqtga qo'yish mumkin — model xato hisoblab
+# 2190-yilga eslatma yozib qo'ymasin.
+REMINDER_MAX_AHEAD_DAYS: int = 730
+
+
 # ── REFERAL ─────────────────────────────────────────────────────────
 REFERRAL_REQUIRED: int = 3        # necha do'st bir mukofotni ochadi
 REFERRAL_REWARD_DAYS: int = 3     # har mukofotda necha kun Pro

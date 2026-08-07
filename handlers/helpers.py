@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
+from html import escape as html_escape
 from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramForbiddenError
@@ -158,6 +159,46 @@ async def _dm_or_deactivate(user_id: int, text: str, kb=None) -> None:
             pass
     except Exception as e:
         logger.debug(f"[Tarif eslatmasi] yuborilmadi (user={user_id}): {e}")
+
+
+async def reminder_watcher():
+    """Muddati kelgan eslatmalarni yuboradi va keyingi vaqtga suradi.
+
+    Tick REMINDER_TICK (60 s) — daydjestdagi 600 EMAS. Daydjest 10 daqiqa
+    kechiksa hech kim sezmaydi, "soat 9:00 da eslat" 9:09 da kelsa esa
+    ishonch yo'qoladi. So'rov qisman indeks bo'yicha ketadi (WHERE active),
+    ya'ni bo'sh tickda ham arzon.
+
+    ⚠️ TARIF BU YERDA TEKSHIRILMAYDI — bu ATAYLAB. Pro tugagach yaratilgan
+    eslatmalar oxirigacha yuboriladi, faqat YANGISINI qo'yib bo'lmaydi
+    (tekshiruv create_scheduled_task chaqiriladigan joyda). Aks holda odam
+    ishongan eslatmasini olmay qolardi va bu obunani uzaytirishga emas,
+    botni butunlay tashlashga olib kelardi.
+    """
+    from core.config import REMINDER_TICK
+
+    while True:
+        await asyncio.sleep(REMINDER_TICK)
+        try:
+            for row in await database.due_scheduled_tasks():
+                # AVVAL suramiz, KEYIN yuboramiz: yuborish osilib qolsa
+                # yoki jarayon shu payt o'lsa, keyingi tickda o'sha eslatma
+                # qayta yuborilmasin. Bir marta yo'qotish — o'n marta
+                # takrorlashdan yaxshi.
+                try:
+                    await database.advance_scheduled_task(
+                        row["id"], row["run_at"], row["repeat"])
+                except Exception as e:
+                    logger.error(f"[Eslatma] surishda xatolik id={row['id']}: {e}")
+                    continue
+
+                await _dm_or_deactivate(row["user_id"], (
+                    f"⏰ <b>ESLATMA</b>\n\n"
+                    f"<blockquote>{html_escape(row['text'])}</blockquote>"
+                ))
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"[Eslatma] fon vazifasida xatolik: {e}")
 
 
 async def premium_expiry_watcher():

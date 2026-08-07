@@ -56,6 +56,7 @@ from core.loader import openai_client, logger
 from db.history import update_chat_history
 from db.database import (
     get_memories, add_memory, update_memory, delete_memory, clear_memories,
+    create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -1116,6 +1117,105 @@ _MEMORY_TOOL = {
 }
 
 
+# ─────────────────────────────────────────────────────────────
+# ⏰ ESLATMALAR (PRO)
+# ─────────────────────────────────────────────────────────────
+# Telegram'ga XOS imkoniyat: veb-chatbot sizga o'zi yozolmaydi. Shu bilan
+# bot foydalanuvchiga O'ZI murojaat qiladigan yagona kanalga aylanadi.
+#
+# Asbob FAQAT Pro'da biriktiriladi (rasm tool'i bilan bir xil naqsh) —
+# bepul foydalanuvchi so'rovida sxema umuman yuborilmaydi, ya'ni har
+# so'rovda ortiqcha token sarflanmaydi. Bepulga upsell ko'rsatmoqchi
+# bo'lsangiz, biriktirish shartidan `is_pro` ni olib tashlash yetadi:
+# `_run_reminder_task` allaqachon tarifni o'zi ham tekshiradi.
+_REMINDER_TOOL = {
+    "type": "function",
+    "name": "manage_reminder",
+    "description": (
+        "Foydalanuvchiga BELGILANGAN VAQTDA xabar yuborish uchun eslatma "
+        "qo'yish, ro'yxatini olish yoki bekor qilish.\n\n"
+        "QACHON ISHLATILADI: foydalanuvchi kelajakdagi vaqtga bog'liq "
+        "biror ish so'raganda — 'ertaga soat 9 da eslat', 'har dushanba "
+        "haftalik hisobot tayyorla', '3 kundan keyin Karimga qo'ng'iroq "
+        "qilishni eslat', 'har kuni ertalab bugungi rejamni yubor'.\n\n"
+        "ISHLATILMAYDI: o'tmish haqidagi savol, hozir bajariladigan ish, "
+        "yoki foydalanuvchi shunchaki kelajak haqida gapirganda "
+        "('kelasi hafta imtihonim bor' — bu eslatma so'rovi EMAS, agar "
+        "u aniq so'ramasa).\n\n"
+        "action='create' — yangi eslatma. `text` va `when` majburiy.\n"
+        "action='list'   — faol eslatmalar ro'yxati.\n"
+        "action='cancel' — bekor qilish, `index` ro'yxatdagi RAQAM.\n\n"
+        "`when` — MAJBURIY format 'YYYY-MM-DD HH:MM', Toshkent vaqti. "
+        "Uni O'ZINGIZ hisoblang: tizim xabarida hozirgi sana va vaqt bor. "
+        "'ertaga soat 9 da' = bugungi sana + 1 kun, 09:00.\n"
+        "`repeat` — 'once' (birlik), 'daily', 'weekly', 'monthly'. "
+        "Takrorlanuvchida `when` BIRINCHI marta ishga tushish vaqti.\n\n"
+        "`text` — eslatma kelganda foydalanuvchi o'qiydigan matn. Uni "
+        "foydalanuvchining O'Z so'zlari bilan, ikkinchi shaxsda yozing: "
+        "'Karimga qo'ng'iroq qilish', 'Bugungi rejani ko'rib chiqish'.\n\n"
+        "Eslatma qo'yilgach javobda buni QISQA tasdiqlang (vaqtini aytib), "
+        "lekin uzun tushuntirish bermang."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "cancel"]},
+            "text": {"type": "string",
+                     "description": "Eslatma matni (create uchun), 200 belgidan qisqa."},
+            "when": {"type": "string",
+                     "description": "'YYYY-MM-DD HH:MM' Toshkent vaqti (create uchun)."},
+            "repeat": {"type": "string",
+                       "enum": ["once", "daily", "weekly", "monthly"]},
+            "index": {"type": "integer",
+                      "description": "Ro'yxatdagi raqam (cancel uchun)."},
+        },
+        "required": ["action"],
+    },
+    "strict": False,
+}
+
+
+async def _run_reminder_task(user_id: Optional[int], args: dict) -> str:
+    """manage_reminder chaqiruvi — modelga qisqa MATN natija qaytaradi.
+
+    `index` modelning bergan raqami, ya'ni ishonchsiz: chegaradan chiqsa
+    DB'ga umuman tegilmaydi (xotira asbobidagi bilan bir xil himoya).
+    """
+    if user_id is None:
+        return "eslatma mavjud emas"
+
+    action = args.get("action")
+    if action not in ("create", "list", "cancel"):
+        return "noma'lum amal — create, list yoki cancel bo'lishi kerak"
+
+    try:
+        if action == "create":
+            return await create_scheduled_task(
+                user_id, args.get("text", ""), args.get("when", ""),
+                args.get("repeat", "once"))
+
+        rows = await list_scheduled_tasks(user_id)
+        if action == "list":
+            if not rows:
+                return "faol eslatma yo'q"
+            return "; ".join(
+                f"{i}. {r['run_at']:%Y-%m-%d %H:%M}"
+                + (f" ({r['repeat']})" if r["repeat"] != "once" else "")
+                + f" — {r['text']}"
+                for i, r in enumerate(rows, 1))
+
+        idx = args.get("index")
+        # bool ham int — True/False indeks bo'lib o'tib ketmasin.
+        if not (isinstance(idx, int) and not isinstance(idx, bool)
+                and 1 <= idx <= len(rows)):
+            return (f"bunday raqamli eslatma yo'q (hozir {len(rows)} ta bor) "
+                    "— avval list bilan ro'yxatni oling")
+        return await cancel_scheduled_task(user_id, rows[idx - 1]["id"])
+    except Exception as e:
+        logger.warning(f"[Eslatma xatosi] user={user_id}, action={action}: {e}")
+        return "bajarilmadi"
+
+
 # Telegram'dagi "ism" — ixtiyoriy matn. Ikkita ALOHIDA muammo bor:
 #
 #   1) Umuman ism emas: ".", "•••", "🔥🔥🔥", "⚡ARZON SOTUV⚡", "user_12345".
@@ -1418,7 +1518,7 @@ async def get_openai_reply(
     if mem_msg:
         messages.append(mem_msg)
 
-    # Pro imkoniyati: 2× uzun xotira. Saqlash hamma uchun bir xil, farq
+    # Pro imkoniyati: 3× uzun xotira (50 -> 150). Saqlash hamma uchun bir xil, farq
     # faqat modelga nechta xabar ko'rsatilishida (db/history.py izohi).
     recent = await safe_get_chat_history(
         chat_id, limit=CONTEXT_WINDOW_PRO if is_pro else CONTEXT_WINDOW)
@@ -1497,6 +1597,14 @@ async def get_openai_reply(
     MAX_MEMORY_ROUNDS = 3
     memory_rounds = 0
 
+    # Eslatmalar: Pro imkoniyati, rasm tool'i bilan bir xil shart. Guest
+    # rejimda user_id=None → o'zi o'chadi.
+    # 2: bitta eslatma qo'yish + ro'yxatni ko'rib bekor qilish bir xabarga
+    # sig'adi; undan ortig'i odatda modelning aylanib qolgani.
+    reminder_enabled = is_pro and user_id is not None
+    MAX_REMINDER_ROUNDS = 2
+    reminder_rounds = 0
+
     while True:
         # MUHIM: qidiruv 1-2 bosqichda tugasa ham (model ko'proq tool
         # so'ramasa), keyingi chaqiruvda hali ham `tools` biriktirilgan
@@ -1513,6 +1621,8 @@ async def get_openai_reply(
             active_tools.append(_IMAGE_TOOL)
         if user_id is not None and memory_rounds < MAX_MEMORY_ROUNDS:
             active_tools.append(_MEMORY_TOOL)
+        if reminder_enabled and reminder_rounds < MAX_REMINDER_ROUNDS:
+            active_tools.append(_REMINDER_TOOL)
 
         call_kwargs = dict(base_params)
         call_kwargs.update(input=messages, instructions=system_prompt, store=False)
@@ -1569,6 +1679,7 @@ async def get_openai_reply(
         image_ran = False
         search_ran = False
         memory_ran = False
+        reminder_ran = False
 
         for call_item in pending_calls:
             try:
@@ -1604,6 +1715,10 @@ async def get_openai_reply(
                 # ⚠️ Bu ham `else` dan OLDIN — yuqoridagi izohga qarang.
                 memory_ran = True
                 tool_output = await _run_memory_task(user_id, mem_rows, args)
+            elif call_item.name == "manage_reminder":
+                # ⚠️ Bu ham `else` dan OLDIN — yuqoridagi izohga qarang.
+                reminder_ran = True
+                tool_output = await _run_reminder_task(user_id, args)
             else:
                 search_ran = True
                 primary_query = args.get("primary_query", "")
@@ -1642,6 +1757,8 @@ async def get_openai_reply(
             image_rounds += 1
         if memory_ran:
             memory_rounds += 1
+        if reminder_ran:
+            reminder_rounds += 1
         total_rounds += 1
 
         if file_task_ran or image_ran:
