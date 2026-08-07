@@ -22,6 +22,7 @@ from core.config import (
     DAILY_FREE_LIMIT, MESSAGE_COST_TEXT, MESSAGE_COST_PHOTO,
     MESSAGE_COST_DOCUMENT, MESSAGE_COST_VOICE, PLAN_LIMITS, CUSTOM_EMOJI,
     message_cost, pick_reasoning_effort,
+    DOCUMENT_MAX_SIZE_FREE, DOCUMENT_MAX_SIZE_PRO, document_max_size,
 )
 from core.loader import logger, bot
 from aiogram.filters import CommandObject
@@ -1310,16 +1311,36 @@ async def handle_document(message: Message, state: FSMContext):
 
     await check_and_clear_session(chat_id)
 
-    if document.file_size > 5 * 1024 * 1024:
+    # Qattiq shift — tarifdan qat'i nazar: Telegram Bot API 20 MB dan
+    # kattasini yuklab olishga umuman ruxsat bermaydi.
+    if (document.file_size or 0) > DOCUMENT_MAX_SIZE_PRO:
         await message.answer(
-            "⚠️ Fayl hajmi juda katta. Iltimos, **5 MB** gacha yuboring.",
-            parse_mode="Markdown"
+            f"⚠️ Fayl juda katta. Telegram botlarga eng ko'pi "
+            f"<b>{DOCUMENT_MAX_SIZE_PRO // (1024 * 1024)} MB</b> gacha ruxsat beradi."
         )
         return
 
     quota = await _check_quota(user_id, MESSAGE_COST_DOCUMENT)
     if not quota["allowed"]:
         await _send_limit_reached_message(message, quota, feature="document")
+        return
+
+    # Tarif chegarasi kvotadan KEYIN tekshiriladi — plan aynan shu natijadan
+    # keladi, ya'ni qo'shimcha DB so'rovi kerak emas. Fayl rad etilsa ball
+    # qaytariladi: hech qanday AI javobi berilmadi.
+    size_cap = document_max_size(quota.get("plan"))
+    if (document.file_size or 0) > size_cap:
+        await _refund_quota(user_id, MESSAGE_COST_DOCUMENT, quota)
+        mb = size_cap // (1024 * 1024)
+        free_plan = not _is_pro(quota)
+        text = (f"⚠️ Fayl hajmi <b>{mb} MB</b> dan katta.\n\n"
+                f"<blockquote>Pro tarifda "
+                f"<b>{DOCUMENT_MAX_SIZE_PRO // (1024 * 1024)} MB</b> gacha "
+                f"yuborish mumkin — skanerlangan PDF, prezentatsiya va katta "
+                f"Excel odatda shu oraliqda.</blockquote>"
+                if free_plan else
+                f"⚠️ Fayl hajmi <b>{mb} MB</b> dan katta.")
+        await _answer_with_pro_button(message, text, offer=free_plan)
         return
 
     # Izohsiz fayl — ko'rsatma keyingi xabarda kelishi mumkin. Buni

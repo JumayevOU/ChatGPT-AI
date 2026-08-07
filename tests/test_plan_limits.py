@@ -18,7 +18,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from db import database
-from core.config import plan_limits, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE
+from core.config import (
+    plan_limits, DAILY_FREE_LIMIT, DAILY_FILE_LIMIT_FREE,
+    document_max_size, DOCUMENT_MAX_SIZE_FREE, DOCUMENT_MAX_SIZE_PRO,
+    CONTEXT_WINDOW, CONTEXT_WINDOW_PRO,
+)
 
 
 class FakeConn:
@@ -156,6 +160,24 @@ async def main():
     result, executed = await _files(_row("premium", files_used=999))
     assert result["allowed"] is True and result["unlimited"] is True
     assert _updates(executed) == []
+
+    # ── 11) Hujjat hajmi chegarasi tarifga bog'liq ──────────────────
+    assert document_max_size("free") == DOCUMENT_MAX_SIZE_FREE == 5 * 1024 * 1024
+    assert document_max_size("pro") == DOCUMENT_MAX_SIZE_PRO == 20 * 1024 * 1024
+    assert document_max_size("premium") == DOCUMENT_MAX_SIZE_PRO
+    # Noma'lum/bo'sh tarif -> free (xavfsiz tomonga og'ish)
+    assert document_max_size(None) == DOCUMENT_MAX_SIZE_FREE
+    assert document_max_size("axlat") == DOCUMENT_MAX_SIZE_FREE
+    # 20 MB — Telegram Bot API'ning yuklab olish shifti. Bundan oshirilsa
+    # bot faylni umuman ololmaydi va foydalanuvchi sababini tushunmaydi.
+    assert DOCUMENT_MAX_SIZE_PRO <= 20 * 1024 * 1024
+
+    # ── 12) Kontekst oynasi: Pro sezilarli uzun bo'lishi kerak ──────
+    # Bu Pro'ning KO'RINADIGAN farqi ("bot meni yaxshiroq eslaydi").
+    # Ikkovi tenglashib qolsa, imkoniyat jimgina yo'qoladi.
+    assert CONTEXT_WINDOW_PRO >= CONTEXT_WINDOW * 2, (
+        f"Pro xotirasi kamida 2x bo'lishi kerak: {CONTEXT_WINDOW} -> {CONTEXT_WINDOW_PRO}"
+    )
 
     print("plan_limits: barcha tekshiruvlar o'tdi.")
 

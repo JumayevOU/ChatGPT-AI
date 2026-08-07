@@ -133,14 +133,20 @@ GPT_MAX_TOKENS: int = MAX_OUTPUT_TOKENS
 # Model 1.05M token ko'taradi, ya'ni bu texnik cheklov emas — XARAJAT qarori.
 # 20 → 30 ga oshirildi: suhbat ancha izchil bo'ladi, narx sezilarli oshmaydi
 # (input $1/MTok + prompt caching).
-CONTEXT_WINDOW: int = 30
+CONTEXT_WINDOW: int = 50
 # Pro tarif uchun kengaytirilgan kontekst oynasi.
 #
-# Saqlash HAMMA uchun CONTEXT_WINDOW_PRO gacha olib boriladi (SQLite'da bu
-# arzon), farq esa faqat O'QISHDA: free 30 tasini, Pro 60 tasini ko'radi.
-# Shu tufayli tarif o'zgarganda tarixni ko'chirish kerak emas va bepul
-# foydalanuvchi Pro'ga o'tsa, o'tmishdagi suhbat ham unga ochiladi.
-CONTEXT_WINDOW_PRO: int = 60
+# Saqlash HAMMA uchun CONTEXT_WINDOW_PRO gacha olib boriladi, farq esa faqat
+# O'QISHDA: free 50 tasini, Pro 150 tasini ko'radi. Shu tufayli tarif
+# o'zgarganda tarixni ko'chirish kerak emas va bepul foydalanuvchi Pro'ga
+# o'tsa, o'tmishdagi suhbat ham unga ochiladi.
+#
+# 30/60 dan 50/150 ga oshirildi. Model 1.05M token ko'taradi — 150 xabar
+# uning 1% i ham emas, ya'ni chegara texnik emas, XARAJAT qarori edi.
+# Halol hisob: input tokenlar baribir pul turadi, prompt caching uni
+# arzonlashtiradi, lekin bepul qilmaydi. Evaziga Pro'da "bot meni
+# yaxshiroq eslaydi" degan HAQIQIY farq paydo bo'ladi — 3× uzun xotira.
+CONTEXT_WINDOW_PRO: int = 150
 
 # Reasoning model sekinroq javob beradi — timeout'ni oshirish shart.
 REQUEST_TIMEOUT: float = 180.0   # soniya
@@ -622,6 +628,27 @@ MESSAGE_COST_VOICE: int = 50         # ovozli xabar (STT + GPT + TTS)
 # Muvaffaqiyatsiz urinish hisoblanmaydi — file_task_quota.DailyQuota
 # sanoqni bir marta yechadi va fayl chiqmasa qaytarib beradi.
 DAILY_FILE_LIMIT_FREE: int = 2
+
+# ── YUBORILADIGAN HUJJAT HAJMI ──────────────────────────────────────
+# 20 MB — Telegram Bot API'ning getFile/yuklab olish chegarasi. Undan
+# kattasini bot texnik jihatdan ololmaydi, shuning uchun bu shift.
+#
+# Skanerlangan PDF, prezentatsiya va katta Excel odatda 5 MB dan oshadi,
+# ya'ni eski yagona 5 MB chegara aynan eng jiddiy hujjatlarni to'sib
+# qo'yardi. Endi bu Pro farqi: bepulda 5 MB, Pro'da 20 MB.
+DOCUMENT_MAX_SIZE_FREE: int = 5 * 1024 * 1024
+DOCUMENT_MAX_SIZE_PRO: int = 20 * 1024 * 1024
+
+
+def document_max_size(plan_type: str | None) -> int:
+    """Tarifga mos hujjat hajmi chegarasi (bayt).
+
+    Noma'lum yoki bo'sh tarif -> free chegarasi. Bu daily_limit() bilan bir
+    xil tamoyil: bazada kutilmagan qiymat paydo bo'lsa, foydalanuvchi kengroq
+    emas, TORROQ ruxsat oladi.
+    """
+    return (DOCUMENT_MAX_SIZE_PRO if plan_type in ("pro", "premium")
+            else DOCUMENT_MAX_SIZE_FREE)
 
 # ── Pro imkoniyatlari uchun kunlik sanoqlar ─────────────────────────
 # Bu raqamlar O'LCHANGAN xarajatga asoslangan (rejalashtirishda haqiqiy

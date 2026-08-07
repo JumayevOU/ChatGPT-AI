@@ -18,6 +18,7 @@ from core.config import (
     MESSAGE_COST_DOCUMENT,
     MESSAGE_COST_VOICE,
     message_cost, pick_reasoning_effort,
+    DOCUMENT_MAX_SIZE_PRO, document_max_size,
 )
 from db.database import has_started, check_and_consume_quota, refund_quota
 from handlers.messages import (
@@ -37,9 +38,15 @@ router = Router()
 
 MAX_GUEST_REPLY_LEN = 3800
 
-# Oddiy handlers/messages.py dagi handle_document bilan bir xil chegara —
-# guest oqimida ham 5 MB dan katta fayllarni rad etamiz.
-GUEST_DOCUMENT_MAX_SIZE = 5 * 1024 * 1024
+# Hujjat chegarasi TARIFGA bog'liq — core/config.document_max_size()
+# (bepulda 5 MB, Pro'da 20 MB). Bu yerda alohida konstanta saqlanmaydi,
+# aks holda ikkita manba paydo bo'lib, biri unutilib qolardi.
+
+
+def _guest_name(message: Message) -> str | None:
+    """Murojaat uchun Telegram ismi (services/ai.clean_tg_name uni tozalaydi)."""
+    return message.from_user.full_name if message.from_user else None
+
 
 # Har bir content-type uchun kunlik kvota narxi (core/config.py dagi bir xil
 # konstantalar — handlers/messages.py bilan mos kelishi uchun).
@@ -568,10 +575,15 @@ else:
                 content_type == "document"
                 and message.document
                 and message.document.file_size
-                and message.document.file_size > GUEST_DOCUMENT_MAX_SIZE
+                and message.document.file_size > DOCUMENT_MAX_SIZE_PRO
             ):
+                # Qattiq shift — tarifdan qat'i nazar: Telegram Bot API
+                # bundan kattasini yuklab olishga ruxsat bermaydi.
                 skip_ai = True
-                forced_text = "⚠️ Fayl hajmi juda katta. Iltimos, 5 MB gacha yuboring."
+                forced_text = (
+                    f"⚠️ Fayl juda katta. Telegram botlarga eng ko'pi "
+                    f"{DOCUMENT_MAX_SIZE_PRO // (1024 * 1024)} MB gacha ruxsat beradi."
+                )
             else:
                 if content_type == "text":
                     # Oddiy handlers/messages.py bilan bir xil mantiq: matn
@@ -587,7 +599,25 @@ else:
 
                 guest_is_pro = quota.get("plan", "free") != "free"
 
-                if quota.get("allowed", True):
+                # Tarif bo'yicha hujjat chegarasi — plan aynan shu kvota
+                # natijasidan keladi, qo'shimcha DB so'rovi kerak emas.
+                _cap = document_max_size(quota.get("plan"))
+                if (content_type == "document" and message.document
+                        and (message.document.file_size or 0) > _cap):
+                    skip_ai = True
+                    forced_text = (
+                        f"⚠️ Fayl hajmi {_cap // (1024 * 1024)} MB dan katta."
+                    )
+                    if not guest_is_pro:
+                        forced_text += (
+                            f"\n\n💎 Botga o'tib /pro — "
+                            f"{DOCUMENT_MAX_SIZE_PRO // (1024 * 1024)} MB gacha."
+                        )
+                    try:
+                        await refund_quota(caller_user_id, cost)
+                    except Exception as e:
+                        logger.error(f"[Guest Kvota] qaytarishda xatolik: {e}")
+                elif quota.get("allowed", True):
                     # Guest mode faolligi ALOHIDA tur bilan yoziladi
                     # ("guest_text_message" va h.k.). Ilgari bu yerda hech
                     # narsa yozilmasdi: ball yechilardi, lekin admin
@@ -706,7 +736,10 @@ else:
                     buf = BytesIO()
                     await bot.download_file(file.file_path, buf)
                     base64_image = base64.b64encode(buf.getvalue()).decode("utf-8")
-                    stream_gen = get_vision_reply(caller_user_id, base64_image, clean_query)
+                    stream_gen = get_vision_reply(caller_user_id, base64_image, clean_query,
+                                                  user_id=caller_user_id,
+                                                  is_pro=guest_is_pro,
+                                                  tg_name=_guest_name(message))
 
                 elif content_type == "document":
                     document = message.document
@@ -735,7 +768,9 @@ else:
                             f"Hujjat matni ({file_name}):\n{extracted_text}\n\n"
                             f"Foydalanuvchi so'rovi: {clean_query}"
                         )
-                        stream_gen = get_gpt_reply(caller_user_id, prompt, is_pro=guest_is_pro)
+                        stream_gen = get_gpt_reply(caller_user_id, prompt, is_pro=guest_is_pro,
+                                                   user_id=caller_user_id,
+                                                   tg_name=_guest_name(message))
 
                 elif content_type == "voice":
                     voice = message.voice
@@ -748,10 +783,14 @@ else:
                     if not recognized_text:
                         full_text = "🤷‍♂️ Ovozni tushunib bo'lmadi."
                     else:
-                        stream_gen = get_gpt_reply(caller_user_id, recognized_text, is_pro=guest_is_pro)
+                        stream_gen = get_gpt_reply(caller_user_id, recognized_text, is_pro=guest_is_pro,
+                                                   user_id=caller_user_id,
+                                                   tg_name=_guest_name(message))
 
                 else:  # text
-                    stream_gen = get_gpt_reply(caller_user_id, clean_query, is_pro=guest_is_pro)
+                    stream_gen = get_gpt_reply(caller_user_id, clean_query, is_pro=guest_is_pro,
+                                               user_id=caller_user_id,
+                                               tg_name=_guest_name(message))
 
                 if stream_gen is not None:
                     async for chunk in stream_gen:
