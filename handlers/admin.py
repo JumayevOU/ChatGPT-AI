@@ -43,13 +43,16 @@ REMOVE_BLOCK_DAYS = 3
 _broadcast_cancel_flags: set[int] = set()
 
 
-class PMStates(StatesGroup):
-    waiting_for_user = State()
-    waiting_for_message = State()
-
-
 class BroadcastStates(StatesGroup):
+    """Xabar konstruktori: kontent -> tugmalar -> oluvchi -> tasdiq.
+
+    PMStates ("bitta userga") ALOHIDA oqim edi va aynan shu ishni qilardi,
+    faqat matn bilan va tugmasiz. Endi u shu yerdagi "tanlangan odamlarga"
+    varianti — bitta kod yo'li, ikkita emas.
+    """
     waiting_for_content = State()
+    waiting_for_button = State()
+    waiting_for_recipients = State()
     waiting_for_segment = State()
     waiting_for_confirmation = State()
 
@@ -249,6 +252,102 @@ def _filter_users_by_segment(users: List[Dict[str, Any]], segment: str) -> List[
     if segment == "premium":
         return [u for u in candidates if (u.get("plan_type") or "free") != "free"]
     return candidates
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  XABAR KONSTRUKTORI — inline tugmalar
+# ═══════════════════════════════════════════════════════════════════
+# Reklama xabari uchun: rasm/video + matn + havolali tugmalar. Har bir
+# qism IXTIYORIY — faqat matn ham, faqat rasm + tugma ham bo'ladi.
+
+BCAST_MAX_BUTTONS = 6          # ponytail: 6 tadan ortig'i ekranga sig'maydi
+
+# Ranglar pro.py'dagi bilan AYNAN bir xil manbadan — Telegram faqat shu
+# uchtasini qabul qiladi, boshqasi butun xabarni yuborilmas qiladi.
+BCAST_STYLES = {
+    "primary": ("🔵 Ko'k", pro_module.BTN_PRIMARY),
+    "success": ("🟢 Yashil", pro_module.BTN_SUCCESS),
+    "danger": ("🔴 Qizil", pro_module.BTN_DANGER),
+    "plain": ("⚪️ Oddiy", None),
+}
+
+_URL_RE = re.compile(r"(https?://\S+|tg://\S+)", re.IGNORECASE)
+
+
+def parse_button_spec(raw: str) -> tuple[Optional[str], Optional[str], str]:
+    """"Kanal 📢 | https://t.me/x" -> ("Kanal 📢", "https://t.me/x", "").
+
+    Xato bo'lsa (None, None, sabab) qaytadi. Ajratgich TALAB QILINMAYDI:
+    havola matndan regex bilan topiladi, shuning uchun "Kanal - https://..."
+    ham, "Kanal https://..." ham ishlaydi. Admin format eslay olmasa,
+    tugma qo'shilmay qolgandan ko'ra shu yaxshi.
+
+    Sof funksiya — tests/test_broadcast.py'da tekshiriladi.
+    """
+    raw = " ".join(str(raw or "").split())
+    if not raw:
+        return None, None, "bo'sh"
+
+    match = _URL_RE.search(raw)
+    if not match:
+        return None, None, ("havola topilmadi — u <code>https://</code> yoki "
+                            "<code>tg://</code> bilan boshlanishi kerak")
+    url = match.group(1).rstrip(".,;")
+    # Havolani olib tashlaymiz, qolgani — tugma nomi. Ajratgich belgilari
+    # ("|", "-", "—") nom oxirida osilib qolmasin.
+    text = (raw[:match.start()] + " " + raw[match.end():]).strip(" |-–—\t")
+    text = " ".join(text.split())
+    if not text:
+        return None, None, "tugma nomi yo'q — havoladan oldin nom yozing"
+    if len(text) > 64:
+        return None, None, "tugma nomi 64 belgidan uzun"
+    return text, url, ""
+
+
+def build_bcast_keyboard(buttons: List[Dict[str, str]], *,
+                         plain: bool = False) -> Optional[InlineKeyboardMarkup]:
+    """Saqlangan tugmalardan klaviatura. `plain=True` — rangsiz zaxira.
+
+    Zaxira SHART: rang maydonini qabul qilmaydigan mijoz/API'da xabar
+    UMUMAN yuborilmaydi. Bitta reklama uchun butun tarqatmani yo'qotish
+    qabul qilinmaydi (pro.send_rich'dagi bilan bir xil tamoyil).
+    """
+    if not buttons:
+        return None
+    rows = []
+    for b in buttons:
+        style = None if plain else BCAST_STYLES.get(b.get("style", "plain"), (None, None))[1]
+        rows.append([pro_module.btn(b["text"], "noop", style=style, url=b["url"])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _render_builder(buttons: List[Dict[str, str]]) -> tuple[str, InlineKeyboardMarkup]:
+    """Konstruktor ekrani: hozirgi tugmalar ro'yxati + boshqaruv."""
+    if buttons:
+        lines = "\n".join(
+            f"{i}. {BCAST_STYLES.get(b.get('style', 'plain'), ('⚪️', None))[0][0]} "
+            f"<b>{html.escape(b['text'])}</b> → <code>{html.escape(b['url'])}</code>"
+            for i, b in enumerate(buttons, 1))
+        text = f"🔘 <b>Tugmalar ({len(buttons)}/{BCAST_MAX_BUTTONS})</b>\n\n{lines}"
+    else:
+        text = ("🔘 <b>Tugmalar</b>\n\n<blockquote>Hozircha tugma yo'q. "
+                "Xohlasangiz havolali tugma qo'shing — kanal, sayt, "
+                "istalgan link.</blockquote>")
+
+    rows = []
+    if len(buttons) < BCAST_MAX_BUTTONS:
+        rows.append([InlineKeyboardButton(text="➕ Tugma qo'shish",
+                                          callback_data="bcast:btnadd")])
+    if buttons:
+        rows.append([InlineKeyboardButton(text="🗑 Oxirgisini o'chirish",
+                                          callback_data="bcast:btndel")])
+    rows.append([InlineKeyboardButton(text="👁 Ko'rib chiqish",
+                                      callback_data="bcast:preview")])
+    rows.append([InlineKeyboardButton(text="➡️ Davom etish",
+                                      callback_data="bcast:next")])
+    rows.append([InlineKeyboardButton(text="❌ Bekor qilish",
+                                      callback_data="bcast:abort")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _check_can_remove_admin(requester_id: int, target_id: int) -> Optional[str]:
@@ -1068,27 +1167,199 @@ def register_admin_handlers(dp, bot: Bot):
     async def start_broadcast(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             return
+        await state.clear()
         await message.answer(
-            "✍️ Barchaga yuboriladigan xabarni kiriting — matn, rasm yoki video "
-            "bo'lishi mumkin (izoh bilan birga):"
+            "✍️ <b>XABAR YUBORISH</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<blockquote>Yubormoqchi bo'lgan xabarni shu yerga tashlang.\n"
+            "Matn, rasm, video, fayl yoki ovoz — izohi bilan birga.</blockquote>\n\n"
+            "Keyingi qadamda havolali tugma qo'shishingiz va kimga "
+            "yuborilishini tanlashingiz mumkin.",
+            parse_mode=ParseMode.HTML,
         )
         await state.set_state(BroadcastStates.waiting_for_content)
+
+    async def _show_builder(target, state: FSMContext, *, edit: bool = False):
+        data = await state.get_data()
+        text, kb = _render_builder(data.get("buttons") or [])
+        try:
+            if edit:
+                await target.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            else:
+                await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            # "message is not modified" yoki eski xabar — yangisini yuboramiz.
+            try:
+                await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            except Exception:
+                logger.exception("builder render error")
 
     async def capture_broadcast_content(message: Message, state: FSMContext):
         if not await require_admin_or_deny(message):
             await state.clear()
             return
 
-        await state.update_data(src_chat_id=message.chat.id, src_message_id=message.message_id)
+        # Tugmalar SAQLANADI: admin rasmni almashtirmoqchi bo'lib yangisini
+        # tashlasa, allaqachon sozlagan tugmalarini qaytadan yozishi
+        # kerak bo'lmasin.
+        data = await state.get_data()
+        await state.update_data(src_chat_id=message.chat.id,
+                                src_message_id=message.message_id,
+                                buttons=data.get("buttons") or [])
+        await _show_builder(message, state)
+        # Holat ATAYLAB o'zgarmaydi: konstruktor callback'lar bilan
+        # boshqariladi, admin esa shu payt fikridan qaytib boshqa xabar
+        # tashlasa — u yangi kontent bo'lib qabul qilinadi.
 
+    async def broadcast_button_add_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        await query.answer()
+        await query.message.answer(
+            "🔗 <b>Tugma qo'shish</b>\n\n"
+            "<blockquote>Tugma nomini va havolasini bitta xabarda yuboring:\n\n"
+            "<code>Kanalga o'tish 📢 | https://t.me/kanalingiz</code>\n"
+            "<code>Saytimiz 🌐 | https://example.uz</code></blockquote>\n\n"
+            "Nomda emoji ishlatsangiz bo'ladi. Rangni keyingi qadamda tanlaysiz.",
+            parse_mode=ParseMode.HTML,
+        )
+        await state.set_state(BroadcastStates.waiting_for_button)
+
+    async def process_broadcast_button(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+
+        text, url, err = parse_button_spec(message.text or "")
+        if err:
+            await message.answer(
+                f"⚠️ {err}.\n\nNamuna: <code>Kanal 📢 | https://t.me/kanal</code>",
+                parse_mode=ParseMode.HTML)
+            return
+
+        await state.update_data(pending_btn={"text": text, "url": url})
+        rows = [[InlineKeyboardButton(text=label, callback_data=f"bcast:color:{key}")]
+                for key, (label, _) in BCAST_STYLES.items()]
+        await message.answer(
+            f"🎨 <b>«{html.escape(text)}»</b> tugmasi qanday rangda bo'lsin?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def broadcast_color_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+
+        style = (query.data or "").rsplit(":", 1)[-1]
+        if style not in BCAST_STYLES:
+            await query.answer("❌ Noma'lum rang.", show_alert=True)
+            return
+
+        data = await state.get_data()
+        pending = data.get("pending_btn")
+        if not pending:
+            await query.answer("⚠️ Tugma topilmadi, qaytadan qo'shing.", show_alert=True)
+            return
+
+        buttons = list(data.get("buttons") or [])
+        if len(buttons) >= BCAST_MAX_BUTTONS:
+            await query.answer(f"❌ Eng ko'pi {BCAST_MAX_BUTTONS} ta tugma.", show_alert=True)
+            return
+
+        buttons.append({**pending, "style": style})
+        await state.update_data(buttons=buttons, pending_btn=None)
+        await state.set_state(BroadcastStates.waiting_for_content)
+        await query.answer("✅ Qo'shildi")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await _show_builder(query.message, state)
+
+    async def broadcast_button_del_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        data = await state.get_data()
+        buttons = list(data.get("buttons") or [])
+        if buttons:
+            buttons.pop()
+            await state.update_data(buttons=buttons)
+        await query.answer("🗑 O'chirildi")
+        await _show_builder(query.message, state, edit=True)
+
+    async def broadcast_preview_callback(query: CallbackQuery, state: FSMContext):
+        """Xabarni AYNAN foydalanuvchi ko'radigan holatda ko'rsatadi."""
+        if not await require_admin_or_deny_query(query):
+            return
+        data = await state.get_data()
+        src_chat_id, src_message_id = data.get("src_chat_id"), data.get("src_message_id")
+        if not src_chat_id or not src_message_id:
+            await query.answer("⚠️ Xabar topilmadi, boshidan boshlang.", show_alert=True)
+            return
+        await query.answer()
+        kb = build_bcast_keyboard(data.get("buttons") or [])
+        try:
+            await bot.copy_message(chat_id=query.from_user.id, from_chat_id=src_chat_id,
+                                   message_id=src_message_id, reply_markup=kb)
+        except Exception as e:
+            # Rangni qabul qilmasa — rangsiz ko'rsatamiz va ogohlantiramiz.
+            logger.warning(f"Preview rangli klaviatura bilan yuborilmadi: {e}")
+            try:
+                await bot.copy_message(
+                    chat_id=query.from_user.id, from_chat_id=src_chat_id,
+                    message_id=src_message_id,
+                    reply_markup=build_bcast_keyboard(data.get("buttons") or [], plain=True))
+                await query.message.answer(
+                    "⚠️ Ranglar bu yerda qo'llanmadi — tugmalar oddiy ko'rinishda ketadi.")
+            except Exception:
+                logger.exception("Preview copy error")
+
+    async def broadcast_next_callback(query: CallbackQuery, state: FSMContext):
+        if not await require_admin_or_deny_query(query):
+            return
+        await query.answer()
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👥 Hammaga", callback_data="bcast:seg:all")],
             [InlineKeyboardButton(text="🆓 Faqat Free", callback_data="bcast:seg:free")],
-            [InlineKeyboardButton(text="💎 Faqat Premium", callback_data="bcast:seg:premium")],
+            [InlineKeyboardButton(text="💎 Faqat Pro", callback_data="bcast:seg:premium")],
+            [InlineKeyboardButton(text="👤 Tanlangan odamlarga", callback_data="bcast:seg:pick")],
             [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bcast:abort")],
         ])
-        await message.answer("👥 Kimlarga yuborilsin?", reply_markup=kb)
+        try:
+            await query.message.edit_text("👥 <b>Kimga yuborilsin?</b>",
+                                          parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            await query.message.answer("👥 <b>Kimga yuborilsin?</b>",
+                                       parse_mode=ParseMode.HTML, reply_markup=kb)
         await state.set_state(BroadcastStates.waiting_for_segment)
+
+    async def _confirm_screen(query: CallbackQuery, state: FSMContext,
+                              target_ids: List[int], label: str):
+        """Preview + tasdiqlash. Yuborishdan oldingi OXIRGI to'xtash nuqtasi."""
+        data = await state.get_data()
+        await state.update_data(target_ids=target_ids)
+        try:
+            await bot.copy_message(
+                chat_id=query.from_user.id, from_chat_id=data["src_chat_id"],
+                message_id=data["src_message_id"],
+                reply_markup=build_bcast_keyboard(data.get("buttons") or []))
+        except Exception:
+            try:
+                await bot.copy_message(
+                    chat_id=query.from_user.id, from_chat_id=data["src_chat_id"],
+                    message_id=data["src_message_id"],
+                    reply_markup=build_bcast_keyboard(data.get("buttons") or [], plain=True))
+            except Exception:
+                logger.exception("Confirm preview copy error")
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Yuborish", callback_data="bcast:send")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bcast:abort")],
+        ])
+        await query.message.answer(
+            f"👆 Yuqorida — foydalanuvchi ko'radigan ko'rinish.\n\n"
+            f"{label}: <b>{len(target_ids)}</b> ta oluvchi. Tasdiqlaysizmi?",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
+        await state.set_state(BroadcastStates.waiting_for_confirmation)
 
     async def broadcast_segment_callback(query: CallbackQuery, state: FSMContext):
         if not await require_admin_or_deny_query(query):
@@ -1096,14 +1367,22 @@ def register_admin_handlers(dp, bot: Bot):
 
         segment = (query.data or "").rsplit(":", 1)[-1]
         data = await state.get_data()
-        src_chat_id = data.get("src_chat_id")
-        src_message_id = data.get("src_message_id")
-        if not src_chat_id or not src_message_id:
+        if not data.get("src_chat_id") or not data.get("src_message_id"):
             await query.answer("⚠️ Xabar topilmadi, boshidan boshlang.", show_alert=True)
             await state.clear()
             return
 
         await query.answer()
+
+        if segment == "pick":
+            await query.message.answer(
+                "👤 <b>Kimlarga?</b>\n\n"
+                "<blockquote>@username yoki ID yuboring — bittasi ham, "
+                "bir nechtasi ham bo'ladi (probel, vergul yoki yangi qatordan "
+                "ajratib). Bir martada 50 tagacha.</blockquote>",
+                parse_mode=ParseMode.HTML)
+            await state.set_state(BroadcastStates.waiting_for_recipients)
+            return
 
         try:
             users = await database_module.get_all_users()
@@ -1114,24 +1393,63 @@ def register_admin_handlers(dp, bot: Bot):
             return
 
         target_ids = [u["user_id"] for u in _filter_users_by_segment(users, segment)]
-        await state.update_data(target_ids=target_ids)
+        label = {"all": "Hammaga", "free": "Faqat Free",
+                 "premium": "Faqat Pro"}.get(segment, segment)
+        await _confirm_screen(query, state, target_ids, label)
+
+    async def process_broadcast_recipients(message: Message, state: FSMContext):
+        if not await require_admin_or_deny(message):
+            await state.clear()
+            return
+
+        data = await state.get_data()
+        if not data.get("src_chat_id") or not data.get("src_message_id"):
+            await state.clear()
+            await message.answer("⚠️ Xabar topilmadi, boshidan boshlang.")
+            return
+
+        found, missing = await _resolve_recipients(message.text or "")
+        if not found:
+            await message.answer(
+                "❌ Hech kim topilmadi. @username yoki ID yuboring.\n"
+                + (f"Topilmadi: {', '.join(missing)}" if missing else ""),
+                parse_mode=ParseMode.HTML)
+            return
+
+        # Banlangan foydalanuvchiga reklama yuborish ma'nosiz — chetlanadi,
+        # lekin admin buni ko'rib tursin.
+        target_ids = [uid for uid, _name, banned in found if not banned]
+        skipped = [name for _uid, name, banned in found if banned]
+
+        note = ""
+        if missing:
+            note += f"\n⚠️ Topilmadi: {', '.join(missing)}"
+        if skipped:
+            note += f"\n🚫 Banlangan (chetlandi): {', '.join(skipped)}"
 
         try:
-            await bot.copy_message(chat_id=query.from_user.id, from_chat_id=src_chat_id, message_id=src_message_id)
+            await bot.copy_message(
+                chat_id=message.from_user.id, from_chat_id=data["src_chat_id"],
+                message_id=data["src_message_id"],
+                reply_markup=build_bcast_keyboard(data.get("buttons") or []))
         except Exception:
-            logger.exception("Broadcast preview copy error")
+            try:
+                await bot.copy_message(
+                    chat_id=message.from_user.id, from_chat_id=data["src_chat_id"],
+                    message_id=data["src_message_id"],
+                    reply_markup=build_bcast_keyboard(data.get("buttons") or [], plain=True))
+            except Exception:
+                logger.exception("Recipients preview copy error")
 
-        segment_label = {"all": "Hammaga", "free": "Faqat Free", "premium": "Faqat Premium"}.get(segment, segment)
+        await state.update_data(target_ids=target_ids)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Yuborish", callback_data="bcast:send")],
             [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="bcast:abort")],
         ])
-        await query.message.answer(
-            f"👆 Preview shu yuqorida ko'rsatildi.\n"
-            f"{segment_label}: <b>{len(target_ids)}</b> ta foydalanuvchiga yuboriladi. Tasdiqlaysizmi?",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb,
-        )
+        await message.answer(
+            f"👆 Yuqorida — foydalanuvchi ko'radigan ko'rinish.\n\n"
+            f"Tanlangan: <b>{len(target_ids)}</b> ta oluvchi.{note}\n\nTasdiqlaysizmi?",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
         await state.set_state(BroadcastStates.waiting_for_confirmation)
 
     async def broadcast_abort_callback(query: CallbackQuery, state: FSMContext):
@@ -1158,6 +1476,7 @@ def register_admin_handlers(dp, bot: Bot):
         src_chat_id = data.get("src_chat_id")
         src_message_id = data.get("src_message_id")
         target_ids = data.get("target_ids") or []
+        buttons = data.get("buttons") or []
         await state.clear()
 
         if not src_chat_id or not src_message_id or not target_ids:
@@ -1167,6 +1486,30 @@ def register_admin_handlers(dp, bot: Bot):
         await query.answer()
         admin_id = query.from_user.id
         _broadcast_cancel_flags.discard(admin_id)
+
+        # Rangli klaviatura va uning rangsiz zaxirasi. Agar BIRINCHI
+        # yuborishda rang rad etilsa, butun tarqatma uchun rangsizga
+        # o'tamiz — har bir foydalanuvchida ikki marta urinib, tarqatmani
+        # ikki barobar sekinlashtirish ma'nosiz.
+        kb_rich = build_bcast_keyboard(buttons)
+        kb_plain = build_bcast_keyboard(buttons, plain=True)
+        kb = kb_rich
+        style_downgraded = False
+
+        async def _deliver(uid: int):
+            """Bitta oluvchiga yuboradi; rang rad etilsa rangsizga tushadi."""
+            nonlocal kb, style_downgraded
+            try:
+                await bot.copy_message(chat_id=uid, from_chat_id=src_chat_id,
+                                       message_id=src_message_id, reply_markup=kb)
+            except TelegramBadRequest:
+                if kb is kb_rich and kb_plain is not None:
+                    logger.warning("Tugma rangi rad etildi — rangsiz rejimga o'tildi")
+                    kb, style_downgraded = kb_plain, True
+                    await bot.copy_message(chat_id=uid, from_chat_id=src_chat_id,
+                                           message_id=src_message_id, reply_markup=kb)
+                else:
+                    raise
 
         stop_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛑 Bekor qilish", callback_data="bcast:cancel")],
@@ -1184,7 +1527,7 @@ def register_admin_handlers(dp, bot: Bot):
                 cancelled = True
                 break
             try:
-                await bot.copy_message(chat_id=user_id, from_chat_id=src_chat_id, message_id=src_message_id)
+                await _deliver(user_id)
                 success += 1
             except (TelegramForbiddenError, TelegramNotFound):
                 logger.warning(f"❌ Foydalanuvchi topilmadi yoki bloklangan: {user_id}")
@@ -1201,7 +1544,7 @@ def register_admin_handlers(dp, bot: Bot):
                 logger.warning(f"⏳ Flood control: {e.retry_after}s kutilmoqda...")
                 await asyncio.sleep(e.retry_after + 0.5)
                 try:
-                    await bot.copy_message(chat_id=user_id, from_chat_id=src_chat_id, message_id=src_message_id)
+                    await _deliver(user_id)
                     success += 1
                 except Exception as e2:
                     logger.warning(f"⚠️ Flood-dan keyin ham xatolik: {user_id} - {e2}")
@@ -1225,65 +1568,11 @@ def register_admin_handlers(dp, bot: Bot):
                 f"{status}\n"
                 f"✅ {success} ta foydalanuvchiga yuborildi.\n"
                 f"❌ {fail} ta foydalanuvchiga yuborilmadi (bloklagan yoki mavjud emas)."
+                + ("\n⚠️ Tugma ranglari qo'llanmadi — oddiy ko'rinishda ketdi."
+                   if style_downgraded else "")
             )
         except Exception:
             pass
-
-    async def cmd_pm(message: Message, state: FSMContext):
-        if not await require_admin_or_deny(message):
-            return
-        await message.answer("✍️ Iltimos, foydalanuvchi ID yoki @username ni kiriting:")
-        await state.set_state(PMStates.waiting_for_user)
-
-    async def process_user(message: Message, state: FSMContext):
-        if not await require_admin_or_deny(message):
-            return
-
-        identifier = (message.text or "").strip()
-        if not identifier:
-            await message.answer("❗ Iltimos ID yoki @username kiriting.")
-            return
-
-        try:
-            user_id = await database_module.get_user_by_identifier(identifier)
-        except Exception:
-            logger.exception("DB error in process_user")
-            await message.answer("❌ DB xatosi.")
-            return
-
-        if not user_id:
-            await message.answer("❌ Foydalanuvchi topilmadi. Qayta urinib ko'ring. Yoki user ID kiriting..!")
-            return
-
-        await state.update_data(user_id=user_id)
-        await message.answer("✍️ Endi xabar matnini kiriting:")
-        await state.set_state(PMStates.waiting_for_message)
-
-    async def process_message(message: Message, state: FSMContext):
-        if not await require_admin_or_deny(message):
-            await state.clear()
-            return
-
-        data = await state.get_data()
-        user_id = data.get("user_id")
-        text = (message.text or "").strip()
-
-        if not user_id:
-            await state.clear()
-            return await message.answer("❌ Foydalanuvchi ID topilmadi. Iltimos boshidan boshlang.")
-
-        progress_message = await message.answer("📤 Xabar yuborilmoqda: 0%")
-        try:
-            await bot.send_message(user_id, f"📨 <b>Admin xabari:</b>\n\n{text}", parse_mode=ParseMode.HTML)
-            await progress_message.edit_text("📤 Xabar yuborildi ✅")
-        except Exception as e:
-            logger.exception("Send PM error")
-            try:
-                await progress_message.edit_text(f"❌ Xatolik yuz berdi: {e}")
-            except Exception:
-                pass
-
-        await state.clear()
 
     async def handle_top(message: Message):
         if not await require_admin_or_deny(message):
@@ -2072,8 +2361,7 @@ def register_admin_handlers(dp, bot: Bot):
         finally:
             await state.clear()
 
-    dp.message.register(start_broadcast, F.text == '📢 Barchaga xabar yuborish')
-    dp.message.register(cmd_pm, F.text == '📨 Userga xabar yuborish')
+    dp.message.register(start_broadcast, F.text == '📢 Xabar yuborish')
     dp.message.register(handle_top, F.text == '🏆 Faol foydalanuvchilar')
     dp.message.register(handle_users_command, F.text == '📊 Statistika')
     dp.message.register(handle_users_list, F.text == "📄 Userlar ro'yxati")
@@ -2083,10 +2371,13 @@ def register_admin_handlers(dp, bot: Bot):
     dp.message.register(show_maintenance_menu, F.text == "🛠 Texnik ta'til")
     dp.message.register(show_watch_menu, F.text == "👁 Kuzatish")
     dp.message.register(show_giveaway_menu, F.text == "🎁 Bepul Pro")
+    # ⚠️ TARTIB: tugma va oluvchi holatlari waiting_for_content dan OLDIN.
+    # Konstruktor ochiq turganda admin yozgan matn "yangi kontent" bo'lib
+    # ketmasligi kerak — u tugma nomi yoki oluvchilar ro'yxati.
+    dp.message.register(process_broadcast_button, BroadcastStates.waiting_for_button)
+    dp.message.register(process_broadcast_recipients, BroadcastStates.waiting_for_recipients)
     dp.message.register(capture_broadcast_content, BroadcastStates.waiting_for_content)
     dp.message.register(process_manage_user_identifier, ManageUserStates.waiting_for_identifier)
-    dp.message.register(process_user, PMStates.waiting_for_user)
-    dp.message.register(process_message, PMStates.waiting_for_message)
     dp.message.register(process_add_admin, AddAdminStates.waiting_for_admin_id)
     dp.message.register(process_remove_admin, RemoveAdminStates.waiting_for_admin_id)
     dp.message.register(process_maintenance_message, MaintenanceStates.waiting_for_message)
@@ -2106,6 +2397,11 @@ def register_admin_handlers(dp, bot: Bot):
     # register report callback (this allows the inline "Adminga xabar" button to trigger report flow)
     dp.callback_query.register(report_callback, lambda q: q.data and q.data.startswith("report:"))
     dp.callback_query.register(manage_user_action_callback, lambda q: q.data and q.data.startswith("mu:"))
+    dp.callback_query.register(broadcast_button_add_callback, lambda q: q.data == "bcast:btnadd")
+    dp.callback_query.register(broadcast_button_del_callback, lambda q: q.data == "bcast:btndel")
+    dp.callback_query.register(broadcast_color_callback, lambda q: q.data and q.data.startswith("bcast:color:"))
+    dp.callback_query.register(broadcast_preview_callback, lambda q: q.data == "bcast:preview")
+    dp.callback_query.register(broadcast_next_callback, lambda q: q.data == "bcast:next")
     dp.callback_query.register(broadcast_segment_callback, lambda q: q.data and q.data.startswith("bcast:seg:"))
     dp.callback_query.register(broadcast_confirm_send_callback, lambda q: q.data == "bcast:send")
     dp.callback_query.register(broadcast_abort_callback, lambda q: q.data == "bcast:abort")

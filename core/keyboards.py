@@ -3,8 +3,11 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 admin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [
-            KeyboardButton(text='📢 Barchaga xabar yuborish'),
-            KeyboardButton(text='📨 Userga xabar yuborish'),
+            # Ilgari ikkita alohida tugma edi ("Barchaga" va "Userga").
+            # Ular bir xil ish qilardi, faqat oluvchi soni farq qilardi —
+            # oluvchini oqim ICHIDA tanlash tabiiyroq va bitta kod yo'li
+            # qoladi.
+            KeyboardButton(text='📢 Xabar yuborish'),
         ],
         [
             KeyboardButton(text='🏆 Faol foydalanuvchilar'),
