@@ -734,13 +734,15 @@ def plan_limits(plan_type: str | None) -> tuple[int | None, int | None]:
 # "−N%" yozib qo'ymaslik uchun):
 #   1 oy  — 100/30  = 3.33 ⭐/kun
 #   3 oy  — 299/90  = 3.32 ⭐/kun   (1 oy bilan deyarli bir xil)
-#   6 oy  — 599/180 = 3.33 ⭐/kun   (1 oy bilan deyarli bir xil)
+#   6 oy  — 499/180 = 2.77 ⭐/kun   (−17%)
 #   1 yil — 999/365 = 2.74 ⭐/kun   (−18%)
-# Shuning uchun yorliq faqat yillik tarifda turadi.
+# Yorliq shu jadvaldan kelib chiqadi, qo'lda o'ylab topilmaydi — narx
+# o'zgarsa yorliqni ham shu yerda qayta hisoblang, aks holda ekranda
+# yolg'on chegirma turadi.
 PRO_PLANS: list[tuple[int, int, str, str]] = [
     (30,  100, "1 oy",  ""),
     (90,  299, "3 oy",  ""),
-    (180, 599, "6 oy",  ""),
+    (180, 499, "6 oy",  "−17%"),
     (365, 999, "1 yil", "−18%"),
 ]
 PRO_PLANS_BY_DAYS: dict[int, tuple[int, str, str]] = {
