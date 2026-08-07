@@ -321,6 +321,22 @@ def build_bcast_keyboard(buttons: List[Dict[str, str]], *,
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _is_markup_error(exc: Exception) -> bool:
+    """Xato KLAVIATURA sababli chiqqanmi yoki oluvchi sababli?
+
+    "chat not found" ham TelegramBadRequest. Ilgari har qanday BadRequest
+    rang rad etildi deb hisoblanardi va bitta o'chirilgan akkaunt butun
+    tarqatmani rangsizga tushirib yuborardi. Telegram klaviatura xatosini
+    doim "button"/"markup" so'zi bilan aytadi ("can't parse
+    InlineKeyboardButton: ...", "BUTTON_TYPE_INVALID", "reply markup is
+    too long"), oluvchi xatosida bu so'zlar bo'lmaydi.
+
+    Sof funksiya — tests/test_broadcast.py'da tekshiriladi.
+    """
+    low = str(exc).lower()
+    return "button" in low or "markup" in low
+
+
 def _render_builder(buttons: List[Dict[str, str]]) -> tuple[str, InlineKeyboardMarkup]:
     """Konstruktor ekrani: hozirgi tugmalar ro'yxati + boshqaruv."""
     if buttons:
@@ -1502,9 +1518,9 @@ def register_admin_handlers(dp, bot: Bot):
             try:
                 await bot.copy_message(chat_id=uid, from_chat_id=src_chat_id,
                                        message_id=src_message_id, reply_markup=kb)
-            except TelegramBadRequest:
-                if kb is kb_rich and kb_plain is not None:
-                    logger.warning("Tugma rangi rad etildi — rangsiz rejimga o'tildi")
+            except TelegramBadRequest as exc:
+                if kb is kb_rich and kb_plain is not None and _is_markup_error(exc):
+                    logger.warning(f"Klaviatura rad etildi — rangsiz rejimga o'tildi: {exc}")
                     kb, style_downgraded = kb_plain, True
                     await bot.copy_message(chat_id=uid, from_chat_id=src_chat_id,
                                            message_id=src_message_id, reply_markup=kb)

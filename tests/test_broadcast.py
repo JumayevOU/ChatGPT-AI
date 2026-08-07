@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from handlers.admin import (
     parse_button_spec, build_bcast_keyboard, BCAST_STYLES, BCAST_MAX_BUTTONS,
+    _is_markup_error,
 )
 
 
@@ -98,8 +99,31 @@ def test_keyboard():
     print("[9] ranglar ro'yxati Telegram chekloviga mos OK")
 
 
+def test_markup_error():
+    """Rangsizga tushish FAQAT klaviatura xatosida bo'lsin.
+
+    Haqiqiy nosozlik: "chat not found" ham TelegramBadRequest, uni rang
+    xatosi deb bilib bot 185 kishilik tarqatmani bitta o'chirilgan
+    akkaunt tufayli rangsiz yuborib yuborgan edi.
+    """
+    for oluvchi_xatosi in ("Telegram server says - Bad Request: chat not found",
+                           "Bad Request: user not found",
+                           "Bad Request: message to copy not found",
+                           "Forbidden: bot was blocked by the user"):
+        assert not _is_markup_error(Exception(oluvchi_xatosi)), oluvchi_xatosi
+    print("[10] oluvchi xatosi rangni tushirmaydi OK")
+
+    for kb_xatosi in ("Bad Request: can't parse InlineKeyboardButton: "
+                      "invalid button style specified",
+                      "Bad Request: BUTTON_TYPE_INVALID",
+                      "Bad Request: reply markup is too long"):
+        assert _is_markup_error(Exception(kb_xatosi)), kb_xatosi
+    print("[11] klaviatura xatosi taniladi OK")
+
+
 if __name__ == "__main__":
     test_parse_ok()
     test_parse_reject()
     test_keyboard()
-    print("\nbroadcast: barcha tekshiruvlar o'tdi (9/9).")
+    test_markup_error()
+    print("\nbroadcast: barcha tekshiruvlar o'tdi (11/11).")
