@@ -97,6 +97,7 @@ async def main():
     # already=0, keyin faqat 2 ta qator qaytadi (kerak 3 ta)
     conn = FakeConn(
         fetchval=[0],
+        fetchrow=[{"round": 1, "claimed": None}],
         fetch=[[{"invited_id": 1}, {"invited_id": 2}]],
     )
     database.pool = FakePool(conn)
@@ -109,19 +110,39 @@ async def main():
     # ── 6) Mukofot: aynan 3 ta — beriladi ───────────────────────────
     conn = FakeConn(
         fetchval=[0],
+        fetchrow=[{"round": 1, "claimed": None}],
         fetch=[[{"invited_id": 1}, {"invited_id": 2}, {"invited_id": 3}]],
     )
     database.pool = FakePool(conn)
     ok = await database.claim_referral_reward(999, required=3, reward_days=3, max_rewards=10)
     assert ok is True
     user_updates = [q for q, _ in conn.executed if "UPDATE users" in q]
-    assert len(user_updates) == 1, "aynan bitta tarif UPDATE'i kutilgan edi"
+    # Ikkita: (1) tarifga kun qo'shish, (2) to'lqinni yopish.
+    assert len(user_updates) == 2, f"ikkita UPDATE kutilgan edi: {len(user_updates)}"
     assert "GREATEST" in user_updates[0], (
         "mukofot ham qo'shish SQL'ini ishlatishi kerak (ustidan yozmasin)"
     )
+    assert "referral_rewarded_round" in user_updates[1], (
+        "to'lqin yopilmadi — bitta taklif bilan qayta-qayta mukofot olinardi"
+    )
+
+    # ── 6b) Shu to'lqinda mukofot ALLAQACHON olingan — berilmasin ───
+    # (claimed == round). Bu bo'lmasa bitta taklif bilan cheksiz kun.
+    conn = FakeConn(
+        fetchval=[0],
+        fetchrow=[{"round": 2, "claimed": 2}],
+        fetch=[[{"invited_id": 1}, {"invited_id": 2}, {"invited_id": 3}]],
+    )
+    database.pool = FakePool(conn)
+    ok = await database.claim_referral_reward(999, required=3, reward_days=3, max_rewards=10)
+    assert ok is False, "shu to'lqinda mukofot ikkinchi marta berildi"
+    assert [q for q, _ in conn.executed if "UPDATE" in q] == [], (
+        "KRITIK: to'lqin yopiq bo'lsa ham bazaga tegildi"
+    )
 
     # ── 7) Tavan: max_rewards ga yetgan — mukofot yo'q ──────────────
-    conn = FakeConn(fetchval=[30])       # 10 mukofot × 3 do'st
+    conn = FakeConn(fetchval=[30],       # 10 mukofot × 3 do'st
+                    fetchrow=[{"round": 1, "claimed": None}])
     database.pool = FakePool(conn)
     ok = await database.claim_referral_reward(999, required=3, reward_days=3, max_rewards=10)
     assert ok is False, "tavanga yetganda mukofot berilmasligi kerak"

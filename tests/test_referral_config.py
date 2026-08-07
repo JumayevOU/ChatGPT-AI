@@ -81,6 +81,49 @@ def test_repeat_blocked():
     print("[7] bloklagan foydalanuvchi bazadan O'CHIRILMAYDI OK")
 
 
+def test_one_reward_per_wave():
+    """Bitta taklif to'lqinida FAQAT BIR MARTA mukofot berilsin.
+
+    Ilgari havola abadiy ishlardi: 3 do'st -> 3 kun, yana 3 do'st -> yana
+    3 kun. Endi mukofot to'lqinga bog'langan va u faqat admin yangi
+    taklif yuborganda ochiladi.
+    """
+    claim = inspect.getsource(database.claim_referral_reward)
+
+    # Huquq tekshiruvi mukofot berishdan OLDIN turishi kerak.
+    assert "referral_rewarded_round" in claim, "to'lqin tekshiruvi yo'q"
+    assert claim.index("wave['claimed'] == wave['round']") < claim.index("_EXTEND_PLAN_SQL"), \
+        "tekshiruv mukofotdan keyin turibdi"
+    # Parallel do'stlar ikki marta mukofot ochib yubormasin.
+    assert "FOR UPDATE" in claim, "qator qulflanmagan — ikki marta berilishi mumkin"
+    # Mukofotdan keyin to'lqin yopilishi shart.
+    assert "SET referral_rewarded_round = COALESCE(referral_round, 0)" in claim
+    print("[12] bitta to'lqinda bitta mukofot OK")
+
+    # To'lqinni FAQAT taklif yuborish ochadi va u bitta joyda turadi.
+    invite = inspect.getsource(pro.send_referral_invite)
+    assert "bump_referral_round" in invite, \
+        "taklif yuborilganda to'lqin ochilmayapti"
+    bump = inspect.getsource(database.bump_referral_round)
+    assert "referral_round = COALESCE(referral_round, 0) + 1" in bump
+    print("[13] yangi taklif mukofot huquqini qaytadan ochadi OK")
+
+    # Hech qachon taklif olmagan odam: round=0, rewarded=NULL.
+    # NULL == 0 emas, ya'ni birinchi mukofot baribir ishlaydi.
+    assert "wave is None or wave['claimed'] == wave['round']" in claim
+    print("[14] eski foydalanuvchilar bloklanmaydi OK")
+
+    # Allaqachon tarqatilgan taklif: mukofot OLGANLAR nol-to'lqinda
+    # yopiladi, OLMAGANLAR esa o'z mukofotini oladi.
+    mig = inspect.getsource(database.ensure_profile_columns)
+    assert "UPDATE users SET referral_rewarded_round = 0" in mig
+    assert "r.rewarded_at IS NOT NULL" in mig, \
+        "to'ldirish mukofot olganlarni ajratmayapti — hammani bloklab qo'yardi"
+    assert "referral_rewarded_round IS NULL" in mig, \
+        "to'ldirish qayta ishga tushganda yangi to'lqinlarni buzmasin"
+    print("[15] havodagi kampaniya to'g'ri yakunlanadi OK")
+
+
 def test_defaults():
     """Sozlanmagan bot eski xatti-harakatda qolsin."""
     src = inspect.getsource(database.get_referral_config)
@@ -156,4 +199,5 @@ if __name__ == "__main__":
     test_defaults()
     test_share_message()
     asyncio.run(test_inline_vs_guest())
-    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (11/11).")
+    test_one_reward_per_wave()
+    print("\nreferal sozlamasi: barcha tekshiruvlar o'tdi (15/15).")

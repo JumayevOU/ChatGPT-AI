@@ -974,8 +974,10 @@ async def _render_referral(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     try:
         cfg = await database.get_referral_config(user_id)
     except Exception:
-        cfg = {'required': REFERRAL_REQUIRED, 'reward_days': REFERRAL_REWARD_DAYS}
+        cfg = {'required': REFERRAL_REQUIRED, 'reward_days': REFERRAL_REWARD_DAYS,
+               'claimed': False}
     required, reward_days = cfg['required'], cfg['reward_days']
+    claimed = cfg.get('claimed', False)
 
     toward_next = p['qualified'] - p['rewarded']
     need = max(0, required - toward_next)
@@ -986,13 +988,22 @@ async def _render_referral(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     done = min(required, toward_next)
     dots = "🟢" * done + "⚪️" * (required - done)
 
-    status = "🎉 Mukofot tayyor!" if need == 0 else f"Yana <b>{need} ta</b> do'st kerak"
+    if claimed:
+        # Mukofot shu to'lqinda allaqachon olingan. Buni AYTMASAK, odam
+        # do'st chaqirib, hech narsa olmay, botni aldayapti deb o'ylardi.
+        status = ("✅ Mukofot olingan — keyingi taklif e'lon qilinganda "
+                  "yana ochiladi")
+    elif need == 0:
+        status = "🎉 Mukofot tayyor!"
+    else:
+        status = f"Yana <b>{need} ta</b> do'st kerak"
 
     text = (
         f"👥 <b>DO'ST TAKLIF QILING</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<blockquote>Har <b>{required} ta</b> do'st uchun "
-        f"<b>{reward_days} kun Pro</b> — mutlaqo bepul.</blockquote>\n\n"
+        f"<b>{reward_days} kun Pro</b> — mutlaqo bepul.\n"
+        f"Har taklifda <b>bir marta</b>.</blockquote>\n\n"
         f"{dots}  <b>{done}/{required}</b>\n"
         f"{status}\n\n"
         f"📊 <b>Statistikangiz</b>\n"
@@ -1170,6 +1181,16 @@ async def send_referral_invite(user_id: int, note: str = "") -> bool:
         logger.error("[Bepul Pro] BOT_USERNAME yo'q — referal havolasi yasab bo'lmadi")
         return False
 
+    # YANGI TO'LQIN. Har bir taklifda mukofot huquqi qaytadan ochiladi va
+    # bitta to'lqinda faqat bir marta beriladi. Bu shu yerda — taklif
+    # yuboriladigan HAR QANDAY yo'l shu funksiyadan o'tadi, admin
+    # oqimlariga tarqatilsa yangi yo'l qo'shilganda unutilardi.
+    try:
+        await database.bump_referral_round(user_id)
+    except Exception:
+        logger.exception(f"[Referal] to'lqin oshirilmadi (user={user_id})")
+        return False
+
     # Shart shu odamning O'ZIGA qarab olinadi — admin unga shaxsiy shart
     # qo'ygan bo'lsa, taklif xabarida ham aynan shu ko'rinishi kerak.
     try:
@@ -1184,10 +1205,9 @@ async def send_referral_invite(user_id: int, note: str = "") -> bool:
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Siz uchun maxsus taklif dasturi ochildi.{extra}\n\n"
         f"<blockquote>"
-        f"Har <b>{required} ta</b> do'st uchun — "
+        f"<b>{required} ta</b> do'st taklif qiling — "
         f"<b>{reward_days} kun Pro</b> bepul.\n"
-        f"Jami <b>{REFERRAL_MAX_REWARDS * reward_days} kun</b>gacha "
-        f"yig'ishingiz mumkin."
+        f"<i>Bu taklif bo'yicha bir marta beriladi.</i>"
         f"</blockquote>\n\n"
         f"🔗 <b>Shaxsiy havolangiz</b> <i>(bosib nusxalang)</i>\n"
         f"<code>{link}</code>\n\n"

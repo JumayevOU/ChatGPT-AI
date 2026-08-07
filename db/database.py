@@ -822,6 +822,12 @@ async def ensure_profile_columns():
             # zanjir ATAYLAB: hech bir bosqich qolganini o'chirib tashlamaydi.
             "ADD COLUMN IF NOT EXISTS referral_required INT",
             "ADD COLUMN IF NOT EXISTS referral_reward_days INT",
+            # Taklif TO'LQINI. Admin taklif yuborganda raqam oshadi; mukofot
+            # olinganda referral_rewarded_round shu raqamga tenglashadi.
+            # Ikkalasi teng bo'lsa — bu to'lqinda mukofot allaqachon olingan.
+            # Aks holda bitta havola bilan cheksiz kun yig'ish mumkin edi.
+            "ADD COLUMN IF NOT EXISTS referral_round INT DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS referral_rewarded_round INT",
             # NULL = muddatsiz premium (yoki free/hech qachon premium bo'lmagan).
             # Muddat o'tsa, check_and_consume_quota() foydalanuvchini avtomatik
             # free'ga tushiradi (kunlik limit auto-reset qanday ishlasa, shunday).
@@ -855,7 +861,28 @@ async def ensure_profile_columns():
             try:
                 await conn.execute(f"ALTER TABLE users {col};")
             except Exception as e:
-                pass 
+                pass
+
+        # BIR MARTALIK TO'LDIRISH — referral_round qo'shilgunga qadar
+        # mukofot OLGAN foydalanuvchilar uchun. Ularda rewarded_round NULL
+        # bo'lib qolardi, ya'ni "hali olmagan" deb hisoblanib, o'sha eski
+        # taklif bo'yicha yana bir mukofot olishardi. Nol-to'lqinni yopamiz.
+        #
+        # Mukofot OLMAGANLARGA tegilmaydi: allaqachon tarqatilgan taklif
+        # ular uchun ishlab tursin.
+        #
+        # Keyingi ishga tushirishlarda bu so'rov hech kimga tegmaydi —
+        # mukofot olganlarning rewarded_round'i endi NULL emas.
+        try:
+            await conn.execute('''
+                UPDATE users SET referral_rewarded_round = 0
+                 WHERE referral_rewarded_round IS NULL
+                   AND EXISTS (SELECT 1 FROM referrals r
+                                WHERE r.referrer_id = users.user_id
+                                  AND r.rewarded_at IS NOT NULL)
+            ''')
+        except Exception:
+            logger.exception("referral_rewarded_round to'ldirilmadi")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1855,6 +1882,19 @@ async def claim_referral_reward(referrer_id: int, required: int,
     async with pool.acquire() as conn:
         try:
             async with conn.transaction():
+                # BITTA TO'LQINDA BITTA MUKOFOT. Qator FOR UPDATE bilan
+                # qulflanadi: uchta do'st bir vaqtda birinchi savolini
+                # bersa, ikkita parallel tranzaksiya ikki marta mukofot
+                # berib yuborishi mumkin edi.
+                wave = await conn.fetchrow(
+                    '''SELECT COALESCE(referral_round, 0) AS round,
+                              referral_rewarded_round AS claimed
+                         FROM users WHERE user_id = $1 FOR UPDATE''',
+                    referrer_id,
+                )
+                if wave is None or wave['claimed'] == wave['round']:
+                    raise _NotEnoughReferrals()
+
                 already = await conn.fetchval(
                     'SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND rewarded_at IS NOT NULL',
                     referrer_id,
@@ -1883,6 +1923,12 @@ async def claim_referral_reward(referrer_id: int, required: int,
                     raise _NotEnoughReferrals()
 
                 await conn.execute(_EXTEND_PLAN_SQL, referrer_id, 'pro', str(reward_days))
+                # Shu to'lqin yopildi. Keyingi mukofot faqat admin yangi
+                # taklif yuborganda (bump_referral_round) ochiladi.
+                await conn.execute(
+                    '''UPDATE users
+                          SET referral_rewarded_round = COALESCE(referral_round, 0)
+                        WHERE user_id = $1''', referrer_id)
                 return True
         except _NotEnoughReferrals:
             return False
@@ -1922,7 +1968,10 @@ async def get_referral_config(user_id: Optional[int] = None) -> Dict[str, int]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             '''SELECT COALESCE(u.referral_required, s.referral_required) AS required,
-                      COALESCE(u.referral_reward_days, s.referral_reward_days) AS days
+                      COALESCE(u.referral_reward_days, s.referral_reward_days) AS days,
+                      (u.referral_rewarded_round IS NOT NULL
+                       AND u.referral_rewarded_round
+                           = COALESCE(u.referral_round, 0)) AS claimed
                  FROM bot_settings s
                  LEFT JOIN users u ON u.user_id = $1
                 WHERE s.id = 1''',
@@ -1931,7 +1980,8 @@ async def get_referral_config(user_id: Optional[int] = None) -> Dict[str, int]:
     required = (row and row['required']) or REFERRAL_REQUIRED
     days = (row and row['days']) or REFERRAL_REWARD_DAYS
     return {'required': required, 'reward_days': days,
-            'max_rewards': REFERRAL_MAX_REWARDS}
+            'max_rewards': REFERRAL_MAX_REWARDS,
+            'claimed': bool(row and row['claimed'])}
 
 
 # Admin ham xato yozadi: "3 300" deb qo'yilsa bitta odam bir yilda Pro
@@ -1978,6 +2028,23 @@ async def set_referral_config(required: int, reward_days: int,
             user_id, required, reward_days,
         )
         return res.endswith(" 1")
+
+
+@with_db_retry()
+async def bump_referral_round(user_id: int) -> None:
+    """Yangi taklif to'lqini — mukofot huquqi shu odam uchun qayta ochiladi.
+
+    send_referral_invite() ichidan chaqiriladi, ya'ni taklif yuborilgan
+    HAR QANDAY yo'lda avtomatik ishlaydi. Chaqiruvni admin oqimlariga
+    tarqatib qo'ysak, uchinchi yo'l qo'shilganda unutilardi.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            '''UPDATE users SET referral_round = COALESCE(referral_round, 0) + 1
+                WHERE user_id = $1''', user_id)
 
 
 @with_db_retry()
