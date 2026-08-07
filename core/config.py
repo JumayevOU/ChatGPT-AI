@@ -769,11 +769,25 @@ BTN_DANGER = "danger"       # bekor qilish/yopish (qizil)
 # ichidagi custom_emoji_id ni shu yerga ko'chiring.
 CUSTOM_EMOJI: dict[str, str] = {
     "text":     "5980787993139481991",
-    "photo":    "5947288798713875484",
-    "document": "5818955300463447293",
-    "voice":    "5947042989145590769",
-    "search":   "5821388137443626414",
+    "photo":    "5947288798713875484",   # 📸
+    "document": "5818955300463447293",   # 🛠 (nom eskirgan — pastdagi izohga qarang)
+    "voice":    "5947042989145590769",   # 🎙
+    "search":   "5821388137443626414",   # 🌐
+    # /start salomlashuvi uchun.
+    "wave":     "5472055112702629499",   # 👋
+    "bot":      "5192883106046059669",   # 🤖
+    "youtube":  "5820934185170242766",   # 📺
+    "file":     "5334882760735598374",   # 📄
+    "tools":    "5818955300463447293",   # 🛠 ("document" bilan bir xil ID
+                                         #     — nomi to'g'risi shu)
+    "broom":    "5979070714890686650",   # 🧹
+    "write":    "5470060791883374114",   # ✍️
 }
+# ⚠️ "document" kaliti 🛠 ID'sini saqlaydi, lekin handlers/pro.py da
+# pe('document', '📄') deb ishlatiladi — ya'ni Pro xabarida 📄 o'rniga
+# kalit yasovchi animatsiya chiqadi. Bu ATAYLAB o'zgartirilmadi: kalitni
+# ko'chirish o'sha xabarni ham o'zgartirardi. To'g'rilash kerak bo'lsa
+# pro.py dagi chaqiruvni pe('file', '📄') ga almashtiring.
 
 # Xabar effektlari (faqat SHAXSIY chatda ishlaydi — guruhda xato beradi,
 # shuning uchun yuborishda progressiv fallback bor).

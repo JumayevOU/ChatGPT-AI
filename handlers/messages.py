@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 from core.config import (
     BOT_TOKEN, CONTEXT_WINDOW,
@@ -794,6 +794,36 @@ async def _send_limit_reached_message(message: Message, quota: dict, feature: st
 # `router`ni include qilganda ular filtrsiz (masalan admin uchun ham)
 # qayta ro'yxatdan o'tib, general_router'dagi to'g'ri filtrlangan versiyani
 # hech qachon ishga tushirmay qo'yadi.
+def _greeting_text(*, premium: bool) -> str:
+    """/start salomlashuvi. premium=False — zaxira, oddiy emoji bilan.
+
+    Emoji nomlari core/config.py: CUSTOM_EMOJI dan olinadi. Nom xato
+    yozilsa pe() jimgina oddiy emojiga tushadi, shuning uchun nomlar
+    tests/test_greeting.py da tekshiriladi.
+    """
+    e = (lambda name, fb: pro_module.pe(name, fb)) if premium else (lambda name, fb: fb)
+    return (
+        f"{e('wave', '👋')} <b>Keling tanishib olaylik!</b>\n\n"
+        f"{e('bot', '🤖')} Men sizning AI yordamchingizman. "
+        f"Quyidagilarni qila olaman:\n"
+        f"➤ Savollaringizga javob beraman "
+        f"(Internetdan ham qidiraman {e('search', '🌐')})\n"
+        f"➤ {e('youtube', '📺')} <b>YouTube</b> video silkasini tashlasangiz, "
+        f"uni qisqacha xulosa qilib beraman!\n"
+        f"➤ {e('file', '📄')} <b>Hujjatlar (PDF/Word/Excel/TXT)</b> yuborsangiz, "
+        f"o'qib tahlil qilaman!\n"
+        f"➤ {e('photo', '📸')} <b>Rasm</b> yuborsangiz — uni xuddi insondek "
+        f"ko'rib tushuntiraman!\n"
+        f"➤ {e('voice', '🎙')} <b>Ovozli xabar</b> yuborsangiz — "
+        f"<b>ovozli javob</b> qaytaraman!\n"
+        f"➤ {e('tools', '🛠')} <b>Fayl yaratib beraman</b> — PPTX, PDF, Word, Excel\n\n"
+        f"{e('broom', '🧹')} Agar suhbatni noldan boshlamoqchi bo'lsangiz "
+        f"/new buyrug'ini bering.\n\n"
+        f"{e('write', '✍️')} Savolingizni yozing, rasm, hujjat yoki ovoz "
+        f"yuboring. Boshladikmi?"
+    )
+
+
 async def handle_start(message: Message, state: FSMContext, command: CommandObject = None):
     await state.clear()
     user_id = message.from_user.id
@@ -835,18 +865,15 @@ async def handle_start(message: Message, state: FSMContext, command: CommandObje
     except Exception:
         pass
 
-    await message.answer(
-        "👋 <b>Keling tanishib olaylik!</b>\n\n"
-        "🤖 Men sizning AI yordamchingizman. Quyidagilarni qila olaman:\n"
-        "➤ Savollaringizga javob beraman (Internetdan ham qidiraman 🌐)\n"
-        "➤ 📺 <b>YouTube</b> video silkasini tashlasangiz, uni qisqacha xulosa qilib beraman!\n"
-        "➤ 📄 <b>Hujjatlar (PDF/Word/Excel/TXT)</b> yuborsangiz, o'qib tahlil qilaman!\n"
-        "➤ 📸 <b>Rasm</b> yuborsangiz — uni xuddi insondek ko'rib tushuntiraman!\n"
-        "➤ 🎙 <b>Ovozli xabar</b> yuborsangiz — <b>ovozli javob</b> qaytaraman!\n"
-        "➤ 🛠 <b>Fayl yaratib beraman</b> — PPTX, PDF, Word, Excel\n\n"
-        "🧹 Agar suhbatni noldan boshlamoqchi bo'lsangiz /new buyrug'ini bering.\n\n"
-        "✍️ Savolingizni yozing, rasm, hujjat yoki ovoz yuboring. Boshladikmi?"
-    )
+    try:
+        await message.answer(_greeting_text(premium=True))
+    except TelegramBadRequest as exc:
+        # Premium emoji Telegram tomonidan rad etilsa BUTUN xabar
+        # yuborilmaydi va yangi foydalanuvchi hech narsa ko'rmaydi — bu
+        # botdagi eng yomon nosozlik. Shuning uchun oddiy emojili
+        # variantga tushamiz (qalin matn saqlanadi).
+        logger.warning(f"[/start] premium emoji rad etildi: {exc}")
+        await message.answer(_greeting_text(premium=False))
 
 
 # --------------------------------------------------
