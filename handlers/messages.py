@@ -579,7 +579,7 @@ async def delete_msg_later(chat_id: int, message_id: int, delay: int):
 # --------------------------------------------------
 # KUNLIK LIMIT (DAILY QUOTA)
 # --------------------------------------------------
-async def _check_quota(user_id: int, cost: int, bot=None) -> dict:
+async def _check_quota(user_id: int, cost: int) -> dict:
     try:
         quota = await check_and_consume_quota(user_id, cost)
     except Exception as e:
@@ -590,9 +590,8 @@ async def _check_quota(user_id: int, cost: int, bot=None) -> dict:
     # o'qilgan (qo'shimcha so'rov yo'q) va bu yo'l hamma xabar turidan
     # o'tadi. Tarif tugashi ham aynan check_and_consume_quota() ichida
     # aniqlanadi, ya'ni Pro buyruqlari o'z vaqtida yo'qoladi.
-    if bot is not None:
-        _fire_and_forget(
-            menu_module.sync_commands(bot, user_id, _is_pro(quota)), label="menyu")
+    _fire_and_forget(
+        menu_module.sync_commands(user_id, _is_pro(quota)), label="menyu")
     return quota
 
 
@@ -1045,7 +1044,7 @@ async def _process_merged_text(chat_id: int, buf: dict, state: FSMContext):
     # "salom" arzon (past effort), matematik/kod savoli qimmatroq (chuqurroq effort).
     text_effort = pick_reasoning_effort(merged_text)
     text_cost = message_cost("text", text_effort)
-    quota = await _check_quota(user_id, text_cost, message.bot)
+    quota = await _check_quota(user_id, text_cost)
     if not quota["allowed"]:
         await _send_limit_reached_message(last_message, quota, feature="text")
         return
@@ -1260,7 +1259,7 @@ async def handle_photo(message: Message, state: FSMContext):
 
     await check_and_clear_session(chat_id)
 
-    quota = await _check_quota(user_id, MESSAGE_COST_PHOTO, message.bot)
+    quota = await _check_quota(user_id, MESSAGE_COST_PHOTO)
     if not quota["allowed"]:
         await _send_limit_reached_message(message, quota, feature="photo")
         return
@@ -1330,7 +1329,7 @@ async def handle_document(message: Message, state: FSMContext):
         )
         return
 
-    quota = await _check_quota(user_id, MESSAGE_COST_DOCUMENT, message.bot)
+    quota = await _check_quota(user_id, MESSAGE_COST_DOCUMENT)
     if not quota["allowed"]:
         await _send_limit_reached_message(message, quota, feature="document")
         return
@@ -1475,7 +1474,7 @@ async def handle_voice(message: Message, state: FSMContext):
 
     await check_and_clear_session(chat_id)
 
-    quota = await _check_quota(user_id, MESSAGE_COST_VOICE, message.bot)
+    quota = await _check_quota(user_id, MESSAGE_COST_VOICE)
     if not quota["allowed"]:
         await _send_limit_reached_message(message, quota, feature="voice")
         return

@@ -12,8 +12,9 @@ bu yerdagi ro'yxat o'zgarsa ham u yerdagi shartlar o'chirilmasin.
 """
 
 import logging
-from aiogram import Bot
 from aiogram.types import BotCommand, BotCommandScopeChat
+
+from core.loader import bot
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +45,16 @@ def commands_for(is_pro: bool) -> list[BotCommand]:
     return COMMON_COMMANDS + PRO_COMMANDS if is_pro else list(COMMON_COMMANDS)
 
 
-async def sync_commands(bot: Bot, user_id: int, is_pro: bool) -> None:
+async def sync_commands(user_id: int, is_pro: bool) -> None:
     """Chat menyusini tarifga moslaydi.
 
     O'zgarish bo'lmasa Telegram'ga UMUMAN murojaat qilinmaydi — bu har bir
     xabarda chaqirilgani uchun muhim.
+
+    `bot` ATAYLAB parametr emas: u chaqiruvchilardan uzatilganda bitta
+    joyda o'zgaruvchi nomi boshqacha bo'lib (`last_message`), NameError
+    keng `except` ichida yutilib ketdi va matnli xabarlar javobsiz qoldi.
+    Umumiy singletonda bunday xato bo'lishi mumkin emas.
     """
     if _shown.get(user_id) is is_pro:
         return
