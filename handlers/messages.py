@@ -214,6 +214,7 @@ async def _send_rich_message(
     markdown: str | None = None,
     html_content: str | None = None,
     message_thread_id=None,
+    reply_markup=None,
 ):
     payload = {
         "chat_id": chat_id,
@@ -221,6 +222,12 @@ async def _send_rich_message(
     }
     if message_thread_id:
         payload["message_thread_id"] = message_thread_id
+    if reply_markup is not None:
+        # aiogram modeli -> JSON. exclude_none SHART: bo'sh maydonlar
+        # yuborilsa Telegram butun klaviaturani rad etadi.
+        payload["reply_markup"] = (
+            reply_markup.model_dump(exclude_none=True)
+            if hasattr(reply_markup, "model_dump") else reply_markup)
     return await _telegram_api_request("sendRichMessage", payload)
 
 
@@ -327,6 +334,12 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
         "Kompozitsiya tanlanmoqda",
         "Ranglar joylanmoqda",
         "Rasm chizilmoqda",
+    ],
+    "reminder": [
+        "Vaqt aniqlanmoqda",
+        "Eslatma qo'yilmoqda",
+        "Rejaga yozilmoqda",
+        "Tasdiqlanmoqda",
     ],
 }
 
@@ -481,6 +494,8 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
                     active_type = "file_task"
                 elif "image" in chunk:
                     active_type = "image"
+                elif "reminder" in chunk:
+                    active_type = "reminder"
                 elif "search" in chunk:
                     active_type = "search"
                 continue

@@ -12,15 +12,21 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from html import escape as html_escape
+
 from core.loader import logger
 from db import database
 from handlers.helpers import _dm_or_deactivate
+from handlers.messages import _send_rich_message
 from handlers.pro import btn, send_rich, BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER
-from services.ai import get_gpt_reply
+from services.ai import get_gpt_reply, build_rich_markdown
 
-# 24 ta tugma o'rniga 6 ta MAZMUNLI soat — tanlash osonroq va klaviatura
-# ixcham qoladi. Kerak bo'lsa shu ro'yxatni kengaytirish yetarli.
-DIGEST_HOURS = (7, 8, 9, 12, 18, 21)
+# Kunning HAMMA soati tanlanadi va bir nechtasi birga bo'lishi mumkin.
+# Ilgari 6 ta "mazmunli" soat bor edi va bittasigina saqlanardi.
+DIGEST_HOURS = tuple(range(24))
+_HOURS_PER_ROW = 6
+# Mavzular yozilib, soat hali tanlanmagan holat uchun.
+_DEFAULT_HOUR = 8
 
 _MAX_TOPICS_LEN = 200
 
@@ -48,25 +54,46 @@ _PRO_ONLY = (
 )
 
 
-def _hours_keyboard(current: int | None) -> InlineKeyboardMarkup:
-    """Soat tugmalari — tanlangani yashil rangda ajralib turadi."""
+def _hours_keyboard(selected) -> InlineKeyboardMarkup:
+    """Soat tugmalari — bosilgani qo'shiladi, qayta bosilsa olib tashlanadi.
+
+    Tanlanganlari yashil. 24 ta tugma 6 tadan qatorlarga bo'linadi, ya'ni
+    klaviatura 4 qator — ekranda bemalol sig'adi.
+    """
+    chosen = set(selected or ())
     rows, row = [], []
     for h in DIGEST_HOURS:
-        label = f"✅ {h:02d}:00" if h == current else f"{h:02d}:00"
-        row.append(btn(label, f"dg:h:{h}",
-                       style=BTN_SUCCESS if h == current else None))
-        if len(row) == 3:
+        faol = h in chosen
+        row.append(btn(f"✅{h:02d}" if faol else f"{h:02d}",
+                       f"dg:h:{h}", style=BTN_SUCCESS if faol else None))
+        if len(row) == _HOURS_PER_ROW:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    if current is not None:
-        rows.append([btn("✏️ Mavzularni o'zgartirish", "dg:topics", style=BTN_PRIMARY)])
-        rows.append([btn("🔕 Obunani o'chirish", "dg:off", style=BTN_DANGER)])
+    if chosen:
+        rows.append([btn("✏️ Mavzularni o'zgartirish", "dg:topics", style=BTN_PRIMARY),
+                     btn("🧹 Tozalash", "dg:clear")])
+        rows.append([btn("🔕 Daydjestni to'xtatish", "dg:off", style=BTN_DANGER)])
     else:
+        rows.append([btn("🕐 Barcha soatlar", "dg:all", style=BTN_PRIMARY)])
         rows.append([btn("✖️ Yopish", "dg:close", style=BTN_DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _hours_label(hours) -> str:
+    """[7, 12] -> "07:00, 12:00" """
+    return ", ".join(f"{h:02d}:00" for h in hours) or "—"
+
+
+def _user_hours(profile) -> list[int]:
+    """Profildan tanlangan soatlar. Eski digest_hour ham hisobga olinadi."""
+    raw = (profile or {}).get("digest_hours")
+    if raw:
+        return database.parse_digest_hours(raw)
+    eski = (profile or {}).get("digest_hour")
+    return database.parse_digest_hours([eski] if eski is not None else [])
 
 
 async def _profile_or_none(user_id: int):
@@ -90,15 +117,18 @@ async def handle_digest(message: Message, state: FSMContext):
             [btn("💎 Pro tarif", "pro:open", style=BTN_SUCCESS)]]))
         return
 
-    hour = profile.get("digest_hour")
+    hours = _user_hours(profile)
     topics = profile.get("digest_topics")
-    if hour is not None:
-        status = (f"✅ <b>Faol:</b> har kuni <b>{hour:02d}:00</b> da\n"
-                  f"📌 <b>Mavzular:</b> {topics or '—'}")
+    if hours:
+        status = (f"✅ <b>Faol:</b> har kuni <b>{_hours_label(hours)}</b>\n"
+                  f"📌 <b>Mavzular:</b> {topics or '—'}\n\n"
+                  f"<i>Soatni bosib qo'shasiz, qayta bosib olib tashlaysiz.</i>")
     else:
-        status = "🔕 Hozircha o'chirilgan — soatni tanlang:"
+        status = ("🔕 Hozircha o'chirilgan.\n\n"
+                  "<i>Kerakli soatlarni bosing — bir nechtasini birga "
+                  "tanlash mumkin (Toshkent vaqti).</i>")
 
-    await send_rich(message, _INTRO + status, _hours_keyboard(hour))
+    await send_rich(message, _INTRO + status, _hours_keyboard(hours))
 
 
 async def handle_digest_callback(query: CallbackQuery, state: FSMContext):
@@ -115,7 +145,7 @@ async def handle_digest_callback(query: CallbackQuery, state: FSMContext):
         return
 
     if action == "off":
-        await query.answer("🔕 Obuna o'chirildi.", show_alert=True)
+        await query.answer("🔕 Daydjest to'xtatildi.", show_alert=True)
         try:
             await database.set_digest(user_id, None)
         except Exception as e:
@@ -132,37 +162,65 @@ async def handle_digest_callback(query: CallbackQuery, state: FSMContext):
         await _ask_topics(query.message, state)
         return
 
-    if action == "h" and len(parts) == 3:
-        # ⚠️ Soat MIJOZDAN keladi (callback_data). Uni tugmadan kelgan deb
-        # ishonib bo'lmaydi — o'zgartirilgan mijoz istalgan qiymat yubora
-        # oladi. Shuning uchun ro'yxat bo'yicha qat'iy tekshiriladi.
-        try:
-            hour = int(parts[2])
-        except ValueError:
-            await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
-            return
-        if hour not in DIGEST_HOURS:
-            await query.answer("❌ Bu soat mavjud emas.", show_alert=True)
-            return
+    if action == "menu":
+        # Soat ekranini QAYTA ochadi — daydjest ostidagi va sozlash
+        # tugmalaridan shu yerga qaytiladi.
+        await query.answer()
+        profile = await _profile_or_none(user_id)
+        hours = _user_hours(profile)
+        status = (f"✅ <b>Faol:</b> {_hours_label(hours)}" if hours
+                  else "🔕 Hozircha o'chirilgan — soatlarni tanlang:")
+        await send_rich(query.message, _INTRO + status, _hours_keyboard(hours))
+        return
 
+    if action in ("h", "all", "clear"):
         profile = await _profile_or_none(user_id)
         if profile is None or (profile.get("plan_type") or "free") == "free":
             await query.answer("💎 Bu Pro imkoniyati.", show_alert=True)
             return
 
+        hours = set(_user_hours(profile))
+        if action == "all":
+            hours = set(DIGEST_HOURS)
+            javob = "✅ Barcha soatlar tanlandi"
+        elif action == "clear":
+            hours = set()
+            javob = "🧹 Tozalandi"
+        else:
+            # ⚠️ Soat MIJOZDAN keladi (callback_data). O'zgartirilgan mijoz
+            # istalgan qiymat yubora oladi, shuning uchun qat'iy tekshiruv.
+            if len(parts) != 3:
+                await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
+                return
+            try:
+                hour = int(parts[2])
+            except ValueError:
+                await query.answer("❌ Noto'g'ri so'rov.", show_alert=True)
+                return
+            if hour not in DIGEST_HOURS:
+                await query.answer("❌ Bu soat mavjud emas.", show_alert=True)
+                return
+            if hour in hours:
+                hours.discard(hour)
+                javob = f"➖ {hour:02d}:00 olib tashlandi"
+            else:
+                hours.add(hour)
+                javob = f"✅ {hour:02d}:00 qo'shildi"
+
         try:
-            await database.set_digest(user_id, hour)
+            await database.set_digest(user_id, sorted(hours))
         except Exception as e:
             logger.error(f"[Daydjest] saqlashda xatolik: {e}")
             await query.answer("❗ Texnik nosozlik.", show_alert=True)
             return
 
-        await query.answer(f"✅ {hour:02d}:00 tanlandi")
-        if not profile.get("digest_topics"):
+        await query.answer(javob)
+        if hours and not profile.get("digest_topics"):
             await _ask_topics(query.message, state)
             return
         try:
-            await query.message.edit_reply_markup(reply_markup=_hours_keyboard(hour))
+            await query.message.edit_reply_markup(
+                reply_markup=_hours_keyboard(sorted(hours)))
         except Exception:
             pass
         return
@@ -200,8 +258,8 @@ async def process_digest_topics(message: Message, state: FSMContext):
     topics = text[:_MAX_TOPICS_LEN]
     try:
         profile = await _profile_or_none(message.from_user.id)
-        hour = (profile or {}).get("digest_hour") or DIGEST_HOURS[1]
-        await database.set_digest(message.from_user.id, hour, topics)
+        hours = _user_hours(profile) or [_DEFAULT_HOUR]
+        await database.set_digest(message.from_user.id, hours, topics)
     except Exception as e:
         logger.error(f"[Daydjest] mavzularni saqlashda xatolik: {e}")
         await message.answer("⚠️ Texnik nosozlik. Birozdan keyin urinib ko'ring.")
@@ -209,22 +267,46 @@ async def process_digest_topics(message: Message, state: FSMContext):
 
     await send_rich(message, (
         f"✅ <b>Daydjest sozlandi!</b>\n\n"
-        f"<blockquote>⏰ Har kuni: <b>{hour:02d}:00</b>\n"
+        f"<blockquote>⏰ Har kuni: <b>{_hours_label(hours)}</b>\n"
         f"📌 Mavzular: {topics}</blockquote>\n\n"
-        f"<i>Birinchi daydjest ertaga keladi.</i>"
+        f"<i>Birinchi daydjest keyingi belgilangan soatda keladi.</i>"
     ), InlineKeyboardMarkup(inline_keyboard=[
-        [btn("⚙️ Sozlamalarni o'zgartirish", "dg:topics")],
-        [btn("🔕 Obunani o'chirish", "dg:off", style=BTN_DANGER)]]))
+        [btn("⚙️ Soatlarni o'zgartirish", "dg:menu", style=BTN_PRIMARY)],
+        [btn("🔕 Daydjestni to'xtatish", "dg:off", style=BTN_DANGER)]]))
 
 
 _DIGEST_HEADER = "⏰ <b>KUNLIK DAYDJEST</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+# Markdown yo'li uchun — u yerda <b> emas, ** ishlatiladi.
+_DIGEST_HEADER_MD = "⏰ **KUNLIK DAYDJEST**\n\n"
 
 
 def _digest_keyboard() -> InlineKeyboardMarkup:
-    # Obunani to'xtatish tugmasi HAR daydjest ostida — foydalanuvchi
-    # aynan shu yerda, xabarni o'qib turib qaror qiladi.
+    # To'xtatish tugmasi HAR daydjest ostida — foydalanuvchi aynan shu
+    # yerda, xabarni o'qib turib qaror qiladi.
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn("🔕 Obunani to'xtatish", "dg:off", style=BTN_DANGER)]])
+        [btn("⚙️ Soatlar", "dg:menu", style=BTN_PRIMARY),
+         btn("🔕 To'xtatish", "dg:off", style=BTN_DANGER)]])
+
+
+async def _send_digest(user_id: int, body: str) -> None:
+    """Daydjestni ODDIY JAVOB bilan bir xil yo'ldan yuboradi.
+
+    Ilgari matn `parse_mode="HTML"` bilan ketardi, model esa Markdown
+    yozadi — natijada foydalanuvchi xom `**qalin**` va `[matn](havola)`
+    ko'rardi. Endi oddiy savol javobi qaysi yo'ldan ketsa, daydjest ham
+    o'shandan ketadi (build_rich_markdown + sendRichMessage).
+
+    Zaxira: rich yo'l ishlamasa eski HTML yo'li. U bloklagan
+    foydalanuvchini is_active=FALSE qilishni ham o'z zimmasiga oladi.
+    """
+    kb = _digest_keyboard()
+    try:
+        rich = build_rich_markdown(_DIGEST_HEADER_MD + body)
+        if await _send_rich_message(user_id, markdown=rich, reply_markup=kb) is not None:
+            return
+    except Exception as e:
+        logger.warning(f"[Daydjest] rich yuborilmadi (user={user_id}): {e}")
+    await _dm_or_deactivate(user_id, _DIGEST_HEADER + html_escape(body), kb)
 
 
 async def _build_digest(topics: str) -> str:
@@ -271,8 +353,7 @@ async def daily_digest_watcher():
                     continue
                 if not body:
                     continue
-                await _dm_or_deactivate(
-                    row["user_id"], _DIGEST_HEADER + body, _digest_keyboard())
+                await _send_digest(row["user_id"], body)
                 await asyncio.sleep(0.05)   # flood-control
         except Exception as e:
             logger.error(f"[Daydjest] fon vazifasida xatolik: {e}")

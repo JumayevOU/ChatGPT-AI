@@ -142,12 +142,86 @@ async def test_index_bounds():
     print("[13] guest va noma'lum amal himoyasi OK")
 
 
+async def test_cleanup_and_limits():
+    """Bazada eski eslatma qolmasin va muddat bir oydan oshmasin."""
+    import inspect
+    from db import database as db
+
+    # Bir martalik eslatma yuborilgach qator O'CHIRILADI, bayroq
+    # qo'yilmaydi — aks holda jadval abadiy o'sardi.
+    adv = inspect.getsource(db.advance_scheduled_task)
+    assert "DELETE FROM scheduled_tasks WHERE id = $1" in adv
+    assert "active = FALSE" not in adv, "eski bayroq usuli qolib ketgan"
+    # Bekor qilinganda ham o'chiriladi, lekin BEGONA eslatmaga tegmasin.
+    can = inspect.getsource(db.cancel_scheduled_task)
+    assert "DELETE FROM scheduled_tasks" in can and "user_id = $2" in can
+    print("[14] ishlatilgan eslatma bazadan o'chiriladi OK")
+
+    # Bir oydan uzoq eslatma qabul qilinmaydi.
+    assert REMINDER_MAX_AHEAD_DAYS <= 31, "chegara bir oydan oshib ketgan"
+    uzoq = (NOW + timedelta(days=32)).strftime("%Y-%m-%d %H:%M")
+    assert parse_run_at(uzoq, NOW) is None
+    yaqin = (NOW + timedelta(days=25)).strftime("%Y-%m-%d %H:%M")
+    assert parse_run_at(yaqin, NOW) is not None
+    print("[15] eng uzog'i bir oy OK")
+
+
+async def test_ai_body():
+    """Eslatma matnini MODEL yozadi, yiqilsa shablon ketadi."""
+    from handlers import helpers
+
+    chaqiruv = {}
+
+    async def fake_reply(chat_id, prompt, **kw):
+        chaqiruv["chat_id"] = chat_id
+        chaqiruv["kw"] = kw
+        for c in ("⏰ Ishga ketish vaqti!\n\n", "Omad!"):
+            yield c
+
+    import services.ai as ai_mod
+    real = ai_mod.get_gpt_reply
+    ai_mod.get_gpt_reply = fake_reply
+    try:
+        body = await helpers._reminder_body("Ishga ketish")
+    finally:
+        ai_mod.get_gpt_reply = real
+    assert body.startswith("⏰ Ishga ketish vaqti!"), body
+    # Ichki chaqiruv: tarixga tegmasin va internetga chiqmasin.
+    assert chaqiruv["chat_id"] == 0
+    assert chaqiruv["kw"].get("tools_enabled") is False, \
+        "model qidiruvga chiqib ketadi — sekin va qimmat"
+    print("[16] eslatma matnini model yozadi OK")
+
+    # Model yiqilsa — eslatma BARIBIR yetib borishi kerak.
+    yuborilgan = {}
+
+    async def fail_reply(*a, **k):
+        raise RuntimeError("model yiqildi")
+        yield ""
+
+    async def fake_dm(user_id, text, kb=None):
+        yuborilgan["text"] = text
+
+    real_dm = helpers._dm_or_deactivate
+    ai_mod.get_gpt_reply = fail_reply
+    helpers._dm_or_deactivate = fake_dm
+    try:
+        await helpers._send_reminder(7, "Ishga ketish")
+    finally:
+        ai_mod.get_gpt_reply = real
+        helpers._dm_or_deactivate = real_dm
+    assert "Ishga ketish" in yuborilgan["text"], "zaxira eslatma ketmadi"
+    print("[17] model yiqilsa ham eslatma yetib boradi OK")
+
+
 async def main():
     test_clean_text()
     test_parse_run_at()
     test_next_run_at()
     await test_index_bounds()
-    print("\neslatmalar: barcha tekshiruvlar o'tdi (13/13).")
+    await test_cleanup_and_limits()
+    await test_ai_body()
+    print("\neslatmalar: barcha tekshiruvlar o'tdi (17/17).")
 
 
 if __name__ == "__main__":

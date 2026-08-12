@@ -15,6 +15,7 @@ from core.config import (
     MAX_ACTIVE_REMINDERS, REMINDER_MAX_LEN, REMINDER_REPEATS,
     REMINDER_MAX_AHEAD_DAYS,
     REFERRAL_REQUIRED, REFERRAL_REWARD_DAYS, REFERRAL_MAX_REWARDS,
+    INACTIVE_STEPS,
 )
 
 load_dotenv()
@@ -287,6 +288,15 @@ async def create_users_table():
             );
         ''')
 
+        # Eski, ishlatib bo'lingan eslatmalarni tozalash. Ilgari ular
+        # active=FALSE bo'lib jadvalda qolib ketardi; endi yuborilgach
+        # o'chiriladi, shuning uchun bu faqat eskilarini yig'ishtiradi.
+        try:
+            await conn.execute(
+                'DELETE FROM scheduled_tasks WHERE active = FALSE')
+        except Exception:
+            logger.exception("eski eslatmalar tozalanmadi")
+
         try:
             # Qisman indeks: watcher har 60 soniyada FAQAT faol va muddati
             # kelganlarini so'raydi, o'chirilgan eskilari indeksga umuman
@@ -331,7 +341,12 @@ async def save_user(user_id: int, username: Optional[str] = None) -> None:
             DO UPDATE SET
                 username = COALESCE(EXCLUDED.username, users.username),
                 last_seen = NOW(),
-                is_active = TRUE
+                is_active = TRUE,
+                -- Foydalanuvchi QAYTDI: "sog'indik" bosqichi noldan
+                -- boshlanadi. Aks holda u qaytganidan keyin ham 15/30
+                -- kunlik eslatmalar ketaverardi.
+                inactive_stage = 0,
+                inactive_notified_at = NULL
         ''', user_id, username)
 
 
@@ -856,6 +871,16 @@ async def ensure_profile_columns():
             "ADD COLUMN IF NOT EXISTS digest_hour SMALLINT",
             "ADD COLUMN IF NOT EXISTS digest_topics TEXT",
             "ADD COLUMN IF NOT EXISTS digest_sent_date DATE",
+            # Bir kunda BIR NECHTA soat: "7,12,21". digest_hour eskirdi,
+            # lekin o'chirilmadi — quyidagi ko'chirish undan o'qiydi.
+            # digest_sent_hour bo'lmasa, kunning birinchi daydjesti
+            # qolganlarini ham "yuborilgan" deb yopib qo'yardi.
+            "ADD COLUMN IF NOT EXISTS digest_hours TEXT",
+            "ADD COLUMN IF NOT EXISTS digest_sent_hour SMALLINT",
+            # "Sog'indik" xabarlari: 7 -> 15 -> 30 kun, keyin yana boshidan.
+            # inactive_stage — INACTIVE_STEPS ro'yxatidagi o'rin.
+            "ADD COLUMN IF NOT EXISTS inactive_stage SMALLINT DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS inactive_notified_at TIMESTAMPTZ",
         ]
         for col in columns:
             try:
@@ -883,6 +908,17 @@ async def ensure_profile_columns():
             ''')
         except Exception:
             logger.exception("referral_rewarded_round to'ldirilmadi")
+
+        # Eski bitta soatli obunalarni yangi ro'yxatga ko'chirish. Bir
+        # martalik: keyingi ishga tushirishlarda digest_hours endi NULL
+        # emas, ya'ni hech kimga tegmaydi.
+        try:
+            await conn.execute('''
+                UPDATE users SET digest_hours = digest_hour::text
+                 WHERE digest_hours IS NULL AND digest_hour IS NOT NULL
+            ''')
+        except Exception:
+            logger.exception("digest_hours ko'chirilmadi")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1175,9 +1211,13 @@ async def cancel_scheduled_task(user_id: int, task_id: int) -> str:
     if pool is None:
         await create_db_pool()
     async with pool.acquire() as conn:
+        # O'chirib tashlaymiz, bayroq qo'ymaymiz: bekor qilingan eslatma
+        # hech qachon kerak bo'lmaydi, lekin jadvalda yotib qolardi.
+        # AND user_id — model bergan raqam bilan BEGONA eslatmani
+        # o'chirib bo'lmasin.
         res = await conn.execute(
-            'UPDATE scheduled_tasks SET active = FALSE '
-            'WHERE id = $1 AND user_id = $2 AND active', task_id, user_id)
+            'DELETE FROM scheduled_tasks WHERE id = $1 AND user_id = $2',
+            task_id, user_id)
     return "bekor qilindi" if res.endswith("1") else "topilmadi"
 
 
@@ -1197,7 +1237,12 @@ async def due_scheduled_tasks(limit: int = 100) -> List[Dict[str, Any]]:
 @with_db_retry()
 async def advance_scheduled_task(task_id: int, run_at: datetime,
                                  repeat: str) -> None:
-    """Yuborilgandan keyin: keyingi vaqtga suradi yoki o'chiradi."""
+    """Yuborilgandan keyin: keyingi vaqtga suradi yoki BUTUNLAY o'chiradi.
+
+    Bir martalik eslatma yuborilgach qator O'CHIRILADI (ilgari
+    active=FALSE qilinardi). Sabab: ular hech qachon qayta kerak
+    bo'lmaydi, lekin jadvalda abadiy yotib, o'sib boraveradi.
+    """
     nxt = next_run_at(run_at, repeat)
     global pool
     if pool is None:
@@ -1205,8 +1250,7 @@ async def advance_scheduled_task(task_id: int, run_at: datetime,
     async with pool.acquire() as conn:
         if nxt is None:
             await conn.execute(
-                'UPDATE scheduled_tasks SET active = FALSE, last_sent_at = NOW() '
-                'WHERE id = $1', task_id)
+                'DELETE FROM scheduled_tasks WHERE id = $1', task_id)
         else:
             await conn.execute(
                 'UPDATE scheduled_tasks SET run_at = $2, last_sent_at = NOW() '
@@ -2218,6 +2262,56 @@ async def take_expiry_reminders(within_days: int = 3) -> List[Dict[str, Any]]:
 
 
 @with_db_retry()
+async def take_inactive_users(limit: int = 40) -> List[Dict[str, Any]]:
+    """Uzoq ko'rinmagan foydalanuvchilarni oladi va DARHOL belgilaydi.
+
+    take_expiry_reminders() bilan bir xil naqsh: belgilash va olish BITTA
+    `UPDATE ... RETURNING` ichida, ya'ni bot ikki nusxada ishlasa ham
+    bitta odamga ikkita xabar ketmaydi.
+
+    Bosqichlar INACTIVE_STEPS dan olinadi: 7 -> 15 -> 30 -> yana 7.
+    Hisob boshlanish nuqtasi — oxirgi FAOLLIK yoki oxirgi XABAR, qaysi
+    biri keyinroq bo'lsa. Shuning uchun xabar yuborilgach sanoq qaytadan
+    boshlanadi va odam har kuni turtilmaydi.
+
+    ⚠️ last_seen bu yerda O'ZGARTIRILMAYDI. Eski kodning asosiy xatosi
+    shu edi: u xabar yuborgach last_seen = NOW() qilardi, ya'ni foydalanuvchi
+    hech qachon kirmagan bo'lsa ham "hozir kirgan" bo'lib qolardi va
+    haqiqiy faollik ma'lumoti yo'q bo'lardi.
+    """
+    global pool
+    if pool is None:
+        await create_db_pool()
+    steps = ",".join(str(int(d)) for d in INACTIVE_STEPS)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f'''
+            WITH picked AS (
+                SELECT user_id
+                  FROM users
+                 WHERE is_active = TRUE
+                   AND COALESCE(is_banned, FALSE) = FALSE
+                   AND last_seen IS NOT NULL
+                   AND GREATEST(last_seen, COALESCE(inactive_notified_at, last_seen))
+                       < NOW() - (
+                           (ARRAY[{steps}])[COALESCE(inactive_stage, 0) + 1]
+                           || ' days')::interval
+                 ORDER BY GREATEST(last_seen, COALESCE(inactive_notified_at, last_seen))
+                 LIMIT $1
+                 FOR UPDATE SKIP LOCKED
+            )
+            UPDATE users u SET
+                inactive_notified_at = NOW(),
+                -- Keyingi bosqich; oxirgisidan keyin yana boshiga qaytadi.
+                inactive_stage = (COALESCE(u.inactive_stage, 0) + 1)
+                                 % {len(INACTIVE_STEPS)}
+              FROM picked p
+             WHERE u.user_id = p.user_id
+            RETURNING u.user_id, u.username, COALESCE(u.inactive_stage, 0) AS next_stage
+        ''', limit)
+        return [dict(r) for r in rows]
+
+
+@with_db_retry()
 async def take_due_digests() -> List[Dict[str, Any]]:
     """Shu soatda daydjest kutayotganlarni oladi va DARHOL belgilaydi.
 
@@ -2235,25 +2329,55 @@ async def take_due_digests() -> List[Dict[str, Any]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch('''
             UPDATE users
-               SET digest_sent_date = (NOW() AT TIME ZONE 'Asia/Tashkent')::date
-             WHERE digest_hour IS NOT NULL
+               SET digest_sent_date = (NOW() AT TIME ZONE 'Asia/Tashkent')::date,
+                   digest_sent_hour = EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Tashkent'))::int
+             WHERE digest_hours IS NOT NULL
                AND digest_topics IS NOT NULL
                AND plan_type <> 'free'
                AND (premium_until IS NULL OR premium_until > NOW())
                AND is_active = TRUE
                AND COALESCE(is_banned, FALSE) = FALSE
-               -- EXTRACT numeric qaytaradi, digest_hour esa SMALLINT
-               AND digest_hour = EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Tashkent'))::int
-               AND digest_sent_date IS DISTINCT FROM (NOW() AT TIME ZONE 'Asia/Tashkent')::date
+               -- Hozirgi soat foydalanuvchi tanlagan ro'yxatda bormi.
+               AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Tashkent'))::int
+                   = ANY(string_to_array(digest_hours, ',')::int[])
+               -- SANA VA SOAT birga tekshiriladi. Faqat sana bo'lsa,
+               -- kunning birinchi daydjesti qolgan soatlarni ham
+               -- "yuborilgan" deb yopib qo'yardi.
+               AND (digest_sent_date IS DISTINCT FROM (NOW() AT TIME ZONE 'Asia/Tashkent')::date
+                    OR digest_sent_hour IS DISTINCT FROM
+                       EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Tashkent'))::int)
             RETURNING user_id, digest_topics
         ''')
         return [dict(r) for r in rows]
 
 
+def parse_digest_hours(raw) -> list[int]:
+    """"7,12,21" yoki [7,12,21] -> [7, 12, 21]. Yaroqsizlari tashlanadi.
+
+    ⚠️ Soatlar MIJOZDAN keladi (callback_data), ya'ni ishonchsiz manba —
+    tekshiruv shu yerda, ekranda emas. Sof funksiya, tests/test_digest.py
+    da tekshiriladi.
+    """
+    if raw is None:
+        return []
+    parts = raw.split(",") if isinstance(raw, str) else raw
+    hours = set()
+    for p in parts:
+        try:
+            h = int(str(p).strip())
+        except (TypeError, ValueError):
+            continue
+        if isinstance(p, bool):        # True -> 1 bo'lib o'tib ketmasin
+            continue
+        if 0 <= h <= 23:
+            hours.add(h)
+    return sorted(hours)
+
+
 @with_db_retry()
-async def set_digest(user_id: int, hour: Optional[int],
+async def set_digest(user_id: int, hours,
                      topics: Optional[str] = None) -> None:
-    """Daydjest obunasi. hour=None — o'chiradi.
+    """Daydjest obunasi. hours=None yoki bo'sh ro'yxat — o'chiradi.
 
     topics=None bo'lsa mavjud mavzular saqlanib qoladi (COALESCE) — soat
     almashtirilganda mavzularni qayta yozdirmaslik uchun.
@@ -2261,21 +2385,27 @@ async def set_digest(user_id: int, hour: Optional[int],
     global pool
     if pool is None:
         await create_db_pool()
+    clean = parse_digest_hours(hours)
     async with pool.acquire() as conn:
-        if hour is None:
+        if not clean:
             await conn.execute(
-                'UPDATE users SET digest_hour = NULL WHERE user_id = $1', user_id)
+                '''UPDATE users SET digest_hours = NULL, digest_hour = NULL
+                    WHERE user_id = $1''', user_id)
             return
         await conn.execute(
             '''UPDATE users SET
-                 digest_hour = $2,
-                 digest_topics = COALESCE($3, digest_topics),
-                 -- Sozlangan zahoti yubormaslik uchun bugungi kunni
+                 digest_hours = $2,
+                 -- Eski ustun ham yangilanadi: kod qaytarilsa ham
+                 -- foydalanuvchi obunasiz qolib ketmasin.
+                 digest_hour = $3,
+                 digest_topics = COALESCE($4, digest_topics),
+                 -- Sozlangan zahoti yubormaslik uchun shu soatni
                  -- "yuborilgan" deb belgilaymiz: aks holda soat allaqachon
                  -- o'tgan bo'lsa daydjest darhol kelib qolardi.
-                 digest_sent_date = (NOW() AT TIME ZONE 'Asia/Tashkent')::date
+                 digest_sent_date = (NOW() AT TIME ZONE 'Asia/Tashkent')::date,
+                 digest_sent_hour = EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Tashkent'))::int
                WHERE user_id = $1''',
-            user_id, hour, topics)
+            user_id, ",".join(str(h) for h in clean), clean[0], topics)
 
 
 @with_db_retry()

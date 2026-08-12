@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN: Optional[str] = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL")  # proxy ishlatsangiz
+OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL")  
 
 _REQUIRED_ENV_VARS = {
     "BOT_TOKEN": BOT_TOKEN,
@@ -33,92 +33,22 @@ if _missing_env_vars:
 TIMEZONE = ZoneInfo("Asia/Tashkent")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  2) MODEL SOZLAMALARI — BEPUL KVOTAGA MOSLANGAN
-# ═══════════════════════════════════════════════════════════════
-# ⚠️ MODEL NOMINI O'ZGARTIRISHDAN OLDIN SHUNI O'QING.
-#
-# OpenAI platformasida "data sharing" yoqilgani uchun kuniga BEPUL token
-# beriladi. Platformadagi ro'yxatda eng katta model sifatida gpt-5.4
-# ko'rsatilgan, LEKIN gpt-5.6 oilasi ham xuddi shu shartlarda bepul
-# ishlaydi (loyiha egasi tasdiqlagan). Shuning uchun asosiy model
-# gpt-5.6-luna bo'lib qoladi.
-#
-#     ~250k token/kun — katta modellar (gpt-5.6-*, gpt-5.4, gpt-5.1, ...)
-#     ~2.5M token/kun — mini/nano modellar (gpt-5.4-mini, gpt-4.1-mini, ...)
-#
-# 5.6 oilasida mini/nano variant YO'Q — faqat luna, sol, terra (hisobda
-# tekshirilgan). Ya'ni butun trafik katta chelakdan ichadi.
-#
-# ⚠️ RO'YXATDAN TASHQARI model to'liq narxda hisoblanadi va buni hech qanday
-# xato bildirmaydi — hisob oy oxirida chiqadi. tests/test_free_models.py
-# aynan shuni qo'riqlaydi.
-GPT_MODEL: str = "gpt-5.6-luna"      # bepul tarif
-GPT_MODEL_PRO: str = "gpt-5.6-luna"  # Pro tarif — hozircha bir xil model.
-# Pro'ning farqi limitlar, imkoniyatlar va CHUQURROQ fikrlashda
-# (upgrade_effort_for_pro), modelda emas. Boshqa modelga ajratmoqchi
-# bo'lsangiz shu qatorni o'zgartirish yetarli — qolgan kod tayyor.
+GPT_MODEL: str = "gpt-5.6-luna"      
+GPT_MODEL_PRO: str = "gpt-5.6-luna"  
 GPT_MODEL_DISPLAY_NAME: str = "GPT-5.6 Luna"
-# ⚠️ Bu yerda 2026-fevral yozilgan edi — HAQIQATGA MOS EMAS.
-# gpt-5.6-luna ikki xil tekshiruvda ham 2024-iyunni ko'rsatdi: o'zi shunday
-# deb aytdi VA 2025-yil voqealarini bilmasligini tasdiqladi. Noto'g'ri sana
-# turganda bot o'zida yo'q bilimga da'vo qilib, 2025-yil haqida ishonch
-# bilan xato javob berardi. Yangi voqealar internet_search orqali topiladi.
 GPT_KNOWLEDGE_CUTOFF: str = "June 2024"
-
-# Zaxira modellar: agar asosiy model 404/429 qaytarsa, shu tartibda urinib
-# ko'riladi. Ilgari bu ro'yxatda "gpt-5.6" turardi — u hisobda UMUMAN
-# MAVJUD EMAS (tekshirilgan), ya'ni o'lik zaxira edi. O'rniga haqiqiy
-# 5.6 birodarlari qo'yildi; oxirgisi mini chelakdan, chunki 5.6 oilasi
-# butunlay ishlamay qolgan holatda ham bot javob berishi kerak.
 MODEL_FALLBACKS: List[str] = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-4.1-mini"]
-
-# ── API tanlovi ────────────────────────────────────────────────
-# Reasoning modellar Responses API bilan sezilarli darajada yaxshi ishlaydi.
-# Chat Completions ham qo'llab-quvvatlanadi, lekin sifat pastroq bo'ladi.
 USE_RESPONSES_API: bool = True
-
-# ── Reasoning (fikrlash) sozlamalari ───────────────────────────
-# Qo'llab-quvvatlanadigan qiymatlar: none | low | medium | high | xhigh | max
-# gpt-5.6 sukut bo'yicha "medium" ishlatadi.
-#
-# Telegram chat-bot uchun "low" eng to'g'ri nuqta: OpenAI aynan chat/support
-# ssenariylari uchun shuni tavsiya qiladi — tez, arzon, lekin baribir rejalashtiradi.
-# Matematika/kod uchun pastdagi funksiya avtomatik "medium"ga ko'taradi.
 REASONING_EFFORT_DEFAULT: str = "low"
 REASONING_EFFORT_SIMPLE: str = "none"      # salom, "rahmat", bir og'iz savol
 REASONING_EFFORT_COMPLEX: str = "medium"   # matematika, fizika, kod, tahlil
 REASONING_EFFORT_MAX: str = "high"         # foydalanuvchi /think buyrug'ini bersa
-
-# standard | pro  — "pro" ancha qimmat va sekin, oddiy botga kerak emas.
 REASONING_MODE: str = "standard"
-
-# Reasoning xulosasini olish (None = olinmaydi). "auto" qilsangiz, botda
-# "🧠 o'ylanmoqda..." bosqichini ko'rsatishingiz mumkin, lekin org verification kerak.
 REASONING_SUMMARY: Optional[str] = None
-
-# auto | current_turn | all_turns
 REASONING_CONTEXT: str = "auto"
-
-# ── Token chegaralari ──────────────────────────────────────────
-#
-# ⚠️  ENG MUHIM O'ZGARISH:
-# max_output_tokens KO'RINMAYDIGAN reasoning tokenlarni HAM o'z ichiga oladi.
-# Eski 4096 qiymat bilan model o'ylashga 4096 token sarflab, sizga BO'SH javob
-# qaytarishi mumkin edi (status="incomplete", reason="max_output_tokens").
-# OpenAI kamida 25 000 token zaxira qoldirishni tavsiya qiladi.
-#
-# Telegram baribir 4096 belgidan uzun xabarni bo'lib yuboradi, shuning uchun
-# bu raqam "javob uzunligi" emas — "o'ylash + javob uchun byudjet".
 MAX_OUTPUT_TOKENS: int = 16000
 MODEL_MAX_OUTPUT_TOKENS: int = 128_000     # modelning qattiq chegarasi
 MODEL_CONTEXT_WINDOW: int = 1_050_000      # 1.05M token
-
-# ── Sampling parametrlari (LEGACY) ─────────────────────────────
-# Reasoning modellar temperature / top_p / penalty'larni QABUL QILMAYDI —
-# yuborsangiz 400 Bad Request keladi. Shuning uchun ular faqat
-# SUPPORTS_SAMPLING_PARAMS = True bo'lgandagina so'rovga qo'shiladi.
-# (Eski kodingiz import qilsa buzilmasligi uchun o'zgaruvchilar saqlab qolindi.)
 SUPPORTS_SAMPLING_PARAMS: bool = False
 
 GPT_TEMPERATURE: float = 0.7
@@ -126,55 +56,11 @@ GPT_TOP_P: float = 0.95
 GPT_FREQUENCY_PENALTY: float = 0.3
 GPT_PRESENCE_PENALTY: float = 0.3
 
-# Eski kod bilan moslik uchun alias (gpt.py da GPT_MAX_TOKENS ishlatilgan bo'lsa)
 GPT_MAX_TOKENS: int = MAX_OUTPUT_TOKENS
-
-# ── Kontekst / xotira ──────────────────────────────────────────
-# Model 1.05M token ko'taradi, ya'ni bu texnik cheklov emas — XARAJAT qarori.
-# 20 → 30 ga oshirildi: suhbat ancha izchil bo'ladi, narx sezilarli oshmaydi
-# (input $1/MTok + prompt caching).
 CONTEXT_WINDOW: int = 50
-# Pro tarif uchun kengaytirilgan kontekst oynasi.
-#
-# Saqlash HAMMA uchun CONTEXT_WINDOW_PRO gacha olib boriladi, farq esa faqat
-# O'QISHDA: free 50 tasini, Pro 150 tasini ko'radi. Shu tufayli tarif
-# o'zgarganda tarixni ko'chirish kerak emas va bepul foydalanuvchi Pro'ga
-# o'tsa, o'tmishdagi suhbat ham unga ochiladi.
-#
-# 30/60 dan 50/150 ga oshirildi. Model 1.05M token ko'taradi — 150 xabar
-# uning 1% i ham emas, ya'ni chegara texnik emas, XARAJAT qarori edi.
-# Halol hisob: input tokenlar baribir pul turadi, prompt caching uni
-# arzonlashtiradi, lekin bepul qilmaydi. Evaziga Pro'da "bot meni
-# yaxshiroq eslaydi" degan HAQIQIY farq paydo bo'ladi — 3× uzun xotira.
 CONTEXT_WINDOW_PRO: int = 150
-
-# Reasoning model sekinroq javob beradi — timeout'ni oshirish shart.
 REQUEST_TIMEOUT: float = 180.0   # soniya
 STREAMING_ENABLED: bool = True   # Telegram'da "yozmoqda..." tabiiy ko'rinadi
-
-
-# ═══════════════════════════════════════════════════════════════
-#  3) AI PROMPTLARI
-# ═══════════════════════════════════════════════════════════════
-
-# 3.1 — Asosiy tizim prompti.
-#
-# GPT-5.6 uchun "ENGAGEMENT ENGINE" arxitekturasi bilan qayta yozildi.
-#
-# Asosiy g'oya: bot shunchaki javob bermasin — har bir javob foydalanuvchini
-# QAYTIB KELISHGA o'rgatsin. Buning uchun 4 bosqichli javob arxitekturasi
-# kiritildi (HOOK → BODY → PLUS-ONE → DOOR) + shaxsiyat (PERSONALITY) +
-# suhbat ichidagi xotirani qayta ishlatish.
-#
-# MUHIM PRINSIP: bog'lanish MANIPULYATSIYA bilan emas, QIYMAT bilan quriladi.
-# Sun'iy shoshilinch, aybdorlik hissi, javobni "ushlab qolish" kabi arzon
-# usullar promptda ANIQ TAQIQLANGAN — ular ishonchni bir haftada o'ldiradi.
-# Eng kuchli AI mahsulotlar (ChatGPT, Claude) retentionni aynan "har safar
-# kutilganidan ko'proq foyda berish" orqali ushlab turadi.
-#
-# Texnik eslatma: reasoning modelga "qanday o'ylash"ni aytish shart emas —
-# u buni ichida o'zi qiladi. Prompt faqat MAQSAD + SHAXSIYAT + OUTPUT
-# KONTRAKTI + PLATFORMA CHEKLOVLARI beradi.
 SYSTEM_PROMPT_TEMPLATE: str = """
 You are {model_name}, OpenAI's reasoning model, living inside a Telegram bot.
 Today's date is {current_date}. Your training knowledge extends to {knowledge_cutoff};
@@ -782,6 +668,7 @@ CUSTOM_EMOJI: dict[str, str] = {
                                          #     — nomi to'g'risi shu)
     "broom":    "5979070714890686650",   # 🧹
     "write":    "5470060791883374114",   # ✍️
+    "reminder": "5251537301154062376",   # ⏰ eslatma qo'yilayotgan status
 }
 # ⚠️ "document" kaliti 🛠 ID'sini saqlaydi, lekin handlers/pro.py da
 # pe('document', '📄') deb ishlatiladi — ya'ni Pro xabarida 📄 o'rniga
@@ -818,8 +705,25 @@ REMINDER_MAX_LEN: int = 200
 REMINDER_REPEATS: tuple = ("once", "daily", "weekly", "monthly")
 
 # Eslatmani ENG UZOG'I shuncha vaqtga qo'yish mumkin — model xato hisoblab
-# 2190-yilga eslatma yozib qo'ymasin.
-REMINDER_MAX_AHEAD_DAYS: int = 730
+# 2060-yilga eslatma yozib qo'ymasin. Bir oy ataylab: undan uzoq eslatmani
+# odam baribir unutadi va u bazada yillab yotib qoladi.
+REMINDER_MAX_AHEAD_DAYS: int = 31
+
+
+# ── "SOG'INDIK" XABARLARI (uzoq ko'rinmagan foydalanuvchiga) ────────
+# Oraliqlar: 7 kun jimlikdan keyin birinchi xabar, undan 15 kun keyin
+# ikkinchisi, undan 30 kun keyin uchinchisi — keyin yana boshidan.
+# O'sib boradi, chunki javob bermayotgan odamni har hafta turtish spam.
+INACTIVE_STEPS: tuple = (7, 15, 30)
+
+# Bitta tsiklda nechta odamga yuboriladi. Har biriga alohida model
+# chaqiruvi ketadi, shuning uchun tavan bor — aks holda bitta tsikl
+# yuzlab so'rov qilib, hisobni ham, Telegram limitini ham urardi.
+INACTIVE_BATCH: int = 40
+
+# Tekshiruv oralig'i. Kunlik aniqlik yetarli, lekin soatlik tekshiruv
+# deploy'dan keyin tez tiklanishni ta'minlaydi.
+INACTIVE_TICK: int = 3600
 
 
 # ── REFERAL ─────────────────────────────────────────────────────────

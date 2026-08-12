@@ -1148,6 +1148,11 @@ _REMINDER_TOOL = {
         "`when` — MAJBURIY format 'YYYY-MM-DD HH:MM', Toshkent vaqti. "
         "Uni O'ZINGIZ hisoblang: tizim xabarida hozirgi sana va vaqt bor. "
         "'ertaga soat 9 da' = bugungi sana + 1 kun, 09:00.\n"
+        "⚠️ Vaqt O'TIB KETGAN bo'lsa (masalan hozir 09:00, foydalanuvchi "
+        "'bugun 08:00 da' desa) — KEYINGI kunga qo'ying, o'tmishdagi vaqt "
+        "rad etiladi va foydalanuvchi eslatmasiz qoladi.\n"
+        "⚠️ Eng uzog'i BIR OY. Undan uzoq so'ralsa eslatma qo'ymang, "
+        "foydalanuvchiga chegarani ayting.\n"
         "`repeat` — 'once' (birlik), 'daily', 'weekly', 'monthly'. "
         "Takrorlanuvchida `when` BIRINCHI marta ishga tushish vaqti.\n\n"
         "`text` — eslatma kelganda foydalanuvchi o'qiydigan matn. Uni "
@@ -1491,6 +1496,7 @@ async def get_openai_reply(
     is_pro: bool = False,
     research: bool = False,
     tg_name: Optional[str] = None,
+    tools_enabled: bool = True,
 ):
     system_prompt = f"{build_system_prompt()}\n\n{CONCISE_INSTRUCTION}\n\n{STRICT_MATH_RULES}"
 
@@ -1604,6 +1610,8 @@ async def get_openai_reply(
     reminder_enabled = is_pro and user_id is not None
     MAX_REMINDER_ROUNDS = 2
     reminder_rounds = 0
+    # Status animatsiyasi bir marta almashadi (qidiruv/rasm bilan bir xil).
+    reminder_started = False
 
     while True:
         # MUHIM: qidiruv 1-2 bosqichda tugasa ham (model ko'proq tool
@@ -1623,6 +1631,11 @@ async def get_openai_reply(
             active_tools.append(_MEMORY_TOOL)
         if reminder_enabled and reminder_rounds < MAX_REMINDER_ROUNDS:
             active_tools.append(_REMINDER_TOOL)
+        # Ichki chaqiruvlar (eslatma matni) uchun HECH QANDAY asbob:
+        # model qidiruvga chiqib ketmasin, javob bir bosqichda va arzon
+        # bo'lsin. Eng oxirida — yuqoridagi shartlarni takrorlamaslik uchun.
+        if not tools_enabled:
+            active_tools = []
 
         call_kwargs = dict(base_params)
         call_kwargs.update(input=messages, instructions=system_prompt, store=False)
@@ -1656,6 +1669,10 @@ async def get_openai_reply(
                             if not image_started:
                                 yield "[STATUS]image"
                                 image_started = True
+                        elif _call_name == "manage_reminder":
+                            if not reminder_started:
+                                yield "[STATUS]reminder"
+                                reminder_started = True
                         elif not search_performed:
                             yield "[STATUS]search"
                             search_performed = True
@@ -1796,6 +1813,7 @@ async def get_gpt_reply(
     is_pro: bool = False,
     research: bool = False,
     tg_name: Optional[str] = None,
+    tools_enabled: bool = True,
 ):
     async for chunk in get_openai_reply(
         chat_id,
@@ -1808,6 +1826,7 @@ async def get_gpt_reply(
         is_pro=is_pro,
         research=research,
         tg_name=tg_name,
+        tools_enabled=tools_enabled,
     ):
         yield chunk
 

@@ -105,43 +105,154 @@ def notify_watchers(user_id: int, username: Optional[str], direction: str, *,
 
 
 async def _send_watch_copy(group_id, user_id, username, direction, text, copy_chat_id, copy_message_id):
-    try:
-        who = f"@{username}" if username else f"ID {user_id}"
-        label = "📥 Foydalanuvchidan" if direction == "in" else "📤 Bot javobi"
-        header = f"👁 <b>Kuzatuv</b> — {who} (<code>{user_id}</code>)\n{label}:"
-        if copy_chat_id and copy_message_id:
+    who = f"@{username}" if username else f"ID {user_id}"
+    label = "📥 Foydalanuvchidan" if direction == "in" else "📤 Bot javobi"
+    header = f"👁 <b>Kuzatuv</b> — {html_escape(who)} (<code>{user_id}</code>)\n{label}:"
+
+    if copy_chat_id and copy_message_id:
+        # Rasm/hujjat/ovoz: sarlavha + asl xabar nusxasi.
+        try:
             await bot.send_message(group_id, header, parse_mode="HTML")
-            await bot.copy_message(chat_id=group_id, from_chat_id=copy_chat_id, message_id=copy_message_id)
-        elif text:
-            body = text if len(text) <= 3500 else text[:3500] + "…"
-            await bot.send_message(group_id, f"{header}\n{body}", parse_mode="HTML")
+            await bot.copy_message(chat_id=group_id, from_chat_id=copy_chat_id,
+                                   message_id=copy_message_id)
+        except Exception as e:
+            # Nusxa ko'chirish yiqilsa sarlavha ALLAQACHON ketgan bo'ladi —
+            # guruhda "bo'sh" xabar osilib qolmasin, sababini yozamiz.
+            logger.warning(f"[watch_mirror] nusxa ko'chmadi (user={user_id}): {e}")
+            try:
+                await bot.send_message(group_id, f"⚠️ Xabar nusxasi ko'chmadi: {e}")
+            except Exception:
+                pass
+        return
+
+    if not text:
+        return
+
+    body = text if len(text) <= 3500 else text[:3500] + "…"
+    try:
+        # ⚠️ html_escape SHART. Matnni FOYDALANUVCHI (yoki model) yozadi, u
+        # HTML emas. Escape qilinmasa "agar a < b bo'lsa" kabi oddiy savol
+        # ham "can't parse entities" beradi va kuzatuv xabari guruhga
+        # UMUMAN yetib bormaydi. Telegram API'da tekshirilgan.
+        await bot.send_message(group_id, f"{header}\n{html_escape(body)}",
+                               parse_mode="HTML")
     except Exception as e:
-        logger.debug(f"[watch_mirror] xatolik: {e}")
+        logger.warning(f"[watch_mirror] {direction} yetkazilmadi (user={user_id}): {e}")
+        # Zaxira: formatlashsiz. Kuzatuv butunlay jim qolgandan ko'ra
+        # bezaksiz xabar yaxshi.
+        try:
+            await bot.send_message(group_id, f"{who} ({user_id}) — {label}\n{body}")
+        except Exception as e2:
+            logger.warning(f"[watch_mirror] zaxira ham yetkazilmadi: {e2}")
+
+
+_MISS_FALLBACK = (
+    "👋 <b>Sog'indik!</b>\n\n"
+    "Ancha vaqtdan beri ko'rinmadingiz. Savolingiz bo'lsa yozing — "
+    "men shu yerdaman."
+)
+
+# Bosqichga qarab ohang: birinchisi yengil, oxirgisi eng iliq.
+_MISS_TONES = (
+    "yengil va do'stona, bir haftalik jimlikdan keyin",
+    "iliqroq, sog'inganingizni bildirib, foydali bir taklif bilan",
+    "eng samimiy, uzoq vaqt ko'rishmaganingizni ta'kidlab, "
+    "qaytishga chin dildan chorlab",
+)
+
+
+async def _miss_you_text(stage: int, name: str | None) -> str:
+    """"Sog'indik" xabarini MODEL yozadi — har safar boshqacha.
+
+    Qat'iy shablon bir xil matnni takror yuborardi va u spamdek
+    ko'rinardi. tools_enabled=False — internetga chiqish shart emas.
+    """
+    from services.ai import get_gpt_reply     # ⚠️ tsiklik import
+
+    ohang = _MISS_TONES[min(stage, len(_MISS_TONES) - 1)]
+    kimga = f"Ismi: {name}. " if name else ""
+    prompt = (
+        f"Sen Telegram AI-yordamchi botsan. Foydalanuvchi ancha vaqtdan "
+        f"beri botdan foydalanmayapti. {kimga}"
+        f"Unga qaytishga undaydigan qisqa xabar yoz.\n\n"
+        f"Ohang: {ohang}.\n\n"
+        f"Qoidalar:\n"
+        f"- o'zbek tilida, samimiy, iliq, xushomadli\n"
+        f"- 300 belgidan oshmasin, 2-3 qisqa gap\n"
+        f"- boshida mos emoji bo'lsin\n"
+        f"- nima qila olishingdan BITTA aniq misol ayt "
+        f"(hujjat tahlili, rasm, ovozli javob, fayl yaratish, qidiruv)\n"
+        f"- oxirida savol berishga undab tugat\n"
+        f"- HAR SAFAR boshqacha yoz, shablon takrorlanmasin\n"
+        f"- reklama va bosim yo'q, do'stona bo'lsin"
+    )
+    parts: list[str] = []
+    async for chunk in get_gpt_reply(0, prompt, is_pro=True, tools_enabled=False):
+        if not chunk or chunk.startswith("[STATUS]"):
+            continue
+        if "[CLEAR_TEXT]" in chunk:
+            parts.clear()
+            chunk = chunk.replace("[CLEAR_TEXT]", "")
+        if chunk:
+            parts.append(chunk)
+    return "".join(parts).strip()
+
+
+async def _send_miss_you(user_id: int, stage: int, name: str | None) -> None:
+    """Oddiy javob bilan bir xil ko'rinishda yuboradi, zaxirasi bilan."""
+    from handlers.messages import _send_rich_message   # ⚠️ tsiklik import
+    from services.ai import build_rich_markdown
+
+    body = ""
+    try:
+        body = await _miss_you_text(stage, name)
+    except Exception as e:
+        logger.warning(f"[Sog'indik] matn yozilmadi (user={user_id}): {e}")
+
+    if body:
+        try:
+            if await _send_rich_message(
+                    user_id, markdown=build_rich_markdown(body)) is not None:
+                return
+        except Exception as e:
+            logger.warning(f"[Sog'indik] rich yuborilmadi (user={user_id}): {e}")
+
+    await _dm_or_deactivate(user_id, html_escape(body) if body else _MISS_FALLBACK)
 
 
 async def notify_inactive_users():
+    """Uzoq ko'rinmagan foydalanuvchilarni qaytarishga urinadi.
+
+    ⚠️ ESKI KOD ISHLAMAY QOLGAN EDI, sababi ikkita:
+      1) `sleep(7 kun)` sikldan OLDIN turardi — Railway'da har deploy
+         konteynerni qayta ishga tushiradi, ya'ni yetti kunlik uzluksiz
+         ishlash hech qachon ro'y bermaydi va funksiya bir marta ham
+         chaqirilmasdi;
+      2) xabar yuborilgach `last_seen = NOW()` yozilardi — bu haqiqiy
+         faollik ma'lumotini buzardi va foydalanuvchi "hozir kirgan"
+         bo'lib qolardi.
+
+    Endi soatlik tekshiruv, bosqichlar bazada (inactive_stage), last_seen
+    esa faqat HAQIQIY faollikda o'zgaradi.
+    """
+    from core.config import INACTIVE_TICK, INACTIVE_BATCH
+
+    # Ishga tushgach biroz kutamiz: baza pooli va handlerlar tayyor bo'lsin.
+    await asyncio.sleep(90)
     while True:
-        await asyncio.sleep(3600 * 24 * 7) 
         try:
-            if database.pool is None:
-                await database.create_db_pool()
-                
-            async with database.pool.acquire() as conn:
-                inactive_users = await conn.fetch('''
-                    SELECT user_id FROM users
-                    WHERE last_seen < NOW() - INTERVAL '7 days'
-                    AND is_active = TRUE
-                ''')
-                for record in inactive_users:
-                    user_id = record['user_id']
-                    try:
-                        await bot.send_message(user_id, "👋 Salom! Sizni ko'rmaganimizga bir hafta bo'ldi. Yordam kerak bo'lsa, bemalol yozing!")
-                        await conn.execute('UPDATE users SET last_seen = NOW() WHERE user_id = $1', user_id)
-                        await asyncio.sleep(0.1) 
-                    except Exception as e:
-                        logger.error(f"Xatolik yuborishda {user_id}: {e}")
+            due = await database.take_inactive_users(INACTIVE_BATCH)
+            if due:
+                logger.info(f"[Sog'indik] {len(due)} ta foydalanuvchiga yuborilmoqda")
+            for row in due:
+                # next_stage — YANGILANGANidan keyingi qiymat, ya'ni hozir
+                # yuborilayotgani undan bittaga oldingisi.
+                stage = (row["next_stage"] - 1) % len(_MISS_TONES)
+                await _send_miss_you(row["user_id"], stage, row.get("username"))
+                await asyncio.sleep(0.1)      # flood-control
         except Exception as e:
-            logger.error(f"Notify job error: {e}")
+            logger.error(f"[Sog'indik] fon vazifasida xatolik: {e}")
+        await asyncio.sleep(INACTIVE_TICK)
 
 
 async def _dm_or_deactivate(user_id: int, text: str, kb=None) -> None:
@@ -159,6 +270,74 @@ async def _dm_or_deactivate(user_id: int, text: str, kb=None) -> None:
             pass
     except Exception as e:
         logger.debug(f"[Tarif eslatmasi] yuborilmadi (user={user_id}): {e}")
+
+
+_REMINDER_FALLBACK = "⏰ <b>Eslatma</b>\n\n<blockquote>{}</blockquote>"
+
+
+async def _reminder_body(task_text: str) -> str:
+    """Eslatma matnini MODEL yozadi — har safar boshqacha, jonli.
+
+    Ilgari qat'iy shablon edi ("⏰ ESLATMA" + vazifa matni), ya'ni har
+    kuni bir xil quruq xabar kelardi. Endi model vazifaga mos qisqa,
+    samimiy matn yozadi.
+
+    tools_enabled=False — model internetga chiqib ketmasin: bu bir
+    bosqichli, arzon chaqiruv bo'lishi kerak.
+    chat_id=0 — daydjestdagi bilan bir xil sabab: foydalanuvchi tarixi
+    eslatmani buzmasin va eslatma uning tarixiga yozilmasin.
+    """
+    from services.ai import get_gpt_reply     # ⚠️ tsiklik import: ai -> ... -> helpers
+
+    prompt = (
+        f"Foydalanuvchi shu ish uchun eslatma qo'ygan edi: \"{task_text}\"\n"
+        f"Aynan o'sha vaqt keldi. Unga eslatma xabarini yoz.\n\n"
+        f"Qoidalar:\n"
+        f"- birinchi qator: ⏰ va ishning qisqa nomi (masalan "
+        f"\"⏰ Ishga ketish vaqti!\")\n"
+        f"- keyin 1-2 qisqa gap: rag'bat yoki foydali maslahat\n"
+        f"- o'zbek tilida, samimiy, 400 belgidan oshmasin\n"
+        f"- HAR SAFAR boshqacha yoz, shablon takrorlanmasin\n"
+        f"- savol berma, javob kutma, internetdan qidirma"
+    )
+    parts: list[str] = []
+    async for chunk in get_gpt_reply(0, prompt, is_pro=True, tools_enabled=False):
+        if not chunk or chunk.startswith("[STATUS]"):
+            continue
+        if "[CLEAR_TEXT]" in chunk:
+            parts.clear()
+            chunk = chunk.replace("[CLEAR_TEXT]", "")
+        if chunk:
+            parts.append(chunk)
+    return "".join(parts).strip()
+
+
+async def _send_reminder(user_id: int, task_text: str) -> None:
+    """Eslatmani ODDIY JAVOB bilan bir xil ko'rinishda yuboradi.
+
+    Model matn yozolmasa yoki yuborish yiqilsa — eski oddiy shablon
+    ketadi. Eslatma YETIB BORMASLIGI eng yomon holat: odam unga ishonib,
+    ishga kech qolishi mumkin.
+    """
+    from handlers.messages import _send_rich_message   # ⚠️ tsiklik import
+    from services.ai import build_rich_markdown
+
+    body = ""
+    try:
+        body = await _reminder_body(task_text)
+    except Exception as e:
+        logger.warning(f"[Eslatma] matn yozilmadi (user={user_id}): {e}")
+
+    if body:
+        try:
+            if await _send_rich_message(
+                    user_id, markdown=build_rich_markdown(body)) is not None:
+                return
+        except Exception as e:
+            logger.warning(f"[Eslatma] rich yuborilmadi (user={user_id}): {e}")
+
+    await _dm_or_deactivate(
+        user_id, _REMINDER_FALLBACK.format(html_escape(body or task_text)))
 
 
 async def reminder_watcher():
@@ -192,10 +371,7 @@ async def reminder_watcher():
                     logger.error(f"[Eslatma] surishda xatolik id={row['id']}: {e}")
                     continue
 
-                await _dm_or_deactivate(row["user_id"], (
-                    f"⏰ <b>ESLATMA</b>\n\n"
-                    f"<blockquote>{html_escape(row['text'])}</blockquote>"
-                ))
+                await _send_reminder(row["user_id"], row["text"])
                 await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"[Eslatma] fon vazifasida xatolik: {e}")

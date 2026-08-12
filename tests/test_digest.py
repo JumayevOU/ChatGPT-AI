@@ -65,42 +65,74 @@ async def main():
     # ═══════════════════════════════════════════════════════════
     saved = []
 
-    async def fake_set_digest(user_id, hour, topics=None):
-        saved.append((user_id, hour, topics))
+    async def fake_set_digest(user_id, hours, topics=None):
+        saved.append((user_id, hours, topics))
+
+    tanlangan = {"digest_hours": None}
 
     async def fake_profile(user_id):
-        return {"plan_type": "pro", "digest_hour": None, "digest_topics": None}
+        return {"plan_type": "pro", "digest_hours": tanlangan["digest_hours"],
+                "digest_topics": "yangiliklar"}
 
     real_set = dg.database.set_digest
     real_profile = dg.database.get_full_user_profile
     dg.database.set_digest = fake_set_digest
     dg.database.get_full_user_profile = fake_profile
     try:
-        for bad in ("dg:h:99", "dg:h:0", "dg:h:-1", "dg:h:abc", "dg:h:", "dg:h:23"):
+        # 0 va 23 ENDI YAROQLI — kunning hamma soati tanlanadi.
+        for bad in ("dg:h:99", "dg:h:24", "dg:h:-1", "dg:h:abc", "dg:h:"):
             q = FakeQuery(bad)
             await dg.handle_digest_callback(q, FakeState())
             assert saved == [], (
                 f"KRITIK: yaroqsiz soat bazaga yetdi ({bad}): {saved}")
-        print(f"[1] {6} ta yaroqsiz soat rad etildi, bazaga tegilmadi OK")
+        print("[1] 5 ta yaroqsiz soat rad etildi, bazaga tegilmadi OK")
 
-        # Yaroqli soat esa saqlanadi
+        # Yaroqli soat RO'YXAT bo'lib saqlanadi.
+        for good in ("dg:h:0", "dg:h:8", "dg:h:23"):
+            saved.clear()
+            q = FakeQuery(good)
+            await dg.handle_digest_callback(q, FakeState())
+            kutilgan = [int(good.split(":")[2])]
+            assert saved == [(42, kutilgan, None)], f"{good}: {saved}"
+        print("[2] 0 dan 23 gacha har qanday soat saqlanadi OK")
+
+        # ── KO'P SOAT: bosilgani qo'shiladi, qayta bosilsa olinadi ──
+        saved.clear()
+        tanlangan["digest_hours"] = "8"
+        q = FakeQuery("dg:h:12")
+        await dg.handle_digest_callback(q, FakeState())
+        assert saved == [(42, [8, 12], None)], f"qo'shilmadi: {saved}"
+
+        saved.clear()
+        tanlangan["digest_hours"] = "8,12"
         q = FakeQuery("dg:h:8")
         await dg.handle_digest_callback(q, FakeState())
-        assert saved == [(42, 8, None)], f"yaroqli soat saqlanishi kerak: {saved}"
-        print("[2] yaroqli soat saqlandi OK")
+        assert saved == [(42, [12], None)], f"olib tashlanmadi: {saved}"
+        print("[3] soat qo'shiladi va qayta bosilganda olib tashlanadi OK")
+
+        # "Barcha soatlar" va "Tozalash".
+        saved.clear()
+        tanlangan["digest_hours"] = "8"
+        await dg.handle_digest_callback(FakeQuery("dg:all"), FakeState())
+        assert saved == [(42, list(range(24)), None)], f"hammasi: {saved}"
+        saved.clear()
+        await dg.handle_digest_callback(FakeQuery("dg:clear"), FakeState())
+        assert saved == [(42, [], None)], f"tozalash: {saved}"
+        print("[4] barcha soatlar va tozalash ishlaydi OK")
 
         # ── Bepul foydalanuvchi obuna bo'lolmaydi ──────────────
         saved.clear()
 
         async def free_profile(user_id):
-            return {"plan_type": "free", "digest_hour": None, "digest_topics": None}
+            return {"plan_type": "free", "digest_hours": None, "digest_topics": None}
 
         dg.database.get_full_user_profile = free_profile
-        q = FakeQuery("dg:h:8")
-        await dg.handle_digest_callback(q, FakeState())
-        assert saved == [], "KRITIK: bepul foydalanuvchi daydjestga obuna bo'ldi"
-        assert any("Pro" in a for a in q.answers), q.answers
-        print("[3] bepul foydalanuvchi obuna bo'lolmadi OK")
+        for data in ("dg:h:8", "dg:all", "dg:clear"):
+            q = FakeQuery(data)
+            await dg.handle_digest_callback(q, FakeState())
+            assert saved == [], f"KRITIK: bepul foydalanuvchi obuna bo'ldi ({data})"
+            assert any("Pro" in a for a in q.answers), q.answers
+        print("[5] bepul foydalanuvchi obuna bo'lolmadi OK")
     finally:
         dg.database.set_digest = real_set
         dg.database.get_full_user_profile = real_profile
@@ -117,7 +149,7 @@ async def main():
         dg.get_gpt_reply = real_reply
     assert body == "Yangi matn", (
         f"[CLEAR_TEXT] dan oldingi oraliq matn tashlanishi kerak edi: {body!r}")
-    print("[4] [CLEAR_TEXT] oraliq matnni tozaladi OK")
+    print("[6] [CLEAR_TEXT] oraliq matnni tozaladi OK")
 
     # Sandbox va tarix o'chiqligini tasdiqlaymiz
     captured = {}
@@ -137,7 +169,7 @@ async def main():
         "buzmasin va daydjest uning tarixiga yozilmasin")
     assert "output_files" not in captured["kwargs"], (
         "output_files berilmasligi kerak — sandbox o'chiq va arzon qolsin")
-    print("[5] daydjest tarixdan va sandboxdan ajratilgan OK")
+    print("[7] daydjest tarixdan va sandboxdan ajratilgan OK")
 
     # ═══════════════════════════════════════════════════════════
     # 3) Klaviatura
@@ -148,20 +180,27 @@ async def main():
         assert f"dg:h:{h}" in datas, f"{h} soati tugmasi yo'q"
     assert "dg:off" not in datas, "obuna yo'q ekan, o'chirish tugmasi keraksiz"
 
-    kb = dg._hours_keyboard(8)
+    kb = dg._hours_keyboard([8, 12])
     datas = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert "dg:off" in datas, "faol obunada o'chirish tugmasi bo'lishi kerak"
+    assert "dg:off" in datas, "faol obunada to'xtatish tugmasi bo'lishi kerak"
     styles = {b.callback_data: getattr(b, "style", None)
               for row in kb.inline_keyboard for b in row}
-    assert styles["dg:h:8"] == "success", "tanlangan soat ajralib turishi kerak"
+    # Tanlangan soatlar AJRALIB turishi kerak — aks holda foydalanuvchi
+    # qaysi soatlar yoqilganini umuman bilmaydi.
+    assert styles["dg:h:8"] == "success" and styles["dg:h:12"] == "success"
     assert styles["dg:h:7"] is None, "tanlanmagan soat oddiy bo'lishi kerak"
     assert styles["dg:off"] == "danger"
-    print("[6] klaviatura holatga qarab to'g'ri chiziladi OK")
+    # 24 ta soat + boshqaruv tugmalari ekranga sig'sin.
+    assert all(len(row) <= 8 for row in kb.inline_keyboard), "qator juda uzun"
+    print("[8] klaviatura ko'p tanlovni to'g'ri ko'rsatadi OK")
 
-    # Har daydjest ostida obunani to'xtatish tugmasi
+    # Har daydjest ostida to'xtatish tugmasi
     datas = [b.callback_data for row in dg._digest_keyboard().inline_keyboard for b in row]
-    assert datas == ["dg:off"], datas
-    print("[7] daydjest ostida to'xtatish tugmasi bor OK")
+    assert "dg:off" in datas, datas
+    # Tugma nomi MANTIQAN to'g'ri bo'lsin: "obuna" emas, "daydjest".
+    nomlar = [b.text for row in dg._digest_keyboard().inline_keyboard for b in row]
+    assert not any("buna" in n for n in nomlar), f"tugma nomi noto'g'ri: {nomlar}"
+    print("[9] daydjest ostida to'xtatish tugmasi bor va nomi to'g'ri OK")
 
     # ═══════════════════════════════════════════════════════════
     # 4) Mavzular matni
@@ -193,7 +232,7 @@ async def main():
     finally:
         dg.database.set_digest = real_set
         dg.database.get_full_user_profile = real_profile
-    print("[8] mavzular matni tekshiruvi OK")
+    print("[10] mavzular matni tekshiruvi OK")
 
     # ═══════════════════════════════════════════════════════════
     # 5) Tick oralig'i mantiqiy
@@ -201,9 +240,61 @@ async def main():
     assert dg._DIGEST_TICK <= 1800, (
         "tick 30 daqiqadan katta bo'lsa foydalanuvchi so'ragan soatdan "
         "sezilarli kech oladi")
-    print("[9] tekshiruv oralig'i mos OK")
+    print("[11] tekshiruv oralig'i mos OK")
 
-    print("\ndigest: barcha tekshiruvlar o'tdi (9/9).")
+    # ═══════════════════════════════════════════════════════════
+    # 5) Soat ro'yxatini o'qish va yuborish FORMATI
+    # ═══════════════════════════════════════════════════════════
+    from db.database import parse_digest_hours as parse
+    assert parse("7,12,21") == [7, 12, 21]
+    assert parse([7, 12, 21]) == [7, 12, 21]
+    assert parse("21,7,7,12") == [7, 12, 21], "takror va tartib tozalanmadi"
+    assert parse("") == [] and parse(None) == []
+    # Yaroqsizlari BAZAGA yetmasin — bu qiymatlar mijozdan keladi.
+    assert parse("99,-1,abc,,24,5") == [5]
+    assert parse([True, False]) == [], "bool int bo'lib o'tib ketmasin"
+    print("[12] soat ro'yxati tozalanadi va tekshiriladi OK")
+
+    # Daydjest matni ODDIY JAVOB bilan bir xil yo'ldan ketsin.
+    # Ilgari HTML sifatida yuborilardi, model esa Markdown yozadi —
+    # foydalanuvchi xom "**qalin**" va "[matn](havola)" ko'rardi.
+    yuborilgan = {}
+
+    async def fake_rich(user_id, markdown=None, reply_markup=None, **kw):
+        yuborilgan["markdown"] = markdown
+        yuborilgan["kb"] = reply_markup
+        return {"message_id": 1}
+
+    real_rich, real_dm = dg._send_rich_message, dg._dm_or_deactivate
+    dg._send_rich_message = fake_rich
+    dg._dm_or_deactivate = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("rich ishlaganda zaxiraga tushmasligi kerak"))
+    try:
+        await dg._send_digest(42, "**Bugungi** xulosa\n[Manba](https://x.uz)")
+    finally:
+        dg._send_rich_message, dg._dm_or_deactivate = real_rich, real_dm
+    assert "**Bugungi**" in yuborilgan["markdown"], "markdown saqlanmadi"
+    assert yuborilgan["kb"] is not None, "tugma biriktirilmadi"
+    print("[13] daydjest markdown yo'lidan yuboriladi OK")
+
+    # Rich yo'l ishlamasa — eski HTML yo'liga tushadi (jim qolmaydi).
+    zaxira = {}
+
+    async def fail_rich(*a, **k):
+        return None
+
+    async def fake_dm(user_id, text, kb=None):
+        zaxira["text"] = text
+
+    dg._send_rich_message, dg._dm_or_deactivate = fail_rich, fake_dm
+    try:
+        await dg._send_digest(42, "a < b bo'lsa")
+    finally:
+        dg._send_rich_message, dg._dm_or_deactivate = real_rich, real_dm
+    assert "&lt;" in zaxira["text"], "zaxirada matn escape qilinmagan"
+    print("[14] rich yiqilsa HTML zaxirasi ishlaydi OK")
+
+    print("\ndigest: barcha tekshiruvlar o'tdi (14/14).")
 
 
 if __name__ == "__main__":
