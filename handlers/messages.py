@@ -158,6 +158,71 @@ def _balance_markdown_fences(text: str) -> str:
     return text
 
 
+# Telegram bitta xabarga 4096 belgi ruxsat beradi. 4000 — zaxira bilan:
+# build_rich_markdown() matnga <tg-math>/<tg-time> kabi teglar qo'shib,
+# uzunlikni biroz oshiradi.
+MAX_MESSAGE_CHARS = 4000
+
+
+def _split_for_telegram(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Uzun javobni Telegram chegarasiga sig'adigan bo'laklarga bo'ladi.
+
+    ⚠️ NEGA KERAK: MAX_OUTPUT_TOKENS = 16000, ya'ni javob bemalol 15-20 ming
+    belgi bo'lishi mumkin. Ilgari bo'lish umuman yo'q edi va bunday javobda
+    HAR QANDAY yuborish urinishi rad etilardi — foydalanuvchi animatsiyani
+    ko'rib turib, oxirida HECH NARSA olmasdi (botdagi eng yomon nosozlik).
+
+    Kesish joyi ataylab shu tartibda tanlanadi: bo'sh qator → qator → bo'sh
+    joy. Hech qaysisi topilmasa (masalan uzun bitta so'z yoki base64) qattiq
+    kesiladi. Bo'lak o'rtasida ochiq qolgan kod bloki yopiladi va keyingi
+    bo'lakda qayta ochiladi, aks holda qolgan matn butunlay kod bo'lib
+    ko'rinardi.
+    """
+    parts: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        window = rest[:limit]
+        cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
+        if cut < limit // 2:          # mos chegara yo'q — qattiq kesamiz
+            cut = limit
+        parts.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        parts.append(rest)
+
+    out: list[str] = []
+    open_lang = ""                    # oldingi bo'lakda ochiq qolgan blok tili
+    for part in parts:
+        if open_lang:
+            part = f"```{open_lang}\n{part}"
+        if part.count("```") % 2 != 0:
+            # Oxirgi ochilgan blokning tili — keyingi bo'lakda tiklanadi.
+            open_lang = part.rsplit("```", 1)[1].split("\n", 1)[0].strip()
+            part += "\n```"
+        else:
+            open_lang = ""
+        out.append(part)
+    return out or [text]
+
+
+async def _answer_plain(message: Message, text: str):
+    """Oddiy xabar yuboradi; Markdown parslanmasa — bezaksiz yuboradi.
+
+    ⚠️ Bu ikkinchi urinish MAJBURIY. Model matnida yolg'iz `*` yoki `_`
+    bo'lishi odatiy hol va Telegram bunday xabarni butunlay rad etadi.
+    Ilgari bu yerda faqat bitta Markdown urinishi bor edi — u yiqilsa javob
+    izsiz yo'qolardi.
+    """
+    try:
+        return await message.answer(text, parse_mode="Markdown")
+    except Exception:
+        try:
+            return await message.answer(text)
+        except Exception as e:
+            logger.warning(f"[Javob] yuborilmadi (chat={message.chat.id}): {e}")
+            return None
+
+
 def _format_elapsed(elapsed: float) -> str:
     """O'tgan vaqtni foydalanuvchiga ko'rsatish uchun formatlaydi.
 
@@ -341,6 +406,16 @@ STATUS_TEXTS_BY_TYPE: dict[str, list[str]] = {
         "Rejaga yozilmoqda",
         "Tasdiqlanmoqda",
     ],
+    # Uzoq muddatli xotira. Bu YAGONA status turi bo'lib, foydalanuvchi
+    # o'zi so'ramagan ish haqida gapiradi — shuning uchun ohang ham
+    # boshqacha: texnik emas, shaxsiy. Nuqtalarni animatsiya o'zi qo'shadi
+    # (`{status}{dots}`), shuning uchun matn oxirida "..." YOZILMAYDI.
+    "memory": [
+        "Sizni eslab qolayapman",
+        "Muhim ma'lumot saqlanmoqda",
+        "Xotiramga yozib qo'yayapman",
+        "Sizni yaxshiroq tanib olyapman",
+    ],
 }
 
 # ID'lar core/config.py:CUSTOM_EMOJI da — yagona manba, chunki ular
@@ -459,7 +534,12 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
             return
         last_push = now
 
+        # Oraliq ko'rinish ham Telegram chegarasiga sig'ishi kerak: uzun
+        # javobda har bir push rad etilib, oqim "muzlab" qolardi. Yakuniy
+        # matn baribir to'liq, bo'laklarga bo'linib yuboriladi (pastda).
         display_text = current_text if final else current_text + " ✍️"
+        if len(display_text) > MAX_MESSAGE_CHARS:
+            display_text = display_text[:MAX_MESSAGE_CHARS - 1] + "…"
         safe_markdown = _balance_markdown_fences(display_text)
 
         if using_rich_draft:
@@ -496,6 +576,8 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
                     active_type = "image"
                 elif "reminder" in chunk:
                     active_type = "reminder"
+                elif "memory" in chunk:
+                    active_type = "memory"
                 elif "search" in chunk:
                     active_type = "search"
                 continue
@@ -526,37 +608,39 @@ async def process_stream_draft(message: Message, stream_generator, content_type:
 
     finally:
         stop_animation.set()
+        anim_task.cancel()
         try:
-            anim_task.cancel()
             await anim_task
-        except Exception:
+        # ⚠️ asyncio.CancelledError — BaseException, ya'ni `except Exception`
+        # UNI TUTMAYDI. Animator aynan shu paytda Telegram'ga so'rov yuborib
+        # turgan bo'lsa (tez keladigan qisqa javoblarda odatiy hol), cancel()
+        # uni uzib, xato BUTUN handler'dan yuqoriga otilardi: ball yechilgan,
+        # javob tayyor, lekin foydalanuvchi HECH NARSA olmasdi. Uni bu yerda
+        # yutamiz — animator ataylab to'xtatilgan, bu xato emas.
+        except (asyncio.CancelledError, Exception):
             pass
 
     clean_text = full_text.replace("[NO_BUTTON]", "").strip()
     if clean_text:
-        final_rich = build_rich_markdown(clean_text)
-        if is_private_chat:
-            result = await _send_rich_message(
-                message.chat.id,
-                markdown=final_rich,
-                message_thread_id=message_thread_id,
-            )
-            if result is None:
-                if fallback_message is None:
-                    try:
-                        fallback_message = await message.answer(clean_text, parse_mode="Markdown")
-                    except Exception:
-                        fallback_message = None
-                if fallback_message is not None:
-                    await _edit_message_fallback(fallback_message, clean_text)
-        else:
-            if fallback_message is None:
-                try:
-                    fallback_message = await message.answer(clean_text, parse_mode="Markdown")
-                except Exception:
-                    fallback_message = None
-            if fallback_message is not None:
-                await _edit_message_fallback(fallback_message, clean_text)
+        # Har bir bo'lak uchun uchta pog'ona: rich xabar → kutish xabarini
+        # tahrirlash (faqat birinchisi) → oddiy yangi xabar. Pastki
+        # pog'onalar Markdown'siz ham urinadi, shuning uchun javob
+        # "yo'qolib qolishi" uchun uchalasi ham yiqilishi kerak.
+        for idx, part in enumerate(_split_for_telegram(clean_text)):
+            if is_private_chat:
+                sent = await _send_rich_message(
+                    message.chat.id,
+                    markdown=build_rich_markdown(part),
+                    message_thread_id=message_thread_id,
+                )
+                if sent is not None:
+                    continue
+
+            if idx == 0 and fallback_message is not None:
+                if await _edit_message_fallback(fallback_message, part) is not None:
+                    continue
+
+            await _answer_plain(message, part)
 
     return clean_text
 

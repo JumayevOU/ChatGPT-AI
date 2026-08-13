@@ -202,16 +202,32 @@ def build_rich_markdown(text: str) -> str:
 
 async def get_youtube_summary(chat_id: int, video_id: str, user_prompt: str = ""):
     def _fetch_transcript():
-        import youtube_transcript_api
+        """Subtitrlarni [{'text': ...}, ...] ko'rinishida qaytaradi.
+
+        ⚠️ youtube-transcript-api 1.0 dan boshlab `YouTubeTranscriptApi`
+        STATIK emas, ODDIY sinf: `get_transcript()` va `list_transcripts()`
+        BUTUNLAY olib tashlangan, o'rniga `api.fetch()` va `api.list()`.
+        Eski kod shu sababli har doim AttributeError berib, bare `except`
+        ichida yutilardi va foydalanuvchi doim "subtitrlari yo'q" javobini
+        olardi — ya'ni YouTube xulosasi umuman ishlamayotgan edi.
+        Versiya requirements.txt da qadab qo'yilgan, aks holda keyingi
+        deploy buni jimgina qaytarib keladi.
+        """
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        api = YouTubeTranscriptApi()
         try:
-            return youtube_transcript_api.YouTubeTranscriptApi.get_transcript(video_id, languages=['uz', 'ru', 'en'])
-        except:
-            try:
-                transcript_list = youtube_transcript_api.YouTubeTranscriptApi.list_transcripts(video_id)
-                for transcript in transcript_list:
-                    return transcript.fetch()
-            except Exception:
-                return []
+            return api.fetch(video_id, languages=['uz', 'ru', 'en']).to_raw_data()
+        except Exception as e:
+            logger.debug(f"[YouTube] to'g'ridan-to'g'ri olinmadi ({video_id}): {e}")
+
+        # Zaxira: kerakli til yo'q — mavjud BIRINCHI subtitr (avtomatik
+        # yaratilgani yoki boshqa tildagisi) ham xulosa uchun yetadi.
+        try:
+            for transcript in api.list(video_id):
+                return transcript.fetch().to_raw_data()
+        except Exception as e:
+            logger.debug(f"[YouTube] subtitrlar ro'yxati olinmadi ({video_id}): {e}")
         return []
 
     try:
@@ -1602,6 +1618,8 @@ async def get_openai_reply(
     # 3: bir nechta yangi fakt + tuzatish bitta xabarga sig'adi.
     MAX_MEMORY_ROUNDS = 3
     memory_rounds = 0
+    # Status animatsiyasi bir marta almashadi (qidiruv/rasm bilan bir xil).
+    memory_started = False
 
     # Eslatmalar: Pro imkoniyati, rasm tool'i bilan bir xil shart. Guest
     # rejimda user_id=None → o'zi o'chadi.
@@ -1673,6 +1691,20 @@ async def get_openai_reply(
                             if not reminder_started:
                                 yield "[STATUS]reminder"
                                 reminder_started = True
+                        elif _call_name == "update_memory":
+                            # ⚠️ Bu shox SHART: usiz chaqiruv pastdagi
+                            # `elif` ga tushib, "Internetdan ma'lumot
+                            # qidirilmoqda" degan YOLG'ON status ko'rsatardi —
+                            # model esa shunchaki ismni saqlayotgan edi.
+                            #
+                            # Javob MATNIDA xotira tilga olinmaydi
+                            # (_MEMORY_TOOL description'idagi qat'iy qoida),
+                            # lekin status animatsiyasi — boshqa narsa: u
+                            # bot odamni eslab qolayotganini bir zumga
+                            # ko'rsatib, javob bilan birga o'chib ketadi.
+                            if not memory_started:
+                                yield "[STATUS]memory"
+                                memory_started = True
                         elif not search_performed:
                             yield "[STATUS]search"
                             search_performed = True
@@ -1778,27 +1810,25 @@ async def get_openai_reply(
             reminder_rounds += 1
         total_rounds += 1
 
-        if file_task_ran or image_ran:
-            # Tool'dan OLDIN yozilgan oraliq matn ("Hozir tayyorlab
-            # beraman...") yakuniy javobga yopishib qolmasligi uchun
-            # ekranni tozalaymiz — yakuniy javob toza boshlanadi.
-            yield "[CLEAR_TEXT]"
+        # Tool'dan OLDIN yozilgan oraliq matn ("Hozir tayyorlab beraman...")
+        # yakuniy javobga yopishib qolmasligi uchun ekranni tozalaymiz —
+        # keyingi bosqichda model javobni boshidan qayta yozadi.
+        needs_clear = file_task_ran or image_ran or memory_ran or reminder_ran
 
-            # `_SYNTHESIS_SYSTEM` faqat INTERNET QIDIRUVI natijalarini
-            # formatlash uchun (manbalar ro'yxati, emoji, kamida 3-5 xat
-            # boshi). Fayl vazifasida u mutlaqo noo'rin — javob qisqa
-            # bo'lishi kerak, chunki asosiy natija biriktirilgan faylning
-            # o'zi. Shuning uchun uni qo'shmasdan keyingi bosqichga o'tamiz.
-            continue
-
-        if not synthesis_injected:
-            # Birinchi qidiruv natijasi endigina qo'shildi — shu joydan
-            # boshlab, model qachon (shu bosqichda yoki keyingisida)
-            # yakuniy javob bersa ham, u manba-formatlash qoidasiga rioya
-            # qiladi.
+        # ⚠️ `_SYNTHESIS_SYSTEM` FAQAT internet qidiruvi natijalarini
+        # formatlash uchun (manbalar ro'yxati, emoji, kamida 3-5 xat boshi).
+        # Shart ilgari `if not synthesis_injected` edi, ya'ni HAR QANDAY
+        # tooldan keyin qo'shilardi: "mening ismim Aziz" degan xabar
+        # update_memory'ni chaqirib, javob manbalar ro'yxatli qidiruv
+        # hisobotiga aylanib ketardi. Endi u qidiruvga QAT'IY bog'langan —
+        # fayl, rasm, xotira va eslatma oqimlariga umuman tegmaydi.
+        if search_ran and not synthesis_injected:
             messages.append({"role": "developer", "content": _SYNTHESIS_SYSTEM})
-            yield "[CLEAR_TEXT]"
             synthesis_injected = True
+            needs_clear = True
+
+        if needs_clear:
+            yield "[CLEAR_TEXT]"
 
 
 async def get_gpt_reply(

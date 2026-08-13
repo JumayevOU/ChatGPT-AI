@@ -669,6 +669,7 @@ CUSTOM_EMOJI: dict[str, str] = {
     "broom":    "5979070714890686650",   # 🧹
     "write":    "5470060791883374114",   # ✍️
     "reminder": "5251537301154062376",   # ⏰ eslatma qo'yilayotgan status
+    "memory":   "5449867148442745397",   # 🧠 foydalanuvchi eslab qolinayotgan status
 }
 # ⚠️ "document" kaliti 🛠 ID'sini saqlaydi, lekin handlers/pro.py da
 # pe('document', '📄') deb ishlatiladi — ya'ni Pro xabarida 📄 o'rniga

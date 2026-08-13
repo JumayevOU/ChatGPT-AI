@@ -1,29 +1,40 @@
-aiogram
-openai
-pydantic>=2.0
-python-dotenv
-aiohttp
-asyncpg
-pydub
-edge-tts
-SpeechRecognition
-PyMuPDF
-youtube-transcript-api
-ddgs
+# ⚠️ VERSIYALAR ATAYLAB QADALGAN (==). Ilgari bu yerda faqat nomlar turardi
+# va har deploy eng yangi versiyani olib kelardi. Aynan shu tufayli
+# youtube-transcript-api 1.0 ga sakraganda `get_transcript()` yo'qolib,
+# YouTube xulosasi jimgina butunlay ishlamay qoldi — hech qanday xato
+# ko'rinmadi, foydalanuvchi doim "subtitrlari yo'q" javobini oldi.
+# Versiyani ko'tarish = ataylab qilinadigan qadam, tasodif emas.
 
-python-docx
+# ── Bot va API ──────────────────────────────────────────────────────
+aiogram==3.29.0            # Guest Mode (guest_message) uchun >= 3.29 shart
+openai==2.44.0
+pydantic==2.11.10
+python-dotenv==1.0.1
+aiohttp==3.9.5
+asyncpg==0.30.0
 
-# Fayl yaratish/tahrirlash uchun (sandbox.py ichida GPT yozgan kod
-# ishlatadi). Sandbox oldindan o'rnatilgan kutubxonalarga tayanadi —
-# runtime'da pip install qilinmaydi.
-openpyxl
-xlrd
-xlwt
-xlutils
-pandas
-python-pptx
-reportlab
-pypdf
-matplotlib
-beautifulsoup4
-lxml
+# ── Ovoz ────────────────────────────────────────────────────────────
+pydub==0.25.1
+edge-tts==7.2.8
+SpeechRecognition==3.16.1
+
+# ── Kontent manbalari ───────────────────────────────────────────────
+PyMuPDF==1.27.2.3
+youtube-transcript-api==1.2.4   # 1.x API: api.fetch() / api.list()
+ddgs==9.14.2
+python-docx==1.2.0
+
+# ── Fayl yaratish/tahrirlash (sandbox.py ichida GPT yozgan kod
+#    ishlatadi). Sandbox oldindan o'rnatilgan kutubxonalarga tayanadi —
+#    runtime'da pip install qilinmaydi. ────────────────────────────────
+openpyxl==3.1.5
+xlrd==2.0.2
+xlwt==1.3.0
+xlutils==2.0.0
+pandas==2.2.2
+python-pptx==1.0.2
+reportlab==5.0.0
+pypdf==6.14.2
+matplotlib==3.10.9
+beautifulsoup4==4.13.4
+lxml==6.0.2
